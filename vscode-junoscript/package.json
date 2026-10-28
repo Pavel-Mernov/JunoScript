@@ -1,13 +1,17 @@
 {
   "name": "junoscript",
   "displayName": "JunoScript",
-  "description": "Syntax highlighting for JunoScript (.jn)",
+  "description": "Syntax highlighting, hover types, and inlay hints for JunoScript (.jn)",
   "version": "0.0.1",
   "publisher": "junoscript",
   "engines": {
     "vscode": "^1.80.0"
   },
   "categories": ["Programming Languages"],
+  "activationEvents": [
+    "onLanguage:junoscript"
+  ],
+  "main": "./out/extension.js",
   "contributes": {
     "languages": [
       {
@@ -23,6 +27,29 @@
         "scopeName": "source.junoscript",
         "path": "./syntaxes/junoscript.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "JunoScript",
+      "properties": {
+        "junoscript.inlayHints.variableTypes.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inferred types next to variables, parameters, and for-of bindings."
+        },
+        "junoscript.inlayHints.parameterNames.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show parameter names before call arguments."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --sourcemap"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
   }
 }
