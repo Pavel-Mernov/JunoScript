@@ -1,0 +1,28 @@
+{
+  "name": "junoscript",
+  "displayName": "JunoScript",
+  "description": "Syntax highlighting for JunoScript (.jn)",
+  "version": "0.0.1",
+  "publisher": "junoscript",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "junoscript",
+        "aliases": ["JunoScript", "juno", "jn"],
+        "extensions": [".jn"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "junoscript",
+        "scopeName": "source.junoscript",
+        "path": "./syntaxes/junoscript.tmLanguage.json"
+      }
+    ]
+  }
+}
