@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "rootDir": ".",
+    "outDir": "dist",
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["Lexer/lexer.ts", "Lexer/parser.ts", "Modules/**/*.ts", "Runtime/**/*.ts", "CLI/**/*.ts"],
+  "exclude": ["node_modules", "dist", "Lexer/**/*.test.ts"]
+}

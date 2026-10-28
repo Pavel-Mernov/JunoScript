@@ -1,0 +1,96 @@
+# JunoScript statement smoke-test file
+
+import juno from 'juno'
+import node from 'juno:node'
+import { console } from 'juno'
+import { console } from 'juno:node'
+
+console.log("=== JunoScript smoke tests ===")
+console.log("Imports parsed successfully")
+console.log("CLI arguments:", console.args)
+
+type Error =
+    {
+        type: string = "Error"
+        message: string
+        stackTrace: Array<string> = []
+    }
+
+type Result<T> = T | Error
+
+type User =
+    {
+        name: string
+        age?: number
+        readonly id: number
+        greet(): string
+    }
+
+console.log("Type declarations: Error, Result<T>, User")
+
+let answer: number = 40 + 2
+console.log("let answer =", answer)
+
+const greeting = "Hello, " + "JunoScript"
+console.log("const greeting =", greeting)
+
+let items = [1, 2, 3]
+console.log("Array items:", items)
+
+let empty: null = null
+console.log("Null value:", empty)
+
+fun add(x: number, y: number): number =
+    return x + y
+
+console.log("add(2, 3) =", add(2, 3))
+
+fun greet(name: string) =
+    return "Hello, " + name
+
+console.log(greet("Pasha"))
+
+let person =
+    {
+        name: "Pasha"
+        age: 30
+        id: 1
+        greet() =
+            return "Hello, " + this.name
+    }
+
+console.log("Person name:", person.name)
+console.log("Object method:", person.greet())
+
+let boundGreet = person.greet
+console.log("Saved method keeps context:", boundGreet())
+
+if answer == 42
+    console.log("if branch: answer is 42")
+    let message = greet(person.name)
+    console.log(message)
+else
+    console.log("else branch: unexpected answer")
+    let message = "Unexpected result"
+    console.log(message)
+
+for const item of items
+    console.log("for-of item:", item)
+    let doubled = item * 2
+    console.log("doubled:", doubled)
+
+let isNumber = isType<number>(answer)
+console.log("isType<number>(answer):", isNumber)
+
+let combined: User & { active: boolean } = person
+console.log("Intersection-typed value:", combined)
+
+console.log("Введите имя:")
+let userName: string = console.read()
+console.log("Привет, " + userName)
+
+console.log("Введите несколько строк (завершите ввод EOF):")
+let inputLines: string[] = console.readLines()
+console.log("Прочитанные строки:", inputLines)
+
+console.log("=== Smoke tests complete ===")

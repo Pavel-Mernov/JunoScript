@@ -1,0 +1,15 @@
+{
+  "name": "junoscript",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "junode": "./dist/CLI/junode.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node ./dist/CLI/junode.js"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5"
+  }
+}
