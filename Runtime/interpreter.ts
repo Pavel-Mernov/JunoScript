@@ -3,13 +3,13 @@ import { resolve } from 'node:path'
 import { Expression, Parameter, Statement, parse } from '../Lexer/parser'
 import { resolveModule } from '../Modules'
 
-type Environment = Map<string, unknown>
+type Environment = Map<string, { value: unknown; mutable: boolean }>
 type RuntimeFunction = { __junoFunction: true; params: Parameter[]; body: Statement[]; closure: Environment; thisValue?: unknown }
 class ReturnValue { constructor(readonly value: unknown) {} }
 
 export class Interpreter {
     private readonly globals: Environment = new Map()
-    constructor() { this.globals.set('isType', (value: unknown, type: unknown) => matchesType(value, type)) }
+    constructor() { this.globals.set('isType', { value: (value: unknown, type: unknown) => matchesType(value, type), mutable: false }) }
 
     run(source: string): void { this.executeStatements(parse(source), this.globals) }
 
@@ -25,23 +25,23 @@ export class Interpreter {
         switch (statement.kind) {
             case 'Import': {
                 const module = resolveModule(statement.module) as Record<string, unknown>
-                if (statement.defaultImport) env.set(statement.defaultImport, module)
+                if (statement.defaultImport) this.declare(env, statement.defaultImport, module, false)
                 for (const name of statement.namedImports) {
                     if (!(name in module)) throw new Error(`Module '${statement.module}' has no export '${name}'`)
-                    env.set(name, module[name])
+                    this.declare(env, name, module[name], false)
                 }
                 return
             }
-            case 'Variable': env.set(statement.name, statement.initializer ? this.evaluate(statement.initializer, env) : null); return
+            case 'Variable': this.declare(env, statement.name, statement.initializer ? this.evaluate(statement.initializer, env) : null, statement.mutable); return
             case 'TypeDeclaration': return
-            case 'FunctionDeclaration': env.set(statement.name, { __junoFunction: true, params: statement.params, body: statement.body, closure: env } satisfies RuntimeFunction); return
+            case 'FunctionDeclaration': this.declare(env, statement.name, { __junoFunction: true, params: statement.params, body: statement.body, closure: env } satisfies RuntimeFunction, false); return
             case 'Return': throw new ReturnValue(statement.value ? this.evaluate(statement.value, env) : undefined)
             case 'ExpressionStatement': this.evaluate(statement.expression, env); return
             case 'If': this.executeStatements(this.evaluate(statement.condition, env) ? statement.consequent : (statement.alternate ?? []), new Map(env)); return
             case 'While': while (this.evaluate(statement.condition, env)) this.executeStatements(statement.body, new Map(env)); return
             case 'ForOf': {
                 const values = this.evaluate(statement.iterable, env) as any
-                for (const value of values) { const local = new Map(env); local.set(statement.binding, value); this.executeStatements(statement.body, local) }
+                for (const value of values) { const local = new Map(env); this.declare(local, statement.binding, value, statement.mutable); this.executeStatements(statement.body, local) }
                 return
             }
         }
@@ -51,9 +51,16 @@ export class Interpreter {
         switch (expression.kind) {
             case 'Literal': return expression.value
             case 'Identifier':
-                if (expression.name === 'this') return env.get('this')
+                if (expression.name === 'this') return env.get('this')?.value
                 if (!env.has(expression.name)) throw new ReferenceError(`${expression.name} is not defined`)
-                return env.get(expression.name)
+                return env.get(expression.name)?.value
+            case 'Assignment': {
+                const binding = env.get(expression.name)
+                if (!binding) throw new ReferenceError(`${expression.name} is not defined`)
+                if (!binding.mutable) throw new TypeError(`Cannot assign to constant '${expression.name}'`)
+                binding.value = this.evaluate(expression.value, env)
+                return binding.value
+            }
             case 'Array': return expression.elements.map(item => this.evaluate(item, env))
             case 'Object': {
                 const object: Record<string, any> = {}
@@ -102,15 +109,25 @@ export class Interpreter {
                 if (callee?.__junoFunction) return this.callFunction(callee, args, thisValue ?? callee.thisValue)
                 throw new TypeError('Value is not callable')
             }
-            case 'Function': return { __junoFunction: true, params: expression.params, body: expression.body, closure: env } satisfies RuntimeFunction
+            case 'Function': {
+                const body = expression.expressionBody
+                    ? [{ kind: 'Return', value: expression.expressionBody } as Statement]
+                    : expression.body
+                return { __junoFunction: true, params: expression.params, body, closure: env } satisfies RuntimeFunction
+            }
         }
     }
 
     private callFunction(fn: RuntimeFunction, args: unknown[], thisValue?: unknown): unknown {
         const local = new Map(fn.closure)
-        if (thisValue !== undefined) local.set('this', thisValue)
-        fn.params.forEach((param, index) => local.set(param.name, args[index] ?? (param.defaultValue ? this.evaluate(param.defaultValue, local) : null)))
+        if (thisValue !== undefined) local.set('this', { value: thisValue, mutable: false })
+        fn.params.forEach((param, index) => this.declare(local, param.name, args[index] ?? (param.defaultValue ? this.evaluate(param.defaultValue, local) : null), true))
         return this.executeStatements(fn.body, local)
+    }
+
+    private declare(env: Environment, name: string, value: unknown, mutable: boolean): void {
+        if (env.has(name)) throw new SyntaxError(`Duplicate declaration '${name}' in the same scope`)
+        env.set(name, { value, mutable })
     }
 }
 

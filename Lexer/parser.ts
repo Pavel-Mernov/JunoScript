@@ -9,10 +9,11 @@ export type Expression =
     | { kind: 'Identifier'; name: string; loc?: Loc } | { kind: 'Array'; elements: Expression[]; loc?: Loc }
     | { kind: 'Object'; properties: { key: string; keyLoc?: Loc; value: Expression }[]; loc?: Loc }
     | { kind: 'Unary'; operator: string; operand: Expression; loc?: Loc }
+    | { kind: 'Assignment'; name: string; loc?: Loc; value: Expression }
     | { kind: 'Binary'; operator: string; left: Expression; right: Expression }
     | { kind: 'Member'; object: Expression; property: string; optional: boolean; loc?: Loc }
     | { kind: 'Call'; callee: Expression; args: Expression[]; typeArguments?: TypeNode[] }
-    | { kind: 'Function'; params: Parameter[]; returnType?: TypeNode; body: Statement[] }
+    | { kind: 'Function'; params: Parameter[]; returnType?: TypeNode; body: Statement[]; expressionBody?: Expression }
 export type Statement =
     | { kind: 'Variable'; name: string; loc?: Loc; mutable: boolean; type?: TypeNode; initializer?: Expression }
     | { kind: 'Import'; module: 'juno' | 'juno:node'; defaultImport?: string; defaultImportLoc?: Loc; namedImports: string[]; namedImportLocs?: Loc[] }
@@ -95,6 +96,10 @@ export class Parser {
             return { kind: 'TypeDeclaration', name, loc, generics, genericLocs, value }
         }
         if (this.match('Keyword', 'return')) return { kind: 'Return', value: this.is('Newline') || this.is('Dedent') || this.is('EOF') ? undefined : this.expression() }
+        if (this.is('Identifier') && (this.tokens[this.pos + 1]?.type === 'Equal')) {
+            const { name, loc } = this.identifier(); this.take('Equal')
+            return { kind: 'ExpressionStatement', expression: { kind: 'Assignment', name, loc, value: this.expression() } }
+        }
         if (this.match('Keyword', 'if')) {
             const condition = this.expression(), consequent = this.block(); this.separators()
             const alternate = this.match('Keyword', 'else') ? this.block() : undefined
@@ -163,8 +168,13 @@ export class Parser {
         return names
     }
     private type(): TypeNode {
-        let left = this.typeAtom()
-        while (this.is('Pipe') || this.is('Ampersand')) { const operator = this.current.type; this.pos++; const right = this.typeAtom(); const kind = operator === 'Pipe' ? 'UnionType' : 'IntersectionType'; left = left.kind === kind ? { ...left, types: [...left.types, right] } : { kind, types: [left, right] } }
+        const optional = () => {
+            let value = this.typeAtom()
+            if (this.match('Question')) value = { kind: 'UnionType', types: [value, { kind: 'NamedType', name: 'null' }] }
+            return value
+        }
+        let left = optional()
+        while (this.is('Pipe') || this.is('Ampersand')) { const operator = this.current.type; this.pos++; const right = optional(); const kind = operator === 'Pipe' ? 'UnionType' : 'IntersectionType'; left = left.kind === kind ? { ...left, types: [...left.types, right] } : { kind, types: [left, right] } }
         return left
     }
     private typeAtom(): TypeNode {
@@ -247,7 +257,47 @@ export class Parser {
             const token = this.tokens[this.pos - 1]
             return { kind: 'Identifier', name: String(this.value(token)), loc: this.loc(token) }
         }
-        if (this.match('LeftParen')) { const value = this.expression(); this.take('RightParen'); return value }
+        if (this.match('LeftParen')) {
+            const saved = this.pos - 1
+            let arrow = false
+            try {
+                const params: Parameter[] = []
+                if (!this.is('RightParen')) {
+                    do {
+                        const { name, loc } = this.identifier(), type = this.match('Colon') ? this.type() : undefined
+                        params.push({ name, loc, type })
+                    } while (this.match('Comma'))
+                }
+                this.take('RightParen')
+                const hasReturnType = this.match('Colon')
+                const returnType = hasReturnType ? this.type() : undefined
+                if (hasReturnType && this.match('FatArrow')) {
+                    arrow = true
+                    if (this.match('Newline')) {
+                        this.take('Indent', 'Expected an indented function body')
+                        const body: Statement[] = []; this.separators()
+                        while (!this.is('Dedent') && !this.is('EOF')) { body.push(this.statement()); this.separators() }
+                        this.take('Dedent')
+                        return { kind: 'Function', params, returnType, body }
+                    }
+                    return { kind: 'Function', params, returnType, body: [], expressionBody: this.expression() }
+                }
+                if (this.match('FatArrow')) {
+                    arrow = true
+                    if (this.match('Newline')) {
+                        this.take('Indent', 'Expected an indented function body')
+                        const body: Statement[] = []; this.separators()
+                        while (!this.is('Dedent') && !this.is('EOF')) { body.push(this.statement()); this.separators() }
+                        this.take('Dedent')
+                        return { kind: 'Function', params, returnType, body }
+                    }
+                    const expressionBody = this.expression()
+                    return { kind: 'Function', params, returnType, body: [], expressionBody }
+                }
+            } catch (error) { if (arrow) throw error /* Otherwise try parsing as a grouped expression. */ }
+            this.pos = saved
+            const value = this.expression(); this.take('RightParen'); return value
+        }
         if (this.match('LeftBracket')) {
             const token = this.tokens[this.pos - 1]
             const elements: Expression[] = []; if (!this.is('RightBracket')) do { elements.push(this.expression()) } while (this.match('Comma')); this.take('RightBracket'); return { kind: 'Array', elements, loc: this.loc(token) }
@@ -270,4 +320,24 @@ export class Parser {
     }
 }
 
-export function parse(source: string): Statement[] { return new Parser(Lexer(source).tokenize()).parse() }
+export function parse(source: string): Statement[] {
+    const statements = new Parser(Lexer(source).tokenize()).parse()
+    validateDeclarations(statements)
+    return statements
+}
+
+function validateDeclarations(statements: Statement[]): void {
+    const names = new Set<string>()
+    for (const statement of statements) {
+        const declarations: string[] = []
+        if (statement.kind === 'Import') declarations.push(...(statement.defaultImport ? [statement.defaultImport] : []), ...statement.namedImports)
+        else if (statement.kind === 'Variable' || statement.kind === 'FunctionDeclaration' || statement.kind === 'TypeDeclaration') declarations.push(statement.name)
+        for (const name of declarations) {
+            if (names.has(name)) throw new SyntaxError(`Duplicate declaration '${name}' in the same scope`)
+            names.add(name)
+        }
+        if (statement.kind === 'If') { validateDeclarations(statement.consequent); if (statement.alternate) validateDeclarations(statement.alternate) }
+        else if (statement.kind === 'While' || statement.kind === 'ForOf') validateDeclarations(statement.body)
+        else if (statement.kind === 'FunctionDeclaration') validateDeclarations(statement.body)
+    }
+}

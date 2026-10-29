@@ -2,7 +2,6 @@
 
 import juno from 'juno'
 import node from 'juno:node'
-import { console } from 'juno'
 import { console } from 'juno:node'
 
 console.log("=== JunoScript smoke tests ===")

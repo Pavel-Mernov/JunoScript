@@ -1,0 +1,23 @@
+# Anonymous arrow functions and nullable types
+import { console } from 'juno:node'
+
+const foo = (a: number): number? =>
+    return a
+
+const bar = (b: number): number? => b
+
+fun describe(value: number?): string =
+    if value == null
+        return "null"
+    return "number"
+
+const maybeNumber: number? = null
+const anotherMaybe: number? = foo(10)
+const directResult = bar(20)
+
+console.log("foo(10):", foo(10))
+console.log("bar(20):", directResult)
+console.log("nullable value:", maybeNumber)
+console.log("foo result:", anotherMaybe)
+console.log("describe null:", describe(maybeNumber))
+console.log("describe number:", describe(directResult))
