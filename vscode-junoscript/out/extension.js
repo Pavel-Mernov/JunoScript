@@ -461,7 +461,8 @@ var Parser = class {
       const members = [];
       this.objectSeparators();
       while (!this.is("RightBrace") && !this.is("EOF")) {
-        const readonly = this.match("Keyword", "readonly"), constant = this.match("Keyword", "const"), { name, loc } = this.propertyName(), optional = this.match("Question");
+        const readonly = this.match("Keyword", "readonly"), constant = this.match("Keyword", "const"), { name, loc } = this.propertyName();
+        let optional = this.match("Question");
         let params, method2 = false, type;
         if (this.is("LeftParen")) {
           method2 = true;
@@ -470,6 +471,13 @@ var Parser = class {
         } else {
           this.take("Colon", "Expected ':' after field name");
           type = this.type();
+          if (type.kind === "UnionType") {
+            const nonNull = type.types.filter((part) => !(part.kind === "NamedType" && part.name === "null"));
+            if (nonNull.length === 1 && nonNull.length !== type.types.length) {
+              optional = true;
+              type = nonNull[0];
+            }
+          }
         }
         const defaultValue = this.match("Equal") ? this.expression() : void 0;
         if (constant && defaultValue === void 0) this.fail("const type fields need a default value");
@@ -833,13 +841,21 @@ function sameType(a, b) {
   }
   return a.kind === "function" || a.kind === "unknown";
 }
-function typeFromNode(type) {
-  if (type.kind === "NamedType") return primitive(type.name);
-  if (type.kind === "ArrayType") return { kind: "array", element: typeFromNode(type.element) };
-  if (type.kind === "GenericType" && (type.name === "Array" || type.name === "ReadonlyArray")) {
-    return { kind: "array", element: type.args[0] ? typeFromNode(type.args[0]) : unknownType };
+function typeFromNode(type, aliases = /* @__PURE__ */ new Map(), resolving = /* @__PURE__ */ new Set()) {
+  if (type.kind === "NamedType") {
+    const alias = aliases.get(type.name);
+    if (alias && !resolving.has(type.name)) {
+      const next = new Set(resolving);
+      next.add(type.name);
+      return typeFromNode(alias, aliases, next);
+    }
+    return primitive(type.name);
   }
-  if (type.kind === "ObjectType") return { kind: "object", fields: new Map(type.members.map((member) => [member.name, typeFromNode(member.type)])) };
+  if (type.kind === "ArrayType") return { kind: "array", element: typeFromNode(type.element, aliases, resolving) };
+  if (type.kind === "GenericType" && (type.name === "Array" || type.name === "ReadonlyArray")) {
+    return { kind: "array", element: type.args[0] ? typeFromNode(type.args[0], aliases, resolving) : unknownType };
+  }
+  if (type.kind === "ObjectType") return { kind: "object", fields: new Map(type.members.filter((member) => !member.optional).map((member) => [member.name, typeFromNode(member.type, aliases, resolving)])) };
   if (type.kind === "FunctionType") return { kind: "function" };
   return unknownType;
 }
@@ -860,10 +876,14 @@ function isAssignable(expected, actual) {
   return true;
 }
 function validateArithmeticTypes(statements, variables = /* @__PURE__ */ new Map()) {
+  const aliases = /* @__PURE__ */ new Map();
+  for (const statement of statements) {
+    if (statement.kind === "TypeDeclaration") aliases.set(statement.name, statement.value);
+  }
   for (const statement of statements) {
     switch (statement.kind) {
       case "Variable": {
-        const declaredType = statement.type ? typeFromNode(statement.type) : void 0;
+        const declaredType = statement.type ? typeFromNode(statement.type, aliases) : void 0;
         const inferredType = statement.initializer ? inferExpressionType(statement.initializer, variables) : void 0;
         const type = declaredType ?? inferredType;
         if (type) variables.set(statement.name, type);
@@ -1059,6 +1079,28 @@ function lookupMember(type, name, env) {
   if (member.method) return { kind: "fun", params: member.params ?? [], returnType: member.type };
   return member.type;
 }
+function isAssignableTo(expected, actual, env) {
+  const target = resolveType(expected, env);
+  const value = resolveType(actual, env);
+  if (isNamedType(target, "any") || isNamedType(value, "any")) return true;
+  if (target.kind === "UnionType") return target.types.some((part) => isAssignableTo(part, value, env));
+  if (value.kind === "UnionType") return value.types.every((part) => isAssignableTo(target, part, env));
+  if (target.kind === "ArrayType" && value.kind === "ArrayType") return isAssignableTo(target.element, value.element, env);
+  if (target.kind === "ObjectType" && value.kind === "ObjectType") {
+    return target.members.filter((member) => !member.optional && !member.method).every((member) => {
+      const actualMember = value.members.find((item) => item.name === member.name);
+      return Boolean(actualMember && isAssignableTo(member.type, actualMember.type, env));
+    }) && target.members.filter((member) => !member.method).every((member) => {
+      const actualMember = value.members.find((item) => item.name === member.name);
+      return !actualMember || isAssignableTo(member.type, actualMember.type, env);
+    });
+  }
+  if (target.kind !== value.kind) return false;
+  if (target.kind === "NamedType" && value.kind === "NamedType") return target.name === value.name;
+  if (target.kind === "GenericType" && value.kind === "GenericType") return target.name === value.name && target.args.length === value.args.length && target.args.every((item, index) => isAssignableTo(item, value.args[index], env));
+  if (target.kind === "FunctionType" && value.kind === "FunctionType") return target.params.length === value.params.length && target.params.every((item, index) => isAssignableTo(item, value.params[index], env)) && isAssignableTo(target.result, value.result, env);
+  return true;
+}
 function inferLiteral(value) {
   if (value === null) return named("null");
   if (typeof value === "string") return named("string");
@@ -1101,6 +1143,8 @@ function inferExpression(expression, env) {
   switch (expression.kind) {
     case "Literal":
       return inferLiteral(expression.value);
+    case "Assignment":
+      return inferExpression(expression.value, env);
     case "Identifier": {
       if (expression.name === "this") {
         const self = env.get("this");
@@ -1136,8 +1180,9 @@ function inferExpression(expression, env) {
     }
     case "Member": {
       const objectType = inferExpression(expression.object, env);
+      const resolvedObjectType = resolveType(objectType, env);
       const member = lookupMember(objectType, expression.property, env);
-      if (!member) return named("any");
+      if (!member) return resolvedObjectType.kind === "ObjectType" ? named("null") : named("any");
       if (isFunctionSymbol(member)) return { kind: "FunctionType", params: member.params.map((param) => param.type ?? named("any")), result: member.returnType };
       return member;
     }
@@ -1295,6 +1340,37 @@ var Analyzer = class {
       case "Variable": {
         this.walkExpression(statement.initializer, env);
         const type = statement.type ?? (statement.initializer ? inferExpression(statement.initializer, env) : named("any"));
+        if (statement.type && statement.initializer?.kind === "Object") {
+          const expected = resolveType(statement.type, env);
+          if (expected.kind === "ObjectType") {
+            const properties = statement.initializer.properties;
+            const actual = inferExpression(statement.initializer, env);
+            const actualMembers = actual.kind === "ObjectType" ? actual.members : [];
+            for (const property of properties) {
+              const member = expected.members.find((item) => item.name === property.key);
+              if (!member) continue;
+              const propertyType = inferExpression(property.value, env);
+              if (!isAssignableTo(member.type, propertyType, env)) {
+                if (property.keyLoc) this.diagnostics.push({ line: property.keyLoc.line, column: property.keyLoc.column, length: property.key.length, message: `Type '${printType(propertyType)}' is not assignable to type '${printType(member.type)}' for '${property.key}'.` });
+              }
+            }
+            const missing = expected.members.filter((member) => !member.optional && !member.method && !actualMembers.some((item) => item.name === member.name));
+            if (missing.length) {
+              const loc = statement.initializer.kind === "Object" ? statement.initializer.loc : void 0;
+              if (loc) this.diagnostics.push({
+                line: loc.line,
+                column: loc.column,
+                length: 1,
+                message: `Missing required properties: ${missing.map((member) => `'${member.name}'`).join(", ")}.`,
+                fix: { title: "Fill all required properties", line: loc.line, fields: missing.map((member) => ({ name: member.name, type: printType(member.type) })) }
+              });
+            }
+          } else if (!isAssignableTo(statement.type, inferExpression(statement.initializer, env), env)) {
+            this.addDiagnostic(statement.initializer.loc, `Type '${printType(inferExpression(statement.initializer, env))}' is not assignable to type '${printType(statement.type)}'.`);
+          }
+        } else if (statement.type && statement.initializer && !isAssignableTo(statement.type, inferExpression(statement.initializer, env), env)) {
+          this.addDiagnostic(statement.initializer.loc, `Type '${printType(inferExpression(statement.initializer, env))}' is not assignable to type '${printType(statement.type)}'.`);
+        }
         const symbol = { kind: "var", mutable: statement.mutable, type };
         this.bind(env, statement.name, symbol);
         const printed = printSymbol(statement.name, symbol);
@@ -1464,11 +1540,19 @@ var Analyzer = class {
       case "Member": {
         this.walkExpression(expression.object, env, thisType);
         const objectType = inferExpression(expression.object, env);
+        const resolvedObjectType = resolveType(objectType, env);
         const member = lookupMember(objectType, expression.property, env);
         if (isFunctionSymbol(member)) {
           this.addHover(expression.property, expression.loc, `(method) ${expression.property}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}`);
         } else if (member) {
           this.addHover(expression.property, expression.loc, `(property) ${expression.property}: ${printType(member)}`);
+        } else if (resolvedObjectType.kind === "ObjectType") {
+          if (expression.loc) this.diagnostics.push({
+            line: expression.loc.line,
+            column: expression.loc.column,
+            length: expression.property.length,
+            message: `Property '${expression.property}' does not exist on type '${printType(objectType)}'.`
+          });
         }
         return;
       }
@@ -1594,10 +1678,44 @@ ${info.docs}`);
           return [item];
         });
       }
-    })
+    }),
+    vscode.languages.registerCodeActionsProvider(selector, {
+      provideCodeActions(document, _range, context2) {
+        const result = analyze(document.getText());
+        if (!result) return [];
+        const actions = [];
+        for (const diagnostic of context2.diagnostics) {
+          const info = result.diagnostics.find((item) => item.fix && item.line === diagnostic.range.start.line + 1 && item.message === diagnostic.message);
+          if (!info?.fix) continue;
+          const action = new vscode.CodeAction(info.fix.title, vscode.CodeActionKind.QuickFix);
+          action.diagnostics = [diagnostic];
+          const insertLine = Math.min(info.fix.line, document.lineCount - 1);
+          const lineText = document.lineAt(insertLine).text;
+          let indent = lineText.match(/^\s*/)?.[0] ?? "";
+          if (lineText.trimStart().startsWith("}")) {
+            const braceIndent = document.lineAt(Math.max(0, insertLine - 1)).text.match(/^\s*/)?.[0] ?? "";
+            indent = `${braceIndent}    `;
+          }
+          const rows = info.fix.fields.map((field2) => `${indent}${field2.name}: ${placeholderFor(field2.type)},
+`).join("");
+          action.edit = new vscode.WorkspaceEdit();
+          action.edit.insert(document.uri, new vscode.Position(insertLine, 0), rows);
+          actions.push(action);
+        }
+        return actions;
+      }
+    }, { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] })
   );
 }
 function deactivate() {
+}
+function placeholderFor(type) {
+  if (type === "string") return "''";
+  if (type === "number" || type === "BigInt") return type === "BigInt" ? "0n" : "0";
+  if (type === "boolean") return "false";
+  if (type.endsWith("[]")) return "[]";
+  if (type.startsWith("{")) return "{}";
+  return "null";
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

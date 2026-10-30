@@ -6,3 +6,25 @@ import { console } from 'juno:node'
 
 const bigint1 = 1n
 
+type Person = {
+    name : string
+    surname : string?,
+    age : number
+}
+
+const paul : Person = {
+    name : 'Paul',
+    surname : 'Mernov',
+    age : 23
+}
+
+const maria : Person = {
+    age: 22,
+    name : 'Maria'
+}
+
+console.log(maria.surname)
+
+type Address = {
+    id : string | number
+}

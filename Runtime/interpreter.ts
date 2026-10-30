@@ -1,14 +1,15 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { Expression, Parameter, Statement, parse } from '../Lexer/parser'
+import { Expression, Parameter, Statement, TypeNode, parse } from '../Lexer/parser'
 import { resolveModule } from '../Modules'
 
-type Environment = { bindings: Map<string, { value: unknown; mutable: boolean }>; parent?: Environment }
+type Binding = { value: unknown; mutable: boolean; declaredType?: TypeNode }
+type Environment = { bindings: Map<string, Binding>; types: Map<string, TypeNode>; parent?: Environment }
 type RuntimeFunction = { __junoFunction: true; params: Parameter[]; body: Statement[]; closure: Environment; thisValue?: unknown }
 class ReturnValue { constructor(readonly value: unknown) {} }
 
 export class Interpreter {
-    private readonly globals: Environment = { bindings: new Map() }
+    private readonly globals: Environment = { bindings: new Map(), types: new Map() }
     constructor() { this.globals.bindings.set('isType', { value: (value: unknown, type: unknown) => matchesType(value, type), mutable: false }) }
 
     run(source: string): void { this.executeStatements(parse(source), this.globals) }
@@ -18,7 +19,7 @@ export class Interpreter {
             try { this.execute(statement, env) }
             catch (error) { if (error instanceof ReturnValue) return error.value; throw error }
         }
-        return undefined
+        return null
     }
 
     private execute(statement: Statement, env: Environment): void {
@@ -32,8 +33,8 @@ export class Interpreter {
                 }
                 return
             }
-            case 'Variable': this.declare(env, statement.name, statement.initializer ? this.evaluate(statement.initializer, env) : null, statement.mutable); return
-            case 'TypeDeclaration': return
+            case 'Variable': this.declare(env, statement.name, statement.initializer ? this.evaluate(statement.initializer, env) : null, statement.mutable, statement.type); return
+            case 'TypeDeclaration': env.types.set(statement.name, statement.value); return
             case 'FunctionDeclaration': this.declare(env, statement.name, { __junoFunction: true, params: statement.params, body: statement.body, closure: env } satisfies RuntimeFunction, false); return
             case 'Return': throw new ReturnValue(statement.value ? this.evaluate(statement.value, env) : null)
             case 'ExpressionStatement': this.evaluate(statement.expression, env); return
@@ -51,7 +52,7 @@ export class Interpreter {
         switch (expression.kind) {
             case 'Literal': return expression.value
             case 'Identifier':
-                if (expression.name === 'this') return this.lookup(env, 'this')?.value
+                if (expression.name === 'this') return this.lookup(env, 'this')?.value ?? null
                 const binding = this.lookup(env, expression.name)
                 if (!binding) throw new ReferenceError(`${expression.name} is not defined`)
                 return binding.value
@@ -155,8 +156,7 @@ export class Interpreter {
             }
             case 'Member': {
                 const object = this.evaluate(expression.object, env)
-                if (object == null && expression.optional) return null
-                return (object as any)?.[expression.property]
+                return this.readMember(object, expression.property, expression.optional, expression.object, env)
             }
             case 'Index': {
                 const object = this.evaluate(expression.object, env)
@@ -173,16 +173,19 @@ export class Interpreter {
                 } else {
                     throw new TypeError(`Cannot index value of type ${typeof object}`)
                 }
-                return (object as any)[index as any]
+                return (object as any)[index as any] ?? null
             }
             case 'Call': {
                 let thisValue: unknown
                 let callee: any
-                if (expression.callee.kind === 'Member') { thisValue = this.evaluate(expression.callee.object, env); callee = (thisValue as any)?.[expression.callee.property] }
+                if (expression.callee.kind === 'Member') {
+                    thisValue = this.evaluate(expression.callee.object, env)
+                    callee = this.readMember(thisValue, expression.callee.property, expression.callee.optional, expression.callee.object, env)
+                }
                 else callee = this.evaluate(expression.callee, env)
                 const args = expression.args.map(arg => this.evaluate(arg, env))
                 if (expression.typeArguments?.length) args.push(expression.typeArguments[0].kind === 'NamedType' ? expression.typeArguments[0].name : 'object')
-                if (typeof callee === 'function') return callee.apply(thisValue, args)
+                if (typeof callee === 'function') return callee.apply(thisValue, args) ?? null
                 if (callee?.__junoFunction) return this.callFunction(callee, args, thisValue ?? callee.thisValue)
                 throw new TypeError('Value is not callable')
             }
@@ -202,18 +205,61 @@ export class Interpreter {
         return this.executeStatements(fn.body, local) ?? null
     }
 
-    private declare(env: Environment, name: string, value: unknown, mutable: boolean): void {
+    private declare(env: Environment, name: string, value: unknown, mutable: boolean, declaredType?: TypeNode): void {
         if (env.bindings.has(name)) throw new SyntaxError(`Duplicate declaration '${name}' in the same scope`)
-        env.bindings.set(name, { value, mutable })
+        env.bindings.set(name, { value, mutable, declaredType })
     }
 
-    private childEnvironment(parent: Environment): Environment { return { bindings: new Map(), parent } }
-    private lookup(env: Environment, name: string): { value: unknown; mutable: boolean } | undefined {
+    private childEnvironment(parent: Environment): Environment { return { bindings: new Map(), types: new Map(), parent } }
+    private lookup(env: Environment, name: string): Binding | undefined {
         for (let current: Environment | undefined = env; current; current = current.parent) {
             const binding = current.bindings.get(name)
             if (binding) return binding
         }
         return undefined
+    }
+
+    private typeOf(expression: Expression, env: Environment): TypeNode | null {
+        if (expression.kind === 'Identifier') return this.lookup(env, expression.name)?.declaredType ?? null
+        if (expression.kind === 'Member') {
+            const parentType = this.typeOf(expression.object, env)
+            return parentType ? this.findTypeMember(parentType, expression.property, env)?.type ?? null : null
+        }
+        return null
+    }
+
+    private findTypeMember(type: TypeNode, name: string, env: Environment, resolving = new Set<string>()): { type: TypeNode; optional: boolean } | null {
+        if (type.kind === 'NamedType') {
+            if (resolving.has(type.name)) return null
+            for (let current: Environment | undefined = env; current; current = current.parent) {
+                const alias = current.types.get(type.name)
+                if (alias) return this.findTypeMember(alias, name, env, new Set([...resolving, type.name]))
+            }
+            return null
+        }
+        if (type.kind === 'IntersectionType') {
+            for (const part of type.types) {
+                const member = this.findTypeMember(part, name, env, resolving)
+                if (member) return member
+            }
+            return null
+        }
+        if (type.kind !== 'ObjectType') return null
+        const member = type.members.find(item => item.name === name)
+        return member ? { type: member.type, optional: member.optional } : null
+    }
+
+    private readMember(object: unknown, property: string, optional: boolean, owner: Expression, env: Environment): unknown {
+        if (object === null || object === undefined) {
+            if (optional) return null
+            throw new TypeError(`Cannot read property '${property}' of null`)
+        }
+        const declaredType = this.typeOf(owner, env)
+        if (declaredType && !this.findTypeMember(declaredType, property, env)) {
+            throw new TypeError(`Property '${property}' does not exist on declared type`)
+        }
+        const value = (object as any)[property]
+        return value === undefined ? null : value
     }
 }
 

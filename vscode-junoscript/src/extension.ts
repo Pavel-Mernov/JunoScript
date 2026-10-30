@@ -54,8 +54,42 @@ export function activate(context: vscode.ExtensionContext): void {
                     return [item]
                 })
             }
-        })
+        }),
+        vscode.languages.registerCodeActionsProvider(selector, {
+            provideCodeActions(document, _range, context) {
+                const result = analyze(document.getText())
+                if (!result) return []
+                const actions: vscode.CodeAction[] = []
+                for (const diagnostic of context.diagnostics) {
+                    const info = result.diagnostics.find(item => item.fix && item.line === diagnostic.range.start.line + 1 && item.message === diagnostic.message)
+                    if (!info?.fix) continue
+                    const action = new vscode.CodeAction(info.fix.title, vscode.CodeActionKind.QuickFix)
+                    action.diagnostics = [diagnostic]
+                    const insertLine = Math.min(info.fix.line, document.lineCount - 1)
+                    const lineText = document.lineAt(insertLine).text
+                    let indent = lineText.match(/^\s*/)?.[0] ?? ''
+                    if (lineText.trimStart().startsWith('}')) {
+                        const braceIndent = document.lineAt(Math.max(0, insertLine - 1)).text.match(/^\s*/)?.[0] ?? ''
+                        indent = `${braceIndent}    `
+                    }
+                    const rows = info.fix.fields.map(field => `${indent}${field.name}: ${placeholderFor(field.type)},\n`).join('')
+                    action.edit = new vscode.WorkspaceEdit()
+                    action.edit.insert(document.uri, new vscode.Position(insertLine, 0), rows)
+                    actions.push(action)
+                }
+                return actions
+            }
+        }, { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] })
     )
 }
 
 export function deactivate(): void {}
+
+function placeholderFor(type: string): string {
+    if (type === 'string') return "''"
+    if (type === 'number' || type === 'BigInt') return type === 'BigInt' ? '0n' : '0'
+    if (type === 'boolean') return 'false'
+    if (type.endsWith('[]')) return '[]'
+    if (type.startsWith('{')) return '{}'
+    return 'null'
+}

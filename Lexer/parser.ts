@@ -183,10 +183,17 @@ export class Parser {
         if (this.match('LeftBrace')) {
             const members: TypeMember[] = []; this.objectSeparators()
             while (!this.is('RightBrace') && !this.is('EOF')) {
-                const readonly = this.match('Keyword', 'readonly'), constant = this.match('Keyword', 'const'), { name, loc } = this.propertyName(), optional = this.match('Question')
+                const readonly = this.match('Keyword', 'readonly'), constant = this.match('Keyword', 'const'), { name, loc } = this.propertyName(); let optional = this.match('Question')
                 let params: Parameter[] | undefined, method = false, type: TypeNode
                 if (this.is('LeftParen')) { method = true; params = this.parameters(); type = this.match('Colon') ? this.type() : { kind: 'NamedType', name: 'void' } }
-                else { this.take('Colon', "Expected ':' after field name"); type = this.type() }
+                else {
+                    this.take('Colon', "Expected ':' after field name"); type = this.type()
+                    // Accept `field: Type?` as optional property syntax as well as `field?: Type`.
+                    if (type.kind === 'UnionType') {
+                        const nonNull = type.types.filter(part => !(part.kind === 'NamedType' && part.name === 'null'))
+                        if (nonNull.length === 1 && nonNull.length !== type.types.length) { optional = true; type = nonNull[0] }
+                    }
+                }
                 const defaultValue = this.match('Equal') ? this.expression() : undefined
                 if (constant && defaultValue === undefined) this.fail('const type fields need a default value')
                 members.push({ name, loc, optional, readonly, constant, type, defaultValue, method, params }); this.objectSeparators()
@@ -575,7 +582,7 @@ function typeFromNode(type: TypeNode, aliases: Map<string, TypeNode> = new Map()
     if (type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray')) {
         return { kind: 'array', element: type.args[0] ? typeFromNode(type.args[0], aliases, resolving) : unknownType }
     }
-    if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.map(member => [member.name, typeFromNode(member.type, aliases, resolving)])) }
+    if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.filter(member => !member.optional).map(member => [member.name, typeFromNode(member.type, aliases, resolving)])) }
     if (type.kind === 'FunctionType') return { kind: 'function' }
     return unknownType
 }

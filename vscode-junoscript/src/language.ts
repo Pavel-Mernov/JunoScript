@@ -21,6 +21,7 @@ export type DiagnosticInfo = {
     column: number
     length: number
     message: string
+    fix?: { title: string; line: number; fields: { name: string; type: string }[] }
 }
 
 type SymbolInfo =
@@ -165,6 +166,29 @@ function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | Functi
     return member.type
 }
 
+function isAssignableTo(expected: TypeNode, actual: TypeNode, env: Env): boolean {
+    const target = resolveType(expected, env)
+    const value = resolveType(actual, env)
+    if (isNamedType(target, 'any') || isNamedType(value, 'any')) return true
+    if (target.kind === 'UnionType') return target.types.some(part => isAssignableTo(part, value, env))
+    if (value.kind === 'UnionType') return value.types.every(part => isAssignableTo(target, part, env))
+    if (target.kind === 'ArrayType' && value.kind === 'ArrayType') return isAssignableTo(target.element, value.element, env)
+    if (target.kind === 'ObjectType' && value.kind === 'ObjectType') {
+        return target.members.filter(member => !member.optional && !member.method).every(member => {
+            const actualMember = value.members.find(item => item.name === member.name)
+            return Boolean(actualMember && isAssignableTo(member.type, actualMember.type, env))
+        }) && target.members.filter(member => !member.method).every(member => {
+            const actualMember = value.members.find(item => item.name === member.name)
+            return !actualMember || isAssignableTo(member.type, actualMember.type, env)
+        })
+    }
+    if (target.kind !== value.kind) return false
+    if (target.kind === 'NamedType' && value.kind === 'NamedType') return target.name === value.name
+    if (target.kind === 'GenericType' && value.kind === 'GenericType') return target.name === value.name && target.args.length === value.args.length && target.args.every((item, index) => isAssignableTo(item, value.args[index], env))
+    if (target.kind === 'FunctionType' && value.kind === 'FunctionType') return target.params.length === value.params.length && target.params.every((item, index) => isAssignableTo(item, value.params[index], env)) && isAssignableTo(target.result, value.result, env)
+    return true
+}
+
 function inferLiteral(value: string | number | bigint | boolean | null): TypeNode {
     if (value === null) return named('null')
     if (typeof value === 'string') return named('string')
@@ -213,6 +237,7 @@ function binaryErrorMessage(operator: string, left: TypeNode, right: TypeNode): 
 function inferExpression(expression: Expression, env: Env): TypeNode {
     switch (expression.kind) {
         case 'Literal': return inferLiteral(expression.value)
+        case 'Assignment': return inferExpression(expression.value, env)
         case 'Identifier': {
             if (expression.name === 'this') {
                 const self = env.get('this')
@@ -247,8 +272,9 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
         }
         case 'Member': {
             const objectType = inferExpression(expression.object, env)
+            const resolvedObjectType = resolveType(objectType, env)
             const member = lookupMember(objectType, expression.property, env)
-            if (!member) return named('any')
+            if (!member) return resolvedObjectType.kind === 'ObjectType' ? named('null') : named('any')
             if (isFunctionSymbol(member)) return { kind: 'FunctionType', params: member.params.map(param => param.type ?? named('any')), result: member.returnType }
             return member
         }
@@ -428,6 +454,35 @@ class Analyzer {
             case 'Variable': {
                 this.walkExpression(statement.initializer, env)
                 const type = statement.type ?? (statement.initializer ? inferExpression(statement.initializer, env) : named('any'))
+                if (statement.type && statement.initializer?.kind === 'Object') {
+                    const expected = resolveType(statement.type, env)
+                    if (expected.kind === 'ObjectType') {
+                        const properties = statement.initializer.properties
+                        const actual = inferExpression(statement.initializer, env)
+                        const actualMembers = actual.kind === 'ObjectType' ? actual.members : []
+                        for (const property of properties) {
+                            const member = expected.members.find(item => item.name === property.key)
+                            if (!member) continue
+                            const propertyType = inferExpression(property.value, env)
+                            if (!isAssignableTo(member.type, propertyType, env)) {
+                                if (property.keyLoc) this.diagnostics.push({ line: property.keyLoc.line, column: property.keyLoc.column, length: property.key.length, message: `Type '${printType(propertyType)}' is not assignable to type '${printType(member.type)}' for '${property.key}'.` })
+                            }
+                        }
+                        const missing = expected.members.filter(member => !member.optional && !member.method && !actualMembers.some(item => item.name === member.name))
+                        if (missing.length) {
+                            const loc = statement.initializer.kind === 'Object' ? statement.initializer.loc : undefined
+                            if (loc) this.diagnostics.push({
+                                line: loc.line, column: loc.column, length: 1,
+                                message: `Missing required properties: ${missing.map(member => `'${member.name}'`).join(', ')}.`,
+                                fix: { title: 'Fill all required properties', line: loc.line, fields: missing.map(member => ({ name: member.name, type: printType(member.type) })) }
+                            })
+                        }
+                    } else if (!isAssignableTo(statement.type, inferExpression(statement.initializer, env), env)) {
+                        this.addDiagnostic(statement.initializer.loc, `Type '${printType(inferExpression(statement.initializer, env))}' is not assignable to type '${printType(statement.type)}'.`)
+                    }
+                } else if (statement.type && statement.initializer && !isAssignableTo(statement.type, inferExpression(statement.initializer, env), env)) {
+                    this.addDiagnostic(statement.initializer.loc, `Type '${printType(inferExpression(statement.initializer, env))}' is not assignable to type '${printType(statement.type)}'.`)
+                }
                 const symbol: SymbolInfo = { kind: 'var', mutable: statement.mutable, type }
                 this.bind(env, statement.name, symbol)
                 const printed = printSymbol(statement.name, symbol)
@@ -603,11 +658,19 @@ class Analyzer {
             case 'Member': {
                 this.walkExpression(expression.object, env, thisType)
                 const objectType = inferExpression(expression.object, env)
+                const resolvedObjectType = resolveType(objectType, env)
                 const member = lookupMember(objectType, expression.property, env)
                 if (isFunctionSymbol(member)) {
                     this.addHover(expression.property, expression.loc, `(method) ${expression.property}(${member.params.map(printParam).join(', ')}): ${printType(member.returnType)}`)
                 } else if (member) {
                     this.addHover(expression.property, expression.loc, `(property) ${expression.property}: ${printType(member)}`)
+                } else if (resolvedObjectType.kind === 'ObjectType') {
+                    if (expression.loc) this.diagnostics.push({
+                        line: expression.loc.line,
+                        column: expression.loc.column,
+                        length: expression.property.length,
+                        message: `Property '${expression.property}' does not exist on type '${printType(objectType)}'.`
+                    })
                 }
                 return
             }
