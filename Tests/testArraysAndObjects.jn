@@ -1,0 +1,42 @@
+import { console } from 'juno:node'
+
+console.log("=== Array and object index tests ===")
+
+let values = ["zero", "one", "two"]
+console.log("isType<Array>(values) =", isType<Array>(values))
+console.log("isType<object>(values) =", isType<object>(values))
+console.log("array[0] =", values[0])
+console.log("array[1] =", values[1])
+console.log("array[2] =", values[2])
+
+# Arrays can contain values of different types, including objects and functions.
+let mixedValues = [42, "hello", true, { name: "Ada" }, () => "called from array"]
+console.log("mixed array number =", mixedValues[0])
+console.log("mixed array string =", mixedValues[1])
+console.log("mixed array boolean =", mixedValues[2])
+console.log("mixed array object field =", mixedValues[3].name)
+console.log("mixed array function result =", mixedValues[4]())
+
+let person =
+    {
+        name: "Pasha"
+        age: 30
+        greet() =
+            return "Hello, " + this.name
+    }
+
+console.log("isType<object>(person) =", isType<object>(person))
+console.log("isType<Array>(person) =", isType<Array>(person))
+console.log("person.name =", person.name)
+console.log("person['name'] =", person["name"])
+console.log("person[1] =", person[1])
+console.log("person.greet() =", person.greet())
+
+# Each invalid-index case should stop execution with TypeError.
+# Uncomment one case at a time to inspect the error.
+# values[-1]
+# values[3]
+# values[1.5]
+# person[true]
+
+console.log("=== Array and object index tests complete ===")

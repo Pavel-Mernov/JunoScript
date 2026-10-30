@@ -1,10 +1,27 @@
 import * as vscode from 'vscode'
-import { hoverAt, inlayHintsFor } from './language'
+import { analyze, hoverAt, inlayHintsFor } from './language'
 
 export function activate(context: vscode.ExtensionContext): void {
     const selector: vscode.DocumentSelector = { language: 'junoscript', scheme: 'file' }
+    const diagnostics = vscode.languages.createDiagnosticCollection('junoscript')
+
+    const updateDiagnostics = (document: vscode.TextDocument): void => {
+        if (document.languageId !== 'junoscript') return
+        const result = analyze(document.getText())
+        diagnostics.set(document.uri, (result?.diagnostics ?? []).map(info => {
+            const start = new vscode.Position(info.line - 1, info.column - 1)
+            const end = new vscode.Position(info.line - 1, info.column - 1 + info.length)
+            return new vscode.Diagnostic(new vscode.Range(start, end), info.message, vscode.DiagnosticSeverity.Error)
+        }))
+    }
+
+    vscode.workspace.textDocuments.forEach(updateDiagnostics)
 
     context.subscriptions.push(
+        diagnostics,
+        vscode.workspace.onDidOpenTextDocument(updateDiagnostics),
+        vscode.workspace.onDidChangeTextDocument(event => updateDiagnostics(event.document)),
+        vscode.workspace.onDidCloseTextDocument(document => diagnostics.delete(document.uri)),
         vscode.languages.registerHoverProvider(selector, {
             provideHover(document, position) {
                 const info = hoverAt(document.getText(), position.line + 1, position.character + 1)

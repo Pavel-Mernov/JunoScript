@@ -16,6 +16,13 @@ export type InlayHintInfo = {
     kind: 'type' | 'parameter'
 }
 
+export type DiagnosticInfo = {
+    line: number
+    column: number
+    length: number
+    message: string
+}
+
 type SymbolInfo =
     | { kind: 'var'; mutable: boolean; type: TypeNode; docs?: string }
     | { kind: 'fun'; params: Parameter[]; returnType: TypeNode; docs?: string }
@@ -158,11 +165,49 @@ function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | Functi
     return member.type
 }
 
-function inferLiteral(value: string | number | boolean | null): TypeNode {
+function inferLiteral(value: string | number | bigint | boolean | null): TypeNode {
     if (value === null) return named('null')
     if (typeof value === 'string') return named('string')
     if (typeof value === 'number') return named('number')
+    if (typeof value === 'bigint') return named('BigInt')
     return named('boolean')
+}
+
+const errorType = (): TypeNode => named('<Error-Type>')
+
+function isNamedType(type: TypeNode, name: string): boolean {
+    return type.kind === 'NamedType' && type.name === name
+}
+
+function hasSameNumericType(left: TypeNode, right: TypeNode): boolean {
+    return (isNamedType(left, 'number') && isNamedType(right, 'number')) ||
+        (isNamedType(left, 'BigInt') && isNamedType(right, 'BigInt'))
+}
+
+function binaryResultType(operator: string, left: TypeNode, right: TypeNode): TypeNode {
+    if (operator === '+') {
+        if (hasSameNumericType(left, right) || (isNamedType(left, 'string') && isNamedType(right, 'string'))) return left
+        return errorType()
+    }
+    if (['-', '*', '/', '%'].includes(operator)) return hasSameNumericType(left, right) ? left : errorType()
+    if (['<', '<=', '>', '>='].includes(operator)) return hasSameNumericType(left, right) ? named('boolean') : errorType()
+    if (['==', '!=', '&', '|'].includes(operator)) return named('boolean')
+    return named('any')
+}
+
+function binaryErrorMessage(operator: string, left: TypeNode, right: TypeNode): string | undefined {
+    if (isNamedType(left, '<Error-Type>') || isNamedType(right, '<Error-Type>')) return undefined
+    const leftName = printType(left), rightName = printType(right)
+    if (operator === '+' && !(hasSameNumericType(left, right) || (isNamedType(left, 'string') && isNamedType(right, 'string')))) {
+        return `Invalid operands for '+': ${leftName} and ${rightName}. Use number + number, string + string, or BigInt + BigInt.`
+    }
+    if (['-', '*', '/', '%'].includes(operator) && !hasSameNumericType(left, right)) {
+        return `Invalid operands for '${operator}': ${leftName} and ${rightName}. Both operands must be number or both must be BigInt.`
+    }
+    if (['<', '<=', '>', '>='].includes(operator) && !hasSameNumericType(left, right)) {
+        return `Invalid operands for '${operator}': ${leftName} and ${rightName}. Both operands must be number or both must be BigInt.`
+    }
+    return undefined
 }
 
 function inferExpression(expression: Expression, env: Env): TypeNode {
@@ -183,13 +228,12 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
         case 'Array': {
             if (!expression.elements.length) return arrayOf(named('any'))
             const elements = expression.elements.map(item => inferExpression(item, env))
-            const first = printType(elements[0])
-            return arrayOf(elements.every(item => printType(item) === first) ? elements[0] : { kind: 'UnionType', types: elements })
+            return arrayOf(unionOf(elements))
         }
         case 'Object': {
             const members: TypeMember[] = expression.properties.map(property => {
                 if (property.value.kind === 'Function') {
-                    return method(property.key, property.value.params, property.value.returnType ?? named('any'))
+                    return method(property.key, property.value.params, property.value.returnType ?? inferFunctionReturnType(property.value.body, env))
                 }
                 return field(property.key, inferExpression(property.value, env))
             })
@@ -199,9 +243,7 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
         case 'Binary': {
             const left = inferExpression(expression.left, env)
             const right = inferExpression(expression.right, env)
-            if (['==', '!=', '<', '<=', '>', '>=', '&', '|'].includes(expression.operator)) return named('boolean')
-            if (expression.operator === '+' && (left.kind === 'NamedType' && left.name === 'string' || right.kind === 'NamedType' && right.name === 'string')) return named('string')
-            return named('number')
+            return binaryResultType(expression.operator, left, right)
         }
         case 'Member': {
             const objectType = inferExpression(expression.object, env)
@@ -209,6 +251,22 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             if (!member) return named('any')
             if (isFunctionSymbol(member)) return { kind: 'FunctionType', params: member.params.map(param => param.type ?? named('any')), result: member.returnType }
             return member
+        }
+        case 'Index': {
+            const objectType = inferExpression(expression.object, env)
+            const indexType = (type: TypeNode): TypeNode => {
+                if (type.kind === 'ArrayType') return type.element
+                if (type.kind === 'UnionType') return unionOf(type.types.map(indexType))
+                if (type.kind === 'ObjectType') {
+                    if (expression.index.kind === 'Literal') {
+                        const key = String(expression.index.value)
+                        return type.members.find(member => member.name === key)?.type ?? named('any')
+                    }
+                    return unionOf(type.members.map(member => member.type))
+                }
+                return named('any')
+            }
+            return indexType(objectType)
         }
         case 'Call': {
             if (expression.callee.kind === 'Identifier' && expression.callee.name === 'isType') return named('boolean')
@@ -225,8 +283,35 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             }
             return named('any')
         }
-        case 'Function': return { kind: 'FunctionType', params: expression.params.map(param => param.type ?? named('any')), result: expression.returnType ?? named('any') }
+        case 'Function': return { kind: 'FunctionType', params: expression.params.map(param => param.type ?? named('any')), result: expression.returnType ?? (expression.expressionBody ? inferExpression(expression.expressionBody, env) : inferFunctionReturnType(expression.body, env)) }
     }
+}
+
+function inferFunctionReturnType(statements: Statement[], outer: Env): TypeNode {
+    const returns: TypeNode[] = []
+    const collect = (body: Statement[], env: Env): void => {
+        for (const statement of body) {
+            if (statement.kind === 'Return') {
+                returns.push(statement.value ? inferExpression(statement.value, env) : named('null'))
+            } else if (statement.kind === 'If') {
+                collect(statement.consequent, new Map(env))
+                if (statement.alternate) collect(statement.alternate, new Map(env))
+            } else if (statement.kind === 'While' || statement.kind === 'ForOf') {
+                collect(statement.body, new Map(env))
+            } else if (statement.kind === 'Variable') {
+                env.set(statement.name, { kind: 'var', mutable: statement.mutable, type: statement.type ?? (statement.initializer ? inferExpression(statement.initializer, env) : named('any')) })
+            }
+        }
+    }
+    collect(statements, new Map(outer))
+    return returns.length ? unionOf(returns) : named('null')
+}
+
+function unionOf(types: TypeNode[]): TypeNode {
+    const flattened = types.flatMap(type => type.kind === 'UnionType' ? type.types : [type])
+    if (!flattened.length) return named('any')
+    const unique = flattened.filter((type, index) => flattened.findIndex(item => printType(item) === printType(type)) === index)
+    return unique.length === 1 ? unique[0] : { kind: 'UnionType', types: unique }
 }
 
 function functionType(params: Parameter[], returnType?: TypeNode): TypeNode {
@@ -245,6 +330,7 @@ function lengthOf(name: string, loc?: Loc): number {
 class Analyzer {
     hovers: HoverInfo[] = []
     hints: InlayHintInfo[] = []
+    diagnostics: DiagnosticInfo[] = []
 
     analyze(statements: Statement[]): void {
         this.statements(statements, globals())
@@ -265,6 +351,11 @@ class Analyzer {
             tooltip: printed,
             kind: 'type'
         })
+    }
+
+    private addDiagnostic(loc: Loc | undefined, message: string): void {
+        if (!loc) return
+        this.diagnostics.push({ line: loc.line, column: loc.column, length: 1, message })
     }
 
     private addParameterHints(callee: Expression, args: Expression[], env: Env): void {
@@ -346,7 +437,9 @@ class Analyzer {
                 return
             }
             case 'FunctionDeclaration': {
-                const returnType = statement.returnType ?? named('any')
+                const inferenceEnv = new Map(env)
+                for (const param of statement.params) this.bind(inferenceEnv, param.name, { kind: 'var', mutable: true, type: param.type ?? named('any') })
+                const returnType = statement.returnType ?? inferFunctionReturnType(statement.body, inferenceEnv)
                 const symbol: SymbolInfo = { kind: 'fun', params: statement.params, returnType }
                 this.bind(env, statement.name, symbol)
                 const printed = printSymbol(statement.name, symbol)
@@ -368,6 +461,13 @@ class Analyzer {
                 this.walkExpression(statement.value, env)
                 return
             case 'ExpressionStatement':
+                if (statement.expression.kind === 'Assignment') {
+                    const symbol = env.get(statement.expression.name)
+                    if (symbol?.kind === 'var' && !symbol.mutable) {
+                        const loc = statement.expression.operatorLoc
+                        if (loc) this.diagnostics.push({ line: loc.line, column: loc.column, length: 1, message: `Cannot assign to constant '${statement.expression.name}'` })
+                    }
+                }
                 this.walkExpression(statement.expression, env)
                 return
             case 'If': {
@@ -480,10 +580,26 @@ class Analyzer {
             case 'Unary':
                 this.walkExpression(expression.operand, env, thisType)
                 return
-            case 'Binary':
+            case 'Binary': {
                 this.walkExpression(expression.left, env, thisType)
                 this.walkExpression(expression.right, env, thisType)
+                const message = binaryErrorMessage(expression.operator, inferExpression(expression.left, env), inferExpression(expression.right, env))
+                if (message) this.addDiagnostic(expression.loc, message)
                 return
+            }
+            case 'Index': {
+                this.walkExpression(expression.object, env, thisType)
+                this.walkExpression(expression.index, env, thisType)
+                if (expression.loc) {
+                    this.hovers.push({
+                        line: expression.loc.line,
+                        column: expression.loc.column,
+                        length: 1,
+                        code: `(infer) ${printType(inferExpression(expression, env))}`
+                    })
+                }
+                return
+            }
             case 'Member': {
                 this.walkExpression(expression.object, env, thisType)
                 const objectType = inferExpression(expression.object, env)
@@ -521,12 +637,12 @@ class Analyzer {
     }
 }
 
-function literalLabel(value: string | number | boolean | null): string {
+function literalLabel(value: string | number | bigint | boolean | null): string {
     if (typeof value === 'string') return value.length ? value : '""'
     return String(value)
 }
 
-function literalPreview(value: string | number | boolean | null): string {
+function literalPreview(value: string | number | bigint | boolean | null): string {
     if (typeof value === 'string') return JSON.stringify(value)
     if (value === null) return 'null'
     return String(value)
@@ -551,11 +667,11 @@ function expressionStart(expression: Expression): Loc | undefined {
     }
 }
 
-export function analyze(source: string): { hovers: HoverInfo[]; hints: InlayHintInfo[] } | undefined {
+export function analyze(source: string): { hovers: HoverInfo[]; hints: InlayHintInfo[]; diagnostics: DiagnosticInfo[] } | undefined {
     try {
         const analyzer = new Analyzer()
-        analyzer.analyze(parse(source))
-        return { hovers: analyzer.hovers, hints: analyzer.hints }
+        analyzer.analyze(parse(source, { validate: false }))
+        return { hovers: analyzer.hovers, hints: analyzer.hints, diagnostics: analyzer.diagnostics }
     } catch {
         return undefined
     }

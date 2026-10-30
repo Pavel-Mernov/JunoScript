@@ -1,0 +1,39 @@
+import { console } from 'juno:node'
+
+let v = 10
+
+fun foo() = 
+    console.log(v)
+
+    let v = 12
+
+    if v > 10
+        let v = 14
+
+        console.log('greater than 10', 'new v:', v)
+
+    console.log(v)
+
+foo()
+
+const b = 10
+
+fun bar() = 
+    console.log(b)
+    
+    const b = 12
+    
+    if b > 10
+        const b = 14
+    
+        console.log('greater than 10', 'new b:', b)
+    
+    console.log(b)
+
+const res = bar()
+
+console.log(res)
+
+let c : number
+
+console.log(c)

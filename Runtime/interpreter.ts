@@ -3,13 +3,13 @@ import { resolve } from 'node:path'
 import { Expression, Parameter, Statement, parse } from '../Lexer/parser'
 import { resolveModule } from '../Modules'
 
-type Environment = Map<string, { value: unknown; mutable: boolean }>
+type Environment = { bindings: Map<string, { value: unknown; mutable: boolean }>; parent?: Environment }
 type RuntimeFunction = { __junoFunction: true; params: Parameter[]; body: Statement[]; closure: Environment; thisValue?: unknown }
 class ReturnValue { constructor(readonly value: unknown) {} }
 
 export class Interpreter {
-    private readonly globals: Environment = new Map()
-    constructor() { this.globals.set('isType', { value: (value: unknown, type: unknown) => matchesType(value, type), mutable: false }) }
+    private readonly globals: Environment = { bindings: new Map() }
+    constructor() { this.globals.bindings.set('isType', { value: (value: unknown, type: unknown) => matchesType(value, type), mutable: false }) }
 
     run(source: string): void { this.executeStatements(parse(source), this.globals) }
 
@@ -35,13 +35,13 @@ export class Interpreter {
             case 'Variable': this.declare(env, statement.name, statement.initializer ? this.evaluate(statement.initializer, env) : null, statement.mutable); return
             case 'TypeDeclaration': return
             case 'FunctionDeclaration': this.declare(env, statement.name, { __junoFunction: true, params: statement.params, body: statement.body, closure: env } satisfies RuntimeFunction, false); return
-            case 'Return': throw new ReturnValue(statement.value ? this.evaluate(statement.value, env) : undefined)
+            case 'Return': throw new ReturnValue(statement.value ? this.evaluate(statement.value, env) : null)
             case 'ExpressionStatement': this.evaluate(statement.expression, env); return
-            case 'If': this.executeStatements(this.evaluate(statement.condition, env) ? statement.consequent : (statement.alternate ?? []), new Map(env)); return
-            case 'While': while (this.evaluate(statement.condition, env)) this.executeStatements(statement.body, new Map(env)); return
+            case 'If': this.executeStatements(this.evaluate(statement.condition, env) ? statement.consequent : (statement.alternate ?? []), this.childEnvironment(env)); return
+            case 'While': while (this.evaluate(statement.condition, env)) this.executeStatements(statement.body, this.childEnvironment(env)); return
             case 'ForOf': {
                 const values = this.evaluate(statement.iterable, env) as any
-                for (const value of values) { const local = new Map(env); this.declare(local, statement.binding, value, statement.mutable); this.executeStatements(statement.body, local) }
+                for (const value of values) { const local = this.childEnvironment(env); this.declare(local, statement.binding, value, statement.mutable); this.executeStatements(statement.body, local) }
                 return
             }
         }
@@ -51,11 +51,12 @@ export class Interpreter {
         switch (expression.kind) {
             case 'Literal': return expression.value
             case 'Identifier':
-                if (expression.name === 'this') return env.get('this')?.value
-                if (!env.has(expression.name)) throw new ReferenceError(`${expression.name} is not defined`)
-                return env.get(expression.name)?.value
+                if (expression.name === 'this') return this.lookup(env, 'this')?.value
+                const binding = this.lookup(env, expression.name)
+                if (!binding) throw new ReferenceError(`${expression.name} is not defined`)
+                return binding.value
             case 'Assignment': {
-                const binding = env.get(expression.name)
+                const binding = this.lookup(env, expression.name)
                 if (!binding) throw new ReferenceError(`${expression.name} is not defined`)
                 if (!binding.mutable) throw new TypeError(`Cannot assign to constant '${expression.name}'`)
                 binding.value = this.evaluate(expression.value, env)
@@ -75,28 +76,104 @@ export class Interpreter {
             }
             case 'Unary': { const value = this.evaluate(expression.operand, env); return expression.operator === '-' ? -value : !value }
             case 'Binary': {
-                const left = this.evaluate(expression.left, env), right = this.evaluate(expression.right, env)
+                const left = this.evaluate(expression.left, env)
+                const right = this.evaluate(expression.right, env)
+            
+                const bothNumbers = typeof left === 'number' && typeof right === 'number'
+                const bothBigInts = typeof left === 'bigint' && typeof right === 'bigint'
+                const bothStrings = typeof left === 'string' && typeof right === 'string'
+            
                 switch (expression.operator) {
-                    case '+': return left + right
-                    case '-': return left - right
-                    case '*': return left * right
-                    case '/': return left / right
-                    case '%': return left % right
-                    case '==': return deepEqual(left, right)
-                    case '!=': return !deepEqual(left, right)
-                    case '<': return left < right
-                    case '<=': return left <= right
-                    case '>': return left > right
-                    case '>=': return left >= right
-                    case '|': return Boolean(left) || Boolean(right)
-                    case '&': return Boolean(left) && Boolean(right)
-                    default: throw new Error(`Unsupported operator '${expression.operator}'`)
+                    case '+':
+                        if (bothNumbers || bothBigInts || bothStrings) return left + (right as any)
+                        throw new TypeError(
+                            `Invalid operands for '+': ${typeof left} and ${typeof right}`
+                        )
+            
+                    case '-':
+                        if (bothNumbers || bothBigInts) return (left as any) - (right as any)
+                        throw new TypeError(
+                            `Invalid operands for '-': ${typeof left} and ${typeof right}`
+                        )
+            
+                    case '*':
+                        if (bothNumbers || bothBigInts) return (left as any) * (right as any)
+                        throw new TypeError(
+                            `Invalid operands for '*': ${typeof left} and ${typeof right}`
+                        )
+            
+                    case '/':
+                        if (bothNumbers || bothBigInts) return (left as any) / (right as any)
+                        throw new TypeError(
+                            `Invalid operands for '/': ${typeof left} and ${typeof right}`
+                        )
+            
+                    case '%':
+                        if (bothNumbers || bothBigInts) return (left as any) % (right as any)
+                        throw new TypeError(
+                            `Invalid operands for '%': ${typeof left} and ${typeof right}`
+                        )
+            
+                    case '==':
+                        return deepEqual(left, right)
+            
+                    case '!=':
+                        return !deepEqual(left, right)
+            
+                    case '<':
+                        if (bothNumbers || bothBigInts) return (left as any) < (right as any)
+                        throw new TypeError(
+                            `Invalid operands for '<': ${typeof left} and ${typeof right}`
+                        )
+            
+                    case '<=':
+                        if (bothNumbers || bothBigInts) return (left as any) <= (right as any)
+                        throw new TypeError(
+                            `Invalid operands for '<=': ${typeof left} and ${typeof right}`
+                        )            
+                    case '>':
+                        if (bothNumbers || bothBigInts) return (left as any) > (right as any)
+                        throw new TypeError(
+                            `Invalid operands for '>': ${typeof left} and ${typeof right}`
+                        )
+            
+                    case '>=':
+                        if (bothNumbers || bothBigInts) return (left as any) >= (right as any)
+                        throw new TypeError(
+                            `Invalid operands for '>=': ${typeof left} and ${typeof right}`
+                        )
+            
+                    case '|':
+                        return Boolean(left) || Boolean(right)
+            
+                    case '&':
+                        return Boolean(left) && Boolean(right)
+            
+                    default:
+                        throw new Error(`Unsupported operator '${expression.operator}'`)
                 }
             }
             case 'Member': {
                 const object = this.evaluate(expression.object, env)
                 if (object == null && expression.optional) return null
                 return (object as any)?.[expression.property]
+            }
+            case 'Index': {
+                const object = this.evaluate(expression.object, env)
+                const index = this.evaluate(expression.index, env)
+                if (object == null) throw new TypeError('Cannot index null')
+                if (Array.isArray(object)) {
+                    if (typeof index !== 'number' || !Number.isInteger(index) || index < 0 || index >= object.length) {
+                        throw new TypeError(`Array index must be an integer in [0, ${object.length}); received ${String(index)}`)
+                    }
+                } else if (typeof object === 'object' || typeof object === 'function') {
+                    if (typeof index !== 'string' && typeof index !== 'number') {
+                        throw new TypeError(`Object index must be a string or number; received ${typeof index}`)
+                    }
+                } else {
+                    throw new TypeError(`Cannot index value of type ${typeof object}`)
+                }
+                return (object as any)[index as any]
             }
             case 'Call': {
                 let thisValue: unknown
@@ -119,15 +196,24 @@ export class Interpreter {
     }
 
     private callFunction(fn: RuntimeFunction, args: unknown[], thisValue?: unknown): unknown {
-        const local = new Map(fn.closure)
-        if (thisValue !== undefined) local.set('this', { value: thisValue, mutable: false })
+        const local = this.childEnvironment(fn.closure)
+        if (thisValue !== undefined) local.bindings.set('this', { value: thisValue, mutable: false })
         fn.params.forEach((param, index) => this.declare(local, param.name, args[index] ?? (param.defaultValue ? this.evaluate(param.defaultValue, local) : null), true))
-        return this.executeStatements(fn.body, local)
+        return this.executeStatements(fn.body, local) ?? null
     }
 
     private declare(env: Environment, name: string, value: unknown, mutable: boolean): void {
-        if (env.has(name)) throw new SyntaxError(`Duplicate declaration '${name}' in the same scope`)
-        env.set(name, { value, mutable })
+        if (env.bindings.has(name)) throw new SyntaxError(`Duplicate declaration '${name}' in the same scope`)
+        env.bindings.set(name, { value, mutable })
+    }
+
+    private childEnvironment(parent: Environment): Environment { return { bindings: new Map(), parent } }
+    private lookup(env: Environment, name: string): { value: unknown; mutable: boolean } | undefined {
+        for (let current: Environment | undefined = env; current; current = current.parent) {
+            const binding = current.bindings.get(name)
+            if (binding) return binding
+        }
+        return undefined
     }
 }
 

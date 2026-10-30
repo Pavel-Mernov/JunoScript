@@ -1,0 +1,8 @@
+import { console } from 'juno:node'
+
+# const result1 = 7 + '1'
+
+# console.log(result1)
+
+const bigint1 = 1n
+

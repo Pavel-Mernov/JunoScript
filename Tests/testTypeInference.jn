@@ -1,0 +1,33 @@
+import { console } from 'juno:node'
+
+console.log("=== Array and object type inference ===")
+
+let scores = [10, 20, 30]
+let firstScore: number = scores[0]
+let secondScore = scores[2]
+let total = scores[0] + scores[1]
+console.log("Inferred number values:", firstScore, total)
+
+let person =
+    {
+        name: "Pasha"
+        age: 30
+        active: true
+    }
+
+let inferredName: string = person.name
+let nextAge: number = person.age + 1
+let isActive: boolean = person.active
+console.log("Inferred object fields:", inferredName, nextAge, isActive)
+
+let people = [{ name: "Ada", age: 36 }, { name: "Linus", age: 56 }]
+
+let secondPersonName: string = people[1].name
+console.log("Inferred array of objects:", secondPersonName)
+
+# Uncomment to verify static errors:
+# let invalidNumber: number = "not a number"
+# let invalidField: boolean = person.age
+# let invalidArray: number[] = [1, "two"]
+
+console.log("=== Inference tests complete ===")

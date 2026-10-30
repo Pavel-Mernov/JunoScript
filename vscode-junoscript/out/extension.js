@@ -37,7 +37,27 @@ module.exports = __toCommonJS(extension_exports);
 var vscode = __toESM(require("vscode"));
 
 // ../Lexer/lexer.ts
-var keywords = /* @__PURE__ */ new Set(["let", "const", "fun", "type", "return", "if", "else", "for", "of", "while", "true", "false", "null", "readonly", "static", "as", "in", "import", "from"]);
+var keywords = /* @__PURE__ */ new Set([
+  "let",
+  "const",
+  "fun",
+  "type",
+  "return",
+  "if",
+  "else",
+  "for",
+  "of",
+  "while",
+  "true",
+  "false",
+  "null",
+  "readonly",
+  "static",
+  "as",
+  "in",
+  "import",
+  "from"
+]);
 function Lexer(source) {
   return {
     pos: 0,
@@ -49,26 +69,41 @@ function Lexer(source) {
       return this.pos >= source.length;
     },
     tokenize() {
-      const tokens = [], indents = [0];
-      let line = 1, column = 1, lineStart = true;
+      const tokens = [];
+      const indents = [0];
+      let line = 1;
+      let column = 1;
+      let lineStart = true;
       const push = (type, value, l = line, c = column) => {
-        if (type === "Number" || type === "String") tokens.push({ type, value, line: l, column: c });
-        else if (type === "Identifier" || type === "Keyword") tokens.push({ type, value: String(value), line: l, column: c });
-        else tokens.push({ type, line: l, column: c });
+        if (type === "Number") {
+          tokens.push({ type, value, line: l, column: c });
+        } else if (type === "BigInt") {
+          tokens.push({ type, value, line: l, column: c });
+        } else if (type === "String") {
+          tokens.push({ type, value, line: l, column: c });
+        } else if (type === "Identifier" || type === "Keyword") {
+          tokens.push({ type, value: String(value), line: l, column: c });
+        } else {
+          tokens.push({ type, line: l, column: c });
+        }
       };
       const advance = () => {
-        const c = this.current;
+        const character = this.current;
         this.pos++;
-        if (c === "\n") {
+        if (character === "\n") {
           line++;
           column = 1;
-        } else column++;
-        return c;
+        } else {
+          column++;
+        }
+        return character;
       };
       while (!this.isAtEnd) {
         if (lineStart) {
           let width = 0;
-          while (this.current === " " || this.current === "	") width += advance() === "	" ? 4 : 1;
+          while (this.current === " " || this.current === "	") {
+            width += advance() === "	" ? 4 : 1;
+          }
           if (this.current === "\r") advance();
           if (this.current === "\n") {
             advance();
@@ -79,83 +114,131 @@ function Lexer(source) {
             while (!this.isAtEnd && source[this.pos] !== "\n") advance();
             continue;
           }
-          const top = indents[indents.length - 1];
-          if (width > top) {
+          const currentIndent = indents[indents.length - 1];
+          if (width > currentIndent) {
             indents.push(width);
             push("Indent");
-          } else if (width < top) {
+          } else if (width < currentIndent) {
             while (indents.length > 1 && width < indents[indents.length - 1]) {
               indents.pop();
               push("Dedent");
             }
-            if (width !== indents[indents.length - 1]) throw new SyntaxError(`Inconsistent indentation at ${line}:${column}`);
+            if (width !== indents[indents.length - 1]) {
+              throw new SyntaxError(`Inconsistent indentation at ${line}:${column}`);
+            }
           }
           lineStart = false;
         }
-        const c = this.current, l = line, col = column;
-        if (c === " " || c === "	" || c === "\r") {
+        const character = this.current;
+        const tokenLine = line;
+        const tokenColumn = column;
+        if (character === " " || character === "	" || character === "\r") {
           advance();
           continue;
         }
-        if (c === "\n") {
+        if (character === "\n") {
           advance();
-          push("Newline", void 0, l, col);
+          push("Newline", void 0, tokenLine, tokenColumn);
           lineStart = true;
           continue;
         }
-        if (c === "#") {
+        if (character === "#") {
           while (!this.isAtEnd && this.current !== "\n") advance();
           continue;
         }
-        if (/[0-9]/.test(c)) {
+        if (/[0-9]/.test(character)) {
           let raw = "";
           while (/[0-9]/.test(this.current)) raw += advance();
-          if (this.current === "." && /[0-9]/.test(source[this.pos + 1] ?? "")) {
+          const isDecimal = this.current === "." && /[0-9]/.test(source[this.pos + 1] ?? "");
+          if (isDecimal) {
             raw += advance();
             while (/[0-9]/.test(this.current)) raw += advance();
           }
-          push("Number", Number(raw), l, col);
+          if (!isDecimal && this.current === "n") {
+            advance();
+            push("BigInt", BigInt(raw), tokenLine, tokenColumn);
+          } else {
+            push("Number", Number(raw), tokenLine, tokenColumn);
+          }
           continue;
         }
-        if (/[A-Za-z_$]/.test(c)) {
+        if (/[A-Za-z_$]/.test(character)) {
           let value = "";
           while (/[A-Za-z0-9_$]/.test(this.current)) value += advance();
-          push(keywords.has(value) ? "Keyword" : "Identifier", value, l, col);
+          push(keywords.has(value) ? "Keyword" : "Identifier", value, tokenLine, tokenColumn);
           continue;
         }
-        if (c === '"' || c === "'" || c === "`") {
+        if (character === '"' || character === "'" || character === "`") {
           const quote = advance();
-          let value = "", closed = false;
+          let value = "";
+          let closed = false;
           while (!this.isAtEnd) {
-            const ch = advance();
-            if (ch === quote) {
+            const current = advance();
+            if (current === quote) {
               closed = true;
               break;
             }
-            if (ch === "\\") {
+            if (current === "\\") {
               if (this.isAtEnd) break;
-              const e = advance();
-              value += { n: "\n", r: "\r", t: "	", "0": "\0" }[e] ?? e;
-            } else value += ch;
+              const escaped = advance();
+              value += { n: "\n", r: "\r", t: "	", "0": "\0" }[escaped] ?? escaped;
+            } else {
+              value += current;
+            }
           }
-          if (!closed) throw new SyntaxError(`Unterminated string at ${l}:${col}`);
-          push("String", value, l, col);
+          if (!closed) {
+            throw new SyntaxError(`Unterminated string at ${tokenLine}:${tokenColumn}`);
+          }
+          push("String", value, tokenLine, tokenColumn);
           continue;
         }
-        const pairs = { "==": "EqualEqual", "!=": "NotEqual", "<=": "LessEqual", ">=": "GreaterEqual", "=>": "FatArrow", "->": "Arrow" };
-        const pair = c + (source[this.pos + 1] ?? "");
+        const pairs = {
+          "==": "EqualEqual",
+          "!=": "NotEqual",
+          "<=": "LessEqual",
+          ">=": "GreaterEqual",
+          "=>": "FatArrow",
+          "->": "Arrow"
+        };
+        const pair = character + (source[this.pos + 1] ?? "");
         if (pairs[pair]) {
           advance();
           advance();
-          push(pairs[pair], void 0, l, col);
+          push(pairs[pair], void 0, tokenLine, tokenColumn);
           continue;
         }
-        const singles = { "+": "Plus", "-": "Minus", "*": "Multiply", "/": "Divide", "%": "Percent", "=": "Equal", "<": "Less", ">": "Greater", ":": "Colon", ",": "Comma", ".": "Dot", "?": "Question", "|": "Pipe", "&": "Ampersand", "!": "Bang", "(": "LeftParen", ")": "RightParen", "[": "LeftBracket", "]": "RightBracket", "{": "LeftBrace", "}": "RightBrace" };
-        if (!singles[c]) throw new SyntaxError(`Unexpected character '${c}' at ${l}:${col}`);
+        const singles = {
+          "+": "Plus",
+          "-": "Minus",
+          "*": "Multiply",
+          "/": "Divide",
+          "%": "Percent",
+          "=": "Equal",
+          "<": "Less",
+          ">": "Greater",
+          ":": "Colon",
+          ",": "Comma",
+          ".": "Dot",
+          "?": "Question",
+          "|": "Pipe",
+          "&": "Ampersand",
+          "!": "Bang",
+          "(": "LeftParen",
+          ")": "RightParen",
+          "[": "LeftBracket",
+          "]": "RightBracket",
+          "{": "LeftBrace",
+          "}": "RightBrace"
+        };
+        if (!singles[character]) {
+          throw new SyntaxError(`Unexpected character '${character}' at ${tokenLine}:${tokenColumn}`);
+        }
         advance();
-        push(singles[c], void 0, l, col);
+        push(singles[character], void 0, tokenLine, tokenColumn);
       }
-      if (source.length && !lineStart && tokens[tokens.length - 1]?.type !== "Newline") push("Newline", void 0, line, column);
+      if (source.length && !lineStart && tokens[tokens.length - 1]?.type !== "Newline") {
+        push("Newline", void 0, line, column);
+      }
       while (indents.length > 1) {
         indents.pop();
         push("Dedent");
@@ -273,6 +356,10 @@ var Parser = class {
       return { kind: "TypeDeclaration", name, loc, generics, genericLocs, value };
     }
     if (this.match("Keyword", "return")) return { kind: "Return", value: this.is("Newline") || this.is("Dedent") || this.is("EOF") ? void 0 : this.expression() };
+    if (this.is("Identifier") && this.tokens[this.pos + 1]?.type === "Equal") {
+      const { name, loc } = this.identifier(), operatorLoc = this.loc(this.take("Equal"));
+      return { kind: "ExpressionStatement", expression: { kind: "Assignment", name, loc, operatorLoc, value: this.expression() } };
+    }
     if (this.match("Keyword", "if")) {
       const condition = this.expression(), consequent = this.block();
       this.separators();
@@ -353,11 +440,16 @@ var Parser = class {
     return names;
   }
   type() {
-    let left = this.typeAtom();
+    const optional = () => {
+      let value = this.typeAtom();
+      if (this.match("Question")) value = { kind: "UnionType", types: [value, { kind: "NamedType", name: "null" }] };
+      return value;
+    };
+    let left = optional();
     while (this.is("Pipe") || this.is("Ampersand")) {
       const operator = this.current.type;
       this.pos++;
-      const right = this.typeAtom();
+      const right = optional();
       const kind = operator === "Pipe" ? "UnionType" : "IntersectionType";
       left = left.kind === kind ? { ...left, types: [...left.types, right] } : { kind, types: [left, right] };
     }
@@ -444,6 +536,13 @@ var Parser = class {
         left = { kind: "Member", object: left, property: property.name, optional: true, loc: property.loc };
         continue;
       }
+      if (this.match("LeftBracket")) {
+        const token = this.tokens[this.pos - 1];
+        const index = this.expression();
+        this.take("RightBracket", "Expected ']' after index");
+        left = { kind: "Index", object: left, index, loc: this.loc(token) };
+        continue;
+      }
       if (this.match("LeftParen")) {
         const args = [];
         if (!this.is("RightParen")) do {
@@ -456,8 +555,9 @@ var Parser = class {
       }
       const op = opTypes[this.current.type], p = op ? precedence[op] : void 0;
       if (!op || p === void 0 || p < min) break;
+      const operatorToken = this.current;
       this.pos++;
-      left = { kind: "Binary", operator: op, left, right: this.expression(p + 1) };
+      left = { kind: "Binary", operator: op, left, right: this.expression(p + 1), loc: this.loc(operatorToken) };
     }
     return left;
   }
@@ -465,6 +565,10 @@ var Parser = class {
     if (this.match("Minus") || this.match("Bang")) {
       const token = this.tokens[this.pos - 1];
       return { kind: "Unary", operator: token.type === "Minus" ? "-" : "!", operand: this.expression(7), loc: this.loc(token) };
+    }
+    if (this.match("BigInt")) {
+      const token = this.tokens[this.pos - 1];
+      return { kind: "Literal", value: this.value(token), loc: this.loc(token) };
     }
     if (this.match("Number")) {
       const token = this.tokens[this.pos - 1];
@@ -482,6 +586,54 @@ var Parser = class {
       return { kind: "Identifier", name: String(this.value(token)), loc: this.loc(token) };
     }
     if (this.match("LeftParen")) {
+      const saved = this.pos - 1;
+      let arrow = false;
+      try {
+        const params = [];
+        if (!this.is("RightParen")) {
+          do {
+            const { name, loc } = this.identifier(), type = this.match("Colon") ? this.type() : void 0;
+            params.push({ name, loc, type });
+          } while (this.match("Comma"));
+        }
+        this.take("RightParen");
+        const hasReturnType = this.match("Colon");
+        const returnType = hasReturnType ? this.type() : void 0;
+        if (hasReturnType && this.match("FatArrow")) {
+          arrow = true;
+          if (this.match("Newline")) {
+            this.take("Indent", "Expected an indented function body");
+            const body = [];
+            this.separators();
+            while (!this.is("Dedent") && !this.is("EOF")) {
+              body.push(this.statement());
+              this.separators();
+            }
+            this.take("Dedent");
+            return { kind: "Function", params, returnType, body };
+          }
+          return { kind: "Function", params, returnType, body: [], expressionBody: this.expression() };
+        }
+        if (this.match("FatArrow")) {
+          arrow = true;
+          if (this.match("Newline")) {
+            this.take("Indent", "Expected an indented function body");
+            const body = [];
+            this.separators();
+            while (!this.is("Dedent") && !this.is("EOF")) {
+              body.push(this.statement());
+              this.separators();
+            }
+            this.take("Dedent");
+            return { kind: "Function", params, returnType, body };
+          }
+          const expressionBody = this.expression();
+          return { kind: "Function", params, returnType, body: [], expressionBody };
+        }
+      } catch (error) {
+        if (arrow) throw error;
+      }
+      this.pos = saved;
       const value = this.expression();
       this.take("RightParen");
       return value;
@@ -523,8 +675,263 @@ var Parser = class {
     this.fail("Expected expression");
   }
 };
-function parse(source) {
-  return new Parser(Lexer(source).tokenize()).parse();
+var unknownType = { kind: "unknown" };
+function primitive(name) {
+  return { kind: "primitive", name };
+}
+function inferExpressionType(expression, variables) {
+  switch (expression.kind) {
+    case "Literal":
+      if (typeof expression.value === "bigint") return primitive("BigInt");
+      if (typeof expression.value === "number") return primitive("number");
+      if (typeof expression.value === "string") return primitive("string");
+      if (typeof expression.value === "boolean") return primitive("boolean");
+      return primitive("null");
+    case "Identifier":
+      return variables.get(expression.name) ?? unknownType;
+    case "Array": {
+      if (expression.elements.length === 0) return { kind: "array", element: unknownType };
+      const elements = expression.elements.map((element) => inferExpressionType(element, variables));
+      return { kind: "array", element: commonType(elements) };
+    }
+    case "Object":
+      return {
+        kind: "object",
+        fields: new Map(expression.properties.map((property) => [
+          property.key,
+          inferExpressionType(property.value, variables)
+        ]))
+      };
+    case "Unary":
+      return inferExpressionType(expression.operand, variables);
+    case "Member": {
+      const object = inferExpressionType(expression.object, variables);
+      return object.kind === "object" ? object.fields.get(expression.property) ?? unknownType : unknownType;
+    }
+    case "Index": {
+      const object = inferExpressionType(expression.object, variables);
+      const index = inferExpressionType(expression.index, variables);
+      if (object.kind === "array") return object.element;
+      if (object.kind === "object" && index.kind === "primitive" && (index.name === "string" || index.name === "number")) {
+        if (expression.index.kind === "Literal") return object.fields.get(String(expression.index.value)) ?? unknownType;
+        return object.fields.size ? commonType([...object.fields.values()]) : unknownType;
+      }
+      return unknownType;
+    }
+    case "Binary": {
+      const left = inferExpressionType(expression.left, variables);
+      const right = inferExpressionType(expression.right, variables);
+      const operator = expression.operator;
+      if (left.kind !== "primitive" || right.kind !== "primitive") return unknownType;
+      const leftName = left.name, rightName = right.name;
+      if (operator === "+") {
+        const allowed = leftName === "number" && rightName === "number" || leftName === "string" && rightName === "string" || leftName === "BigInt" && rightName === "BigInt";
+        if (!allowed) {
+          throw new SyntaxError(
+            `Invalid operands for '+': ${leftName} and ${rightName}. Use number + number, string + string, or BigInt + BigInt.`
+          );
+        }
+        return left;
+      }
+      if (operator === "*" || operator === "/") {
+        const allowed = leftName === "number" && rightName === "number" || leftName === "BigInt" && rightName === "BigInt";
+        if (!allowed) {
+          throw new SyntaxError(
+            `Invalid operands for '${operator}': ${leftName} and ${rightName}. Both operands must be number or both must be BigInt.`
+          );
+        }
+        return left;
+      }
+      if (operator === "-") {
+        const allowed = leftName === "number" && rightName === "number" || leftName === "BigInt" && rightName === "BigInt";
+        if (!allowed) {
+          throw new SyntaxError(
+            `Invalid operands for '-': ${leftName} and ${rightName}. Both operands must be number or both must be BigInt.`
+          );
+        }
+        return left;
+      }
+      if (operator === "<") {
+        const allowed = leftName === "number" && rightName === "number" || leftName === "BigInt" && rightName === "BigInt";
+        if (!allowed) {
+          throw new SyntaxError(
+            `Invalid operands for '<': ${leftName} and ${rightName}. Both operands must be number or both must be BigInt.`
+          );
+        }
+        return primitive("boolean");
+      }
+      if (operator === ">") {
+        const allowed = leftName === "number" && rightName === "number" || leftName === "BigInt" && rightName === "BigInt";
+        if (!allowed) {
+          throw new SyntaxError(
+            `Invalid operands for '>': ${leftName} and ${rightName}. Both operands must be number or both must be BigInt.`
+          );
+        }
+        return primitive("boolean");
+      }
+      if (operator === "<=") {
+        const allowed = leftName === "number" && rightName === "number" || leftName === "BigInt" && rightName === "BigInt";
+        if (!allowed) {
+          throw new SyntaxError(
+            `Invalid operands for '<=': ${leftName} and ${rightName}. Both operands must be number or both must be BigInt.`
+          );
+        }
+        return primitive("boolean");
+      }
+      if (operator === ">=") {
+        const allowed = leftName === "number" && rightName === "number" || leftName === "BigInt" && rightName === "BigInt";
+        if (!allowed) {
+          throw new SyntaxError(
+            `Invalid operands for '>=': ${leftName} and ${rightName}. Both operands must be number or both must be BigInt.`
+          );
+        }
+        return primitive("boolean");
+      }
+      return unknownType;
+    }
+    case "Assignment":
+      return unknownType;
+    case "Function": {
+      const result = expression.returnType ? typeFromNode(expression.returnType) : expression.expressionBody ? inferExpressionType(expression.expressionBody, variables) : inferFunctionReturnType(expression.body, variables);
+      return { kind: "function", result };
+    }
+    case "Call": {
+      const callee = inferExpressionType(expression.callee, variables);
+      return callee.kind === "function" ? callee.result ?? primitive("null") : unknownType;
+    }
+  }
+}
+function commonType(types) {
+  const first = types[0] ?? unknownType;
+  if (types.every((type) => sameType(first, type))) return first;
+  return unknownType;
+}
+function inferFunctionReturnType(statements, variables) {
+  const returns = [];
+  const collect = (body, scope) => {
+    for (const statement of body) {
+      if (statement.kind === "Return") returns.push(statement.value ? inferExpressionType(statement.value, scope) : primitive("null"));
+      else if (statement.kind === "If") {
+        collect(statement.consequent, new Map(scope));
+        if (statement.alternate) collect(statement.alternate, new Map(scope));
+      } else if (statement.kind === "While" || statement.kind === "ForOf") {
+        collect(statement.body, new Map(scope));
+      } else if (statement.kind === "Variable" && statement.initializer) {
+        scope.set(statement.name, statement.type ? typeFromNode(statement.type) : inferExpressionType(statement.initializer, scope));
+      }
+    }
+  };
+  collect(statements, new Map(variables));
+  return commonType(returns.length ? returns : [primitive("null")]);
+}
+function sameType(a, b) {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "primitive" && b.kind === "primitive") return a.name === b.name;
+  if (a.kind === "array" && b.kind === "array") return sameType(a.element, b.element);
+  if (a.kind === "object" && b.kind === "object") {
+    return a.fields.size === b.fields.size && [...a.fields].every(([key, value]) => b.fields.has(key) && sameType(value, b.fields.get(key)));
+  }
+  return a.kind === "function" || a.kind === "unknown";
+}
+function typeFromNode(type) {
+  if (type.kind === "NamedType") return primitive(type.name);
+  if (type.kind === "ArrayType") return { kind: "array", element: typeFromNode(type.element) };
+  if (type.kind === "GenericType" && (type.name === "Array" || type.name === "ReadonlyArray")) {
+    return { kind: "array", element: type.args[0] ? typeFromNode(type.args[0]) : unknownType };
+  }
+  if (type.kind === "ObjectType") return { kind: "object", fields: new Map(type.members.map((member) => [member.name, typeFromNode(member.type)])) };
+  if (type.kind === "FunctionType") return { kind: "function" };
+  return unknownType;
+}
+function describeType(type) {
+  if (type.kind === "primitive") return type.name;
+  if (type.kind === "array") return `${describeType(type.element)}[]`;
+  if (type.kind === "object") return `{ ${[...type.fields].map(([key, value]) => `${key}: ${describeType(value)}`).join(", ")} }`;
+  return type.kind;
+}
+function isAssignable(expected, actual) {
+  if (expected.kind === "unknown" || actual.kind === "unknown") return true;
+  if (expected.kind !== actual.kind) return false;
+  if (expected.kind === "primitive" && actual.kind === "primitive") return expected.name === actual.name;
+  if (expected.kind === "array" && actual.kind === "array") return isAssignable(expected.element, actual.element);
+  if (expected.kind === "object" && actual.kind === "object") {
+    return [...expected.fields].every(([key, type]) => actual.fields.has(key) && isAssignable(type, actual.fields.get(key)));
+  }
+  return true;
+}
+function validateArithmeticTypes(statements, variables = /* @__PURE__ */ new Map()) {
+  for (const statement of statements) {
+    switch (statement.kind) {
+      case "Variable": {
+        const declaredType = statement.type ? typeFromNode(statement.type) : void 0;
+        const inferredType = statement.initializer ? inferExpressionType(statement.initializer, variables) : void 0;
+        const type = declaredType ?? inferredType;
+        if (type) variables.set(statement.name, type);
+        if (statement.initializer) {
+          const actual = inferExpressionType(statement.initializer, variables);
+          if (declaredType && !isAssignable(declaredType, actual)) {
+            throw new SyntaxError(`Cannot assign ${describeType(actual)} to ${describeType(declaredType)} for '${statement.name}'`);
+          }
+        }
+        break;
+      }
+      case "ExpressionStatement":
+        inferExpressionType(statement.expression, variables);
+        break;
+      case "Return":
+        if (statement.value) inferExpressionType(statement.value, variables);
+        break;
+      case "If":
+        inferExpressionType(statement.condition, variables);
+        validateArithmeticTypes(statement.consequent, new Map(variables));
+        if (statement.alternate) {
+          validateArithmeticTypes(statement.alternate, new Map(variables));
+        }
+        break;
+      case "While":
+        inferExpressionType(statement.condition, variables);
+        validateArithmeticTypes(statement.body, new Map(variables));
+        break;
+      case "ForOf":
+        inferExpressionType(statement.iterable, variables);
+        validateArithmeticTypes(statement.body, new Map(variables));
+        break;
+      case "FunctionDeclaration":
+        validateArithmeticTypes(statement.body, new Map(variables));
+        break;
+      case "Import":
+      case "TypeDeclaration":
+        break;
+    }
+  }
+}
+function parse(source, options = {}) {
+  const statements = new Parser(Lexer(source).tokenize()).parse();
+  if (options.validate !== false) {
+    validateDeclarations(statements);
+    validateArithmeticTypes(statements);
+  }
+  return statements;
+}
+function validateDeclarations(statements, initialNames = /* @__PURE__ */ new Set()) {
+  const names = new Set(initialNames);
+  for (const statement of statements) {
+    const declarations = [];
+    if (statement.kind === "Import") declarations.push(...statement.defaultImport ? [statement.defaultImport] : [], ...statement.namedImports);
+    else if (statement.kind === "Variable" || statement.kind === "FunctionDeclaration" || statement.kind === "TypeDeclaration") declarations.push(statement.name);
+    for (const name of declarations) {
+      if (names.has(name)) throw new SyntaxError(`Duplicate declaration '${name}' in the same scope`);
+      names.add(name);
+    }
+    if (statement.kind === "If") {
+      validateDeclarations(statement.consequent);
+      if (statement.alternate) validateDeclarations(statement.alternate);
+    } else if (statement.kind === "While" || statement.kind === "ForOf") validateDeclarations(statement.body);
+    else if (statement.kind === "FunctionDeclaration") {
+      const functionNames = new Set(statement.params.map((param) => param.name));
+      validateDeclarations(statement.body, functionNames);
+    }
+  }
 }
 
 // src/language.ts
@@ -656,7 +1063,39 @@ function inferLiteral(value) {
   if (value === null) return named("null");
   if (typeof value === "string") return named("string");
   if (typeof value === "number") return named("number");
+  if (typeof value === "bigint") return named("BigInt");
   return named("boolean");
+}
+var errorType = () => named("<Error-Type>");
+function isNamedType(type, name) {
+  return type.kind === "NamedType" && type.name === name;
+}
+function hasSameNumericType(left, right) {
+  return isNamedType(left, "number") && isNamedType(right, "number") || isNamedType(left, "BigInt") && isNamedType(right, "BigInt");
+}
+function binaryResultType(operator, left, right) {
+  if (operator === "+") {
+    if (hasSameNumericType(left, right) || isNamedType(left, "string") && isNamedType(right, "string")) return left;
+    return errorType();
+  }
+  if (["-", "*", "/", "%"].includes(operator)) return hasSameNumericType(left, right) ? left : errorType();
+  if (["<", "<=", ">", ">="].includes(operator)) return hasSameNumericType(left, right) ? named("boolean") : errorType();
+  if (["==", "!=", "&", "|"].includes(operator)) return named("boolean");
+  return named("any");
+}
+function binaryErrorMessage(operator, left, right) {
+  if (isNamedType(left, "<Error-Type>") || isNamedType(right, "<Error-Type>")) return void 0;
+  const leftName = printType(left), rightName = printType(right);
+  if (operator === "+" && !(hasSameNumericType(left, right) || isNamedType(left, "string") && isNamedType(right, "string"))) {
+    return `Invalid operands for '+': ${leftName} and ${rightName}. Use number + number, string + string, or BigInt + BigInt.`;
+  }
+  if (["-", "*", "/", "%"].includes(operator) && !hasSameNumericType(left, right)) {
+    return `Invalid operands for '${operator}': ${leftName} and ${rightName}. Both operands must be number or both must be BigInt.`;
+  }
+  if (["<", "<=", ">", ">="].includes(operator) && !hasSameNumericType(left, right)) {
+    return `Invalid operands for '${operator}': ${leftName} and ${rightName}. Both operands must be number or both must be BigInt.`;
+  }
+  return void 0;
 }
 function inferExpression(expression, env) {
   switch (expression.kind) {
@@ -677,13 +1116,12 @@ function inferExpression(expression, env) {
     case "Array": {
       if (!expression.elements.length) return arrayOf(named("any"));
       const elements = expression.elements.map((item) => inferExpression(item, env));
-      const first = printType(elements[0]);
-      return arrayOf(elements.every((item) => printType(item) === first) ? elements[0] : { kind: "UnionType", types: elements });
+      return arrayOf(unionOf(elements));
     }
     case "Object": {
       const members = expression.properties.map((property) => {
         if (property.value.kind === "Function") {
-          return method(property.key, property.value.params, property.value.returnType ?? named("any"));
+          return method(property.key, property.value.params, property.value.returnType ?? inferFunctionReturnType2(property.value.body, env));
         }
         return field(property.key, inferExpression(property.value, env));
       });
@@ -694,9 +1132,7 @@ function inferExpression(expression, env) {
     case "Binary": {
       const left = inferExpression(expression.left, env);
       const right = inferExpression(expression.right, env);
-      if (["==", "!=", "<", "<=", ">", ">=", "&", "|"].includes(expression.operator)) return named("boolean");
-      if (expression.operator === "+" && (left.kind === "NamedType" && left.name === "string" || right.kind === "NamedType" && right.name === "string")) return named("string");
-      return named("number");
+      return binaryResultType(expression.operator, left, right);
     }
     case "Member": {
       const objectType = inferExpression(expression.object, env);
@@ -704,6 +1140,22 @@ function inferExpression(expression, env) {
       if (!member) return named("any");
       if (isFunctionSymbol(member)) return { kind: "FunctionType", params: member.params.map((param) => param.type ?? named("any")), result: member.returnType };
       return member;
+    }
+    case "Index": {
+      const objectType = inferExpression(expression.object, env);
+      const indexType = (type) => {
+        if (type.kind === "ArrayType") return type.element;
+        if (type.kind === "UnionType") return unionOf(type.types.map(indexType));
+        if (type.kind === "ObjectType") {
+          if (expression.index.kind === "Literal") {
+            const key = String(expression.index.value);
+            return type.members.find((member) => member.name === key)?.type ?? named("any");
+          }
+          return unionOf(type.members.map((member) => member.type));
+        }
+        return named("any");
+      };
+      return indexType(objectType);
     }
     case "Call": {
       if (expression.callee.kind === "Identifier" && expression.callee.name === "isType") return named("boolean");
@@ -721,8 +1173,33 @@ function inferExpression(expression, env) {
       return named("any");
     }
     case "Function":
-      return { kind: "FunctionType", params: expression.params.map((param) => param.type ?? named("any")), result: expression.returnType ?? named("any") };
+      return { kind: "FunctionType", params: expression.params.map((param) => param.type ?? named("any")), result: expression.returnType ?? (expression.expressionBody ? inferExpression(expression.expressionBody, env) : inferFunctionReturnType2(expression.body, env)) };
   }
+}
+function inferFunctionReturnType2(statements, outer) {
+  const returns = [];
+  const collect = (body, env) => {
+    for (const statement of body) {
+      if (statement.kind === "Return") {
+        returns.push(statement.value ? inferExpression(statement.value, env) : named("null"));
+      } else if (statement.kind === "If") {
+        collect(statement.consequent, new Map(env));
+        if (statement.alternate) collect(statement.alternate, new Map(env));
+      } else if (statement.kind === "While" || statement.kind === "ForOf") {
+        collect(statement.body, new Map(env));
+      } else if (statement.kind === "Variable") {
+        env.set(statement.name, { kind: "var", mutable: statement.mutable, type: statement.type ?? (statement.initializer ? inferExpression(statement.initializer, env) : named("any")) });
+      }
+    }
+  };
+  collect(statements, new Map(outer));
+  return returns.length ? unionOf(returns) : named("null");
+}
+function unionOf(types) {
+  const flattened = types.flatMap((type) => type.kind === "UnionType" ? type.types : [type]);
+  if (!flattened.length) return named("any");
+  const unique = flattened.filter((type, index) => flattened.findIndex((item) => printType(item) === printType(type)) === index);
+  return unique.length === 1 ? unique[0] : { kind: "UnionType", types: unique };
 }
 function lengthOf(name, loc) {
   return name.length;
@@ -730,6 +1207,7 @@ function lengthOf(name, loc) {
 var Analyzer = class {
   hovers = [];
   hints = [];
+  diagnostics = [];
   analyze(statements) {
     this.statements(statements, globals());
   }
@@ -747,6 +1225,10 @@ var Analyzer = class {
       tooltip: printed,
       kind: "type"
     });
+  }
+  addDiagnostic(loc, message) {
+    if (!loc) return;
+    this.diagnostics.push({ line: loc.line, column: loc.column, length: 1, message });
   }
   addParameterHints(callee, args, env) {
     let params;
@@ -822,7 +1304,9 @@ var Analyzer = class {
         return;
       }
       case "FunctionDeclaration": {
-        const returnType = statement.returnType ?? named("any");
+        const inferenceEnv = new Map(env);
+        for (const param of statement.params) this.bind(inferenceEnv, param.name, { kind: "var", mutable: true, type: param.type ?? named("any") });
+        const returnType = statement.returnType ?? inferFunctionReturnType2(statement.body, inferenceEnv);
         const symbol = { kind: "fun", params: statement.params, returnType };
         this.bind(env, statement.name, symbol);
         const printed = printSymbol(statement.name, symbol);
@@ -844,6 +1328,13 @@ var Analyzer = class {
         this.walkExpression(statement.value, env);
         return;
       case "ExpressionStatement":
+        if (statement.expression.kind === "Assignment") {
+          const symbol = env.get(statement.expression.name);
+          if (symbol?.kind === "var" && !symbol.mutable) {
+            const loc = statement.expression.operatorLoc;
+            if (loc) this.diagnostics.push({ line: loc.line, column: loc.column, length: 1, message: `Cannot assign to constant '${statement.expression.name}'` });
+          }
+        }
         this.walkExpression(statement.expression, env);
         return;
       case "If": {
@@ -950,10 +1441,26 @@ var Analyzer = class {
       case "Unary":
         this.walkExpression(expression.operand, env, thisType);
         return;
-      case "Binary":
+      case "Binary": {
         this.walkExpression(expression.left, env, thisType);
         this.walkExpression(expression.right, env, thisType);
+        const message = binaryErrorMessage(expression.operator, inferExpression(expression.left, env), inferExpression(expression.right, env));
+        if (message) this.addDiagnostic(expression.loc, message);
         return;
+      }
+      case "Index": {
+        this.walkExpression(expression.object, env, thisType);
+        this.walkExpression(expression.index, env, thisType);
+        if (expression.loc) {
+          this.hovers.push({
+            line: expression.loc.line,
+            column: expression.loc.column,
+            length: 1,
+            code: `(infer) ${printType(inferExpression(expression, env))}`
+          });
+        }
+        return;
+      }
       case "Member": {
         this.walkExpression(expression.object, env, thisType);
         const objectType = inferExpression(expression.object, env);
@@ -1019,8 +1526,8 @@ function expressionStart(expression) {
 function analyze(source) {
   try {
     const analyzer = new Analyzer();
-    analyzer.analyze(parse(source));
-    return { hovers: analyzer.hovers, hints: analyzer.hints };
+    analyzer.analyze(parse(source, { validate: false }));
+    return { hovers: analyzer.hovers, hints: analyzer.hints, diagnostics: analyzer.diagnostics };
   } catch {
     return void 0;
   }
@@ -1038,7 +1545,22 @@ function inlayHintsFor(source) {
 // src/extension.ts
 function activate(context) {
   const selector = { language: "junoscript", scheme: "file" };
+  const diagnostics = vscode.languages.createDiagnosticCollection("junoscript");
+  const updateDiagnostics = (document) => {
+    if (document.languageId !== "junoscript") return;
+    const result = analyze(document.getText());
+    diagnostics.set(document.uri, (result?.diagnostics ?? []).map((info) => {
+      const start = new vscode.Position(info.line - 1, info.column - 1);
+      const end = new vscode.Position(info.line - 1, info.column - 1 + info.length);
+      return new vscode.Diagnostic(new vscode.Range(start, end), info.message, vscode.DiagnosticSeverity.Error);
+    }));
+  };
+  vscode.workspace.textDocuments.forEach(updateDiagnostics);
   context.subscriptions.push(
+    diagnostics,
+    vscode.workspace.onDidOpenTextDocument(updateDiagnostics),
+    vscode.workspace.onDidChangeTextDocument((event) => updateDiagnostics(event.document)),
+    vscode.workspace.onDidCloseTextDocument((document) => diagnostics.delete(document.uri)),
     vscode.languages.registerHoverProvider(selector, {
       provideHover(document, position) {
         const info = hoverAt(document.getText(), position.line + 1, position.character + 1);

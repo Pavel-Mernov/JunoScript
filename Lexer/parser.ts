@@ -5,13 +5,14 @@ export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 
 export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; params?: Parameter[] }
 export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression }
 export type Expression =
-    | { kind: 'Literal'; value: string | number | boolean | null; loc?: Loc }
+    | { kind: 'Literal'; value: string | number | bigint | boolean | null; loc?: Loc }
     | { kind: 'Identifier'; name: string; loc?: Loc } | { kind: 'Array'; elements: Expression[]; loc?: Loc }
     | { kind: 'Object'; properties: { key: string; keyLoc?: Loc; value: Expression }[]; loc?: Loc }
     | { kind: 'Unary'; operator: string; operand: Expression; loc?: Loc }
-    | { kind: 'Assignment'; name: string; loc?: Loc; value: Expression }
-    | { kind: 'Binary'; operator: string; left: Expression; right: Expression }
+    | { kind: 'Assignment'; name: string; loc?: Loc; operatorLoc?: Loc; value: Expression }
+    | { kind: 'Binary'; operator: string; left: Expression; right: Expression; loc?: Loc }
     | { kind: 'Member'; object: Expression; property: string; optional: boolean; loc?: Loc }
+    | { kind: 'Index'; object: Expression; index: Expression; loc?: Loc }
     | { kind: 'Call'; callee: Expression; args: Expression[]; typeArguments?: TypeNode[] }
     | { kind: 'Function'; params: Parameter[]; returnType?: TypeNode; body: Statement[]; expressionBody?: Expression }
 export type Statement =
@@ -97,8 +98,8 @@ export class Parser {
         }
         if (this.match('Keyword', 'return')) return { kind: 'Return', value: this.is('Newline') || this.is('Dedent') || this.is('EOF') ? undefined : this.expression() }
         if (this.is('Identifier') && (this.tokens[this.pos + 1]?.type === 'Equal')) {
-            const { name, loc } = this.identifier(); this.take('Equal')
-            return { kind: 'ExpressionStatement', expression: { kind: 'Assignment', name, loc, value: this.expression() } }
+            const { name, loc } = this.identifier(), operatorLoc = this.loc(this.take('Equal'))
+            return { kind: 'ExpressionStatement', expression: { kind: 'Assignment', name, loc, operatorLoc, value: this.expression() } }
         }
         if (this.match('Keyword', 'if')) {
             const condition = this.expression(), consequent = this.block(); this.separators()
@@ -230,10 +231,18 @@ export class Parser {
                 left = { kind: 'Member', object: left, property: property.name, optional: true, loc: property.loc }
                 continue
             }
+            if (this.match('LeftBracket')) {
+                const token = this.tokens[this.pos - 1]
+                const index = this.expression()
+                this.take('RightBracket', "Expected ']' after index")
+                left = { kind: 'Index', object: left, index, loc: this.loc(token) }
+                continue
+            }
             if (this.match('LeftParen')) { const args: Expression[] = []; if (!this.is('RightParen')) do { args.push(this.expression()) } while (this.match('Comma')); this.take('RightParen'); left = { kind: 'Call', callee: left, args, typeArguments }; typeArguments = undefined; continue }
             const op = opTypes[this.current.type], p = op ? precedence[op] : undefined
             if (!op || p === undefined || p < min) break
-            this.pos++; left = { kind: 'Binary', operator: op, left, right: this.expression(p + 1) }
+            const operatorToken = this.current
+            this.pos++; left = { kind: 'Binary', operator: op, left, right: this.expression(p + 1), loc: this.loc(operatorToken) }
         }
         return left
     }
@@ -241,6 +250,10 @@ export class Parser {
         if (this.match('Minus') || this.match('Bang')) {
             const token = this.tokens[this.pos - 1]
             return { kind: 'Unary', operator: token.type === 'Minus' ? '-' : '!', operand: this.expression(7), loc: this.loc(token) }
+        }
+        if (this.match('BigInt')) {
+            const token = this.tokens[this.pos - 1]
+            return { kind: 'Literal', value: this.value(token) as bigint, loc: this.loc(token) }
         }
         if (this.match('Number')) {
             const token = this.tokens[this.pos - 1]
@@ -320,14 +333,332 @@ export class Parser {
     }
 }
 
-export function parse(source: string): Statement[] {
+type InferredType =
+    | { kind: 'primitive'; name: string }
+    | { kind: 'array'; element: InferredType }
+    | { kind: 'object'; fields: Map<string, InferredType> }
+    | { kind: 'function'; result?: InferredType }
+    | { kind: 'unknown' }
+
+const unknownType: InferredType = { kind: 'unknown' }
+function primitive(name: string): InferredType { return { kind: 'primitive', name } }
+
+function inferExpressionType(
+    expression: Expression,
+    variables: Map<string, InferredType>
+): InferredType {
+    switch (expression.kind) {
+        case 'Literal':
+            if (typeof expression.value === 'bigint') return primitive('BigInt')
+            if (typeof expression.value === 'number') return primitive('number')
+            if (typeof expression.value === 'string') return primitive('string')
+            if (typeof expression.value === 'boolean') return primitive('boolean')
+            return primitive('null')
+
+        case 'Identifier':
+            return variables.get(expression.name) ?? unknownType
+
+        case 'Array': {
+            if (expression.elements.length === 0) return { kind: 'array', element: unknownType }
+            const elements = expression.elements.map(element => inferExpressionType(element, variables))
+            return { kind: 'array', element: commonType(elements) }
+        }
+
+        case 'Object':
+            return {
+                kind: 'object',
+                fields: new Map(expression.properties.map(property => [
+                    property.key,
+                    inferExpressionType(property.value, variables)
+                ]))
+            }
+
+        case 'Unary':
+            return inferExpressionType(expression.operand, variables)
+
+        case 'Member': {
+            const object = inferExpressionType(expression.object, variables)
+            return object.kind === 'object' ? object.fields.get(expression.property) ?? unknownType : unknownType
+        }
+
+        case 'Index': {
+            const object = inferExpressionType(expression.object, variables)
+            const index = inferExpressionType(expression.index, variables)
+            if (object.kind === 'array') return object.element
+            if (object.kind === 'object' && index.kind === 'primitive' && (index.name === 'string' || index.name === 'number')) {
+                if (expression.index.kind === 'Literal') return object.fields.get(String(expression.index.value)) ?? unknownType
+                return object.fields.size ? commonType([...object.fields.values()]) : unknownType
+            }
+            return unknownType
+        }
+
+        case 'Binary': {
+            const left = inferExpressionType(expression.left, variables)
+            const right = inferExpressionType(expression.right, variables)
+            const operator = expression.operator
+
+            if (left.kind !== 'primitive' || right.kind !== 'primitive') return unknownType
+            const leftName = left.name, rightName = right.name
+
+            if (operator === '+') {
+                const allowed =
+                    (leftName === 'number' && rightName === 'number') ||
+                    (leftName === 'string' && rightName === 'string') ||
+                    (leftName === 'BigInt' && rightName === 'BigInt')
+
+                if (!allowed) {
+                    throw new SyntaxError(
+                        `Invalid operands for '+': ${leftName} and ${rightName}. ` +
+                        `Use number + number, string + string, or BigInt + BigInt.`
+                    )
+                }
+
+                return left
+            }
+
+            if (operator === '*' || operator === '/') {
+                const allowed =
+                    (leftName === 'number' && rightName === 'number') ||
+                    (leftName === 'BigInt' && rightName === 'BigInt')
+
+                if (!allowed) {
+                    throw new SyntaxError(
+                        `Invalid operands for '${operator}': ${leftName} and ${rightName}. ` +
+                        `Both operands must be number or both must be BigInt.`
+                    )
+                }
+
+                return left
+            }
+
+            if (operator === '-') {
+                const allowed =
+                    (leftName === 'number' && rightName === 'number') ||
+                    (leftName === 'BigInt' && rightName === 'BigInt')
+
+                if (!allowed) {
+                    throw new SyntaxError(
+                        `Invalid operands for '-': ${leftName} and ${rightName}. ` +
+                        `Both operands must be number or both must be BigInt.`
+                    )
+                }
+
+                return left
+            }
+
+            if (operator === '<') {
+                const allowed =
+                    (leftName === 'number' && rightName === 'number') ||
+                    (leftName === 'BigInt' && rightName === 'BigInt')
+
+                if (!allowed) {
+                    throw new SyntaxError(
+                        `Invalid operands for '<': ${leftName} and ${rightName}. ` +
+                        `Both operands must be number or both must be BigInt.`
+                    )
+                }
+
+                return primitive('boolean')
+            }
+
+            if (operator === '>') {
+                const allowed =
+                    (leftName === 'number' && rightName === 'number') ||
+                    (leftName === 'BigInt' && rightName === 'BigInt')
+
+                if (!allowed) {
+                    throw new SyntaxError(
+                        `Invalid operands for '>': ${leftName} and ${rightName}. ` +
+                        `Both operands must be number or both must be BigInt.`
+                    )
+                }
+
+                return primitive('boolean')
+            }
+
+            if (operator === '<=') {
+                const allowed =
+                    (leftName === 'number' && rightName === 'number') ||
+                    (leftName === 'BigInt' && rightName === 'BigInt')
+
+                if (!allowed) {
+                    throw new SyntaxError(
+                        `Invalid operands for '<=': ${leftName} and ${rightName}. ` +
+                        `Both operands must be number or both must be BigInt.`
+                    )
+                }
+
+                return primitive('boolean')
+            }
+
+            if (operator === '>=') {
+                const allowed =
+                    (leftName === 'number' && rightName === 'number') ||
+                    (leftName === 'BigInt' && rightName === 'BigInt')
+
+                if (!allowed) {
+                    throw new SyntaxError(
+                        `Invalid operands for '>=': ${leftName} and ${rightName}. ` +
+                        `Both operands must be number or both must be BigInt.`
+                    )
+                }
+
+                return primitive('boolean')
+            }
+
+            return unknownType
+        }
+
+        case 'Assignment':
+            return unknownType
+        case 'Function': {
+            const result = expression.returnType
+                ? typeFromNode(expression.returnType)
+                : expression.expressionBody
+                    ? inferExpressionType(expression.expressionBody, variables)
+                    : inferFunctionReturnType(expression.body, variables)
+            return { kind: 'function', result }
+        }
+        case 'Call': {
+            const callee = inferExpressionType(expression.callee, variables)
+            return callee.kind === 'function' ? callee.result ?? primitive('null') : unknownType
+        }
+    }
+}
+
+function commonType(types: InferredType[]): InferredType {
+    const first = types[0] ?? unknownType
+    if (types.every(type => sameType(first, type))) return first
+    return unknownType
+}
+
+function inferFunctionReturnType(statements: Statement[], variables: Map<string, InferredType>): InferredType {
+    const returns: InferredType[] = []
+    const collect = (body: Statement[], scope: Map<string, InferredType>) => {
+        for (const statement of body) {
+            if (statement.kind === 'Return') returns.push(statement.value ? inferExpressionType(statement.value, scope) : primitive('null'))
+            else if (statement.kind === 'If') {
+                collect(statement.consequent, new Map(scope))
+                if (statement.alternate) collect(statement.alternate, new Map(scope))
+            } else if (statement.kind === 'While' || statement.kind === 'ForOf') {
+                collect(statement.body, new Map(scope))
+            } else if (statement.kind === 'Variable' && statement.initializer) {
+                scope.set(statement.name, statement.type ? typeFromNode(statement.type) : inferExpressionType(statement.initializer, scope))
+            }
+        }
+    }
+    collect(statements, new Map(variables))
+    return commonType(returns.length ? returns : [primitive('null')])
+}
+
+function sameType(a: InferredType, b: InferredType): boolean {
+    if (a.kind !== b.kind) return false
+    if (a.kind === 'primitive' && b.kind === 'primitive') return a.name === b.name
+    if (a.kind === 'array' && b.kind === 'array') return sameType(a.element, b.element)
+    if (a.kind === 'object' && b.kind === 'object') {
+        return a.fields.size === b.fields.size && [...a.fields].every(([key, value]) => b.fields.has(key) && sameType(value, b.fields.get(key)!))
+    }
+    return a.kind === 'function' || a.kind === 'unknown'
+}
+
+function typeFromNode(type: TypeNode): InferredType {
+    if (type.kind === 'NamedType') return primitive(type.name)
+    if (type.kind === 'ArrayType') return { kind: 'array', element: typeFromNode(type.element) }
+    if (type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray')) {
+        return { kind: 'array', element: type.args[0] ? typeFromNode(type.args[0]) : unknownType }
+    }
+    if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.map(member => [member.name, typeFromNode(member.type)])) }
+    if (type.kind === 'FunctionType') return { kind: 'function' }
+    return unknownType
+}
+
+function describeType(type: InferredType): string {
+    if (type.kind === 'primitive') return type.name
+    if (type.kind === 'array') return `${describeType(type.element)}[]`
+    if (type.kind === 'object') return `{ ${[...type.fields].map(([key, value]) => `${key}: ${describeType(value)}`).join(', ')} }`
+    return type.kind
+}
+
+function isAssignable(expected: InferredType, actual: InferredType): boolean {
+    if (expected.kind === 'unknown' || actual.kind === 'unknown') return true
+    if (expected.kind !== actual.kind) return false
+    if (expected.kind === 'primitive' && actual.kind === 'primitive') return expected.name === actual.name
+    if (expected.kind === 'array' && actual.kind === 'array') return isAssignable(expected.element, actual.element)
+    if (expected.kind === 'object' && actual.kind === 'object') {
+        return [...expected.fields].every(([key, type]) => actual.fields.has(key) && isAssignable(type, actual.fields.get(key)!))
+    }
+    return true
+}
+
+function validateArithmeticTypes(statements: Statement[], variables = new Map<string, InferredType>()): void {
+    for (const statement of statements) {
+        switch (statement.kind) {
+            case 'Variable': {
+                const declaredType = statement.type ? typeFromNode(statement.type) : undefined
+                const inferredType = statement.initializer
+                    ? inferExpressionType(statement.initializer, variables)
+                    : undefined
+
+                const type = declaredType ?? inferredType
+                if (type) variables.set(statement.name, type)
+
+                if (statement.initializer) {
+                    const actual = inferExpressionType(statement.initializer, variables)
+                    if (declaredType && !isAssignable(declaredType, actual)) {
+                        throw new SyntaxError(`Cannot assign ${describeType(actual)} to ${describeType(declaredType)} for '${statement.name}'`)
+                    }
+                }
+                break
+            }
+
+            case 'ExpressionStatement':
+                inferExpressionType(statement.expression, variables)
+                break
+
+            case 'Return':
+                if (statement.value) inferExpressionType(statement.value, variables)
+                break
+
+            case 'If':
+                inferExpressionType(statement.condition, variables)
+                validateArithmeticTypes(statement.consequent, new Map(variables))
+                if (statement.alternate) {
+                    validateArithmeticTypes(statement.alternate, new Map(variables))
+                }
+                break
+
+            case 'While':
+                inferExpressionType(statement.condition, variables)
+                validateArithmeticTypes(statement.body, new Map(variables))
+                break
+
+            case 'ForOf':
+                inferExpressionType(statement.iterable, variables)
+                validateArithmeticTypes(statement.body, new Map(variables))
+                break
+
+            case 'FunctionDeclaration':
+                validateArithmeticTypes(statement.body, new Map(variables))
+                break
+
+            case 'Import':
+            case 'TypeDeclaration':
+                break
+        }
+    }
+}
+
+export function parse(source: string, options: { validate?: boolean } = {}): Statement[] {
     const statements = new Parser(Lexer(source).tokenize()).parse()
-    validateDeclarations(statements)
+    if (options.validate !== false) {
+        validateDeclarations(statements)
+        validateArithmeticTypes(statements)
+    }
     return statements
 }
 
-function validateDeclarations(statements: Statement[]): void {
-    const names = new Set<string>()
+function validateDeclarations(statements: Statement[], initialNames: Set<string> = new Set()): void {
+    const names = new Set(initialNames)
     for (const statement of statements) {
         const declarations: string[] = []
         if (statement.kind === 'Import') declarations.push(...(statement.defaultImport ? [statement.defaultImport] : []), ...statement.namedImports)
@@ -338,6 +669,9 @@ function validateDeclarations(statements: Statement[]): void {
         }
         if (statement.kind === 'If') { validateDeclarations(statement.consequent); if (statement.alternate) validateDeclarations(statement.alternate) }
         else if (statement.kind === 'While' || statement.kind === 'ForOf') validateDeclarations(statement.body)
-        else if (statement.kind === 'FunctionDeclaration') validateDeclarations(statement.body)
+        else if (statement.kind === 'FunctionDeclaration') {
+            const functionNames = new Set(statement.params.map(param => param.name))
+            validateDeclarations(statement.body, functionNames)
+        }
     }
 }
