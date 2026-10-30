@@ -1,0 +1,24 @@
+import { console } from 'juno:node'
+
+console.log(5 == '5')
+console.log(5 == 5)
+
+console.log(0 == false)
+
+console.log(null == null)
+
+type Person = {
+    name : string
+}
+
+const person1 : Person = {
+    name : 'Paul',
+}
+
+const person2 : Person = {
+    name : 'Paul',
+}
+
+console.log(person1 == person2)
+
+console.log(person1)

@@ -561,13 +561,21 @@ function sameType(a: InferredType, b: InferredType): boolean {
     return a.kind === 'function' || a.kind === 'unknown'
 }
 
-function typeFromNode(type: TypeNode): InferredType {
-    if (type.kind === 'NamedType') return primitive(type.name)
-    if (type.kind === 'ArrayType') return { kind: 'array', element: typeFromNode(type.element) }
-    if (type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray')) {
-        return { kind: 'array', element: type.args[0] ? typeFromNode(type.args[0]) : unknownType }
+function typeFromNode(type: TypeNode, aliases: Map<string, TypeNode> = new Map(), resolving = new Set<string>()): InferredType {
+    if (type.kind === 'NamedType') {
+        const alias = aliases.get(type.name)
+        if (alias && !resolving.has(type.name)) {
+            const next = new Set(resolving)
+            next.add(type.name)
+            return typeFromNode(alias, aliases, next)
+        }
+        return primitive(type.name)
     }
-    if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.map(member => [member.name, typeFromNode(member.type)])) }
+    if (type.kind === 'ArrayType') return { kind: 'array', element: typeFromNode(type.element, aliases, resolving) }
+    if (type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray')) {
+        return { kind: 'array', element: type.args[0] ? typeFromNode(type.args[0], aliases, resolving) : unknownType }
+    }
+    if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.map(member => [member.name, typeFromNode(member.type, aliases, resolving)])) }
     if (type.kind === 'FunctionType') return { kind: 'function' }
     return unknownType
 }
@@ -591,10 +599,14 @@ function isAssignable(expected: InferredType, actual: InferredType): boolean {
 }
 
 function validateArithmeticTypes(statements: Statement[], variables = new Map<string, InferredType>()): void {
+    const aliases = new Map<string, TypeNode>()
+    for (const statement of statements) {
+        if (statement.kind === 'TypeDeclaration') aliases.set(statement.name, statement.value)
+    }
     for (const statement of statements) {
         switch (statement.kind) {
             case 'Variable': {
-                const declaredType = statement.type ? typeFromNode(statement.type) : undefined
+                const declaredType = statement.type ? typeFromNode(statement.type, aliases) : undefined
                 const inferredType = statement.initializer
                     ? inferExpressionType(statement.initializer, variables)
                     : undefined
