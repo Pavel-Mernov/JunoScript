@@ -37,7 +37,23 @@
               "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.junoscript" } },
               "end": "\\}",
               "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.junoscript" } },
-              "patterns": [{ "include": "$self" }]
+              "patterns": [
+                { "include": "#comments" },
+                { "include": "#strings" },
+                { "include": "#numbers" },
+                { "include": "#imports" },
+                { "include": "#declarations" },
+                { "include": "#keywords" },
+                { "include": "#constants" },
+                { "include": "#types" },
+                { "include": "#functions" },
+                { "include": "#operators" },
+                { "include": "#punctuation" },
+                {
+                  "name": "variable.other.junoscript",
+                  "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+                }
+              ]
             },
             {
               "name": "constant.character.escape.junoscript",
@@ -56,7 +72,23 @@
               "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.junoscript" } },
               "end": "\\}",
               "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.junoscript" } },
-              "patterns": [{ "include": "$self" }]
+              "patterns": [
+                { "include": "#comments" },
+                { "include": "#strings" },
+                { "include": "#numbers" },
+                { "include": "#imports" },
+                { "include": "#declarations" },
+                { "include": "#keywords" },
+                { "include": "#constants" },
+                { "include": "#types" },
+                { "include": "#functions" },
+                { "include": "#operators" },
+                { "include": "#punctuation" },
+                {
+                  "name": "variable.other.junoscript",
+                  "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+                }
+              ]
             },
             {
               "name": "constant.character.escape.junoscript",
@@ -75,7 +107,23 @@
               "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.junoscript" } },
               "end": "\\}",
               "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.junoscript" } },
-              "patterns": [{ "include": "$self" }]
+              "patterns": [
+                { "include": "#comments" },
+                { "include": "#strings" },
+                { "include": "#numbers" },
+                { "include": "#imports" },
+                { "include": "#declarations" },
+                { "include": "#keywords" },
+                { "include": "#constants" },
+                { "include": "#types" },
+                { "include": "#functions" },
+                { "include": "#operators" },
+                { "include": "#punctuation" },
+                {
+                  "name": "variable.other.junoscript",
+                  "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+                }
+              ]
             },
             {
               "name": "constant.character.escape.junoscript",

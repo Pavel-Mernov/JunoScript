@@ -1,7 +1,7 @@
 import { Lexer, Token, TokenType } from './lexer'
 
 export type Loc = { line: number; column: number }
-export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; result: TypeNode }
+export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'LiteralType'; value: string | number | boolean; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; result: TypeNode }
 export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; params?: Parameter[]; body?: Statement[] }
 export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression }
 export type Expression =
@@ -100,9 +100,10 @@ export class Parser {
                 genericLocs = names.map(item => item.loc)
             }
             this.take('Equal', "Expected '=' in type declaration")
-            const indented = this.match('Newline') && this.match('Indent')
+            const indented = this.match('Newline')
+            if (indented && this.is('Indent') && this.tokens[this.pos + 1]?.type !== 'Pipe' && this.tokens[this.pos + 1]?.type !== 'Ampersand') this.pos++
             const value = this.type()
-            if (indented) { this.separators(); this.take('Dedent') }
+            if (indented) { this.separators(); if (this.is('Dedent')) this.take('Dedent') }
             return { kind: 'TypeDeclaration', name, loc, generics, genericLocs, value }
         }
         if (this.match('Keyword', 'return')) return { kind: 'Return', value: this.is('Newline') || this.is('Dedent') || this.is('EOF') ? undefined : this.expression() }
@@ -178,18 +179,52 @@ export class Parser {
         return names
     }
     private type(): TypeNode {
+        while (this.match('Newline') || this.match('Indent')) {}
+        if (this.is('Pipe') || this.is('Ampersand')) {
+            const operator = this.current.type
+            const parts: TypeNode[] = []
+            while (this.is(operator)) {
+                this.pos++
+                while (this.match('Newline') || this.match('Indent')) {}
+                parts.push(this.typeAtom())
+                while (this.match('Newline')) {}
+            }
+            const kind = operator === 'Pipe' ? 'UnionType' : 'IntersectionType'
+            return parts.length === 1 ? parts[0] : { kind, types: parts }
+        }
         const optional = () => {
             let value = this.typeAtom()
             if (this.match('Question')) value = { kind: 'UnionType', types: [value, { kind: 'NamedType', name: 'null' }] }
             return value
         }
         let left = optional()
-        while (this.is('Pipe') || this.is('Ampersand')) { const operator = this.current.type; this.pos++; const right = optional(); const kind = operator === 'Pipe' ? 'UnionType' : 'IntersectionType'; left = left.kind === kind ? { ...left, types: [...left.types, right] } : { kind, types: [left, right] } }
+        while (this.is('Pipe') || this.is('Ampersand') || this.is('Newline') && (this.tokens[this.pos + 1]?.type === 'Pipe' || this.tokens[this.pos + 1]?.type === 'Ampersand') || this.is('Newline') && this.tokens[this.pos + 1]?.type === 'Indent' && (this.tokens[this.pos + 2]?.type === 'Pipe' || this.tokens[this.pos + 2]?.type === 'Ampersand')) {
+            while (this.match('Newline') || this.match('Indent')) {}
+            const operator = this.current.type
+            if (operator !== 'Pipe' && operator !== 'Ampersand') break
+            this.pos++
+            while (this.match('Newline') || this.match('Indent')) {}
+            const right = optional(), kind = operator === 'Pipe' ? 'UnionType' : 'IntersectionType'
+            left = left.kind === kind ? { ...left, types: [...left.types, right] } : { kind, types: [left, right] }
+        }
         return left
     }
     private typeAtom(): TypeNode {
         let result: TypeNode
-        if (this.match('LeftBrace')) {
+        if (this.match('Minus')) {
+            const minus = this.tokens[this.pos - 1]
+            const number = this.take('Number', 'Expected a number after \'-\' in literal type')
+            result = { kind: 'LiteralType', value: -(this.value(number) as number), loc: this.loc(minus) }
+        } else if (this.match('Number')) {
+            const token = this.tokens[this.pos - 1]
+            result = { kind: 'LiteralType', value: this.value(token) as number, loc: this.loc(token) }
+        } else if (this.match('String')) {
+            const token = this.tokens[this.pos - 1]
+            result = { kind: 'LiteralType', value: this.value(token) as string, loc: this.loc(token) }
+        } else if (this.match('Keyword', 'true') || this.match('Keyword', 'false')) {
+            const token = this.tokens[this.pos - 1]
+            result = { kind: 'LiteralType', value: this.value(token) === 'true', loc: this.loc(token) }
+        } else if (this.match('LeftBrace')) {
             const members: TypeMember[] = []; this.objectSeparators()
             while (!this.is('RightBrace') && !this.is('EOF')) {
                 const readonly = this.match('Keyword', 'readonly'), constant = this.match('Keyword', 'const'), { name, loc } = this.propertyName(); let optional = this.match('Question')
@@ -313,9 +348,72 @@ export class Parser {
                 else if (char === '}' && --depth === 0) break
             }
             if (depth !== 0) this.fail('Unterminated string interpolation')
-            const source = value.slice(start + 2, end).trim()
+            const rawSource = value.slice(start + 2, end)
+            const leadingWhitespace = rawSource.length - rawSource.trimStart().length
+            const source = rawSource.trim()
             if (!source) this.fail('String interpolation cannot be empty')
-            parts.push(new Parser(Lexer(source).tokenize()).parseExpressionOnly())
+            const expression = new Parser(Lexer(source).tokenize()).parseExpressionOnly()
+            const offset = start + 2 + leadingWhitespace
+            const shiftLoc = (loc: Loc | undefined): Loc | undefined => {
+                if (!loc) return loc
+                const absoluteOffset = offset + loc.column - 1
+                const before = value.slice(0, absoluteOffset)
+                const lastNewline = before.lastIndexOf('\n')
+                return {
+                    line: loc.line + (before.match(/\n/g)?.length ?? 0),
+                    column: (lastNewline < 0 ? loc.column + offset : absoluteOffset - lastNewline) + (loc.line > 1 ? loc.column - 1 : 0)
+                }
+            }
+            const shiftExpression = (node: Expression): void => {
+                if ('loc' in node) node.loc = shiftLoc(node.loc)
+                switch (node.kind) {
+                    case 'Template':
+                        for (const part of node.parts) if (typeof part !== 'string') shiftExpression(part)
+                        break
+                    case 'Array': node.elements.forEach(shiftExpression); break
+                    case 'Object':
+                        for (const property of node.properties) {
+                            property.keyLoc = shiftLoc(property.keyLoc)
+                            shiftExpression(property.value)
+                        }
+                        break
+                    case 'Unary': shiftExpression(node.operand); break
+                    case 'Assignment': shiftExpression(node.value); break
+                    case 'Binary': shiftExpression(node.left); shiftExpression(node.right); break
+                    case 'Conditional': shiftExpression(node.condition); shiftExpression(node.consequent); shiftExpression(node.alternate); break
+                    case 'Member': shiftExpression(node.object); break
+                    case 'Index': shiftExpression(node.object); shiftExpression(node.index); break
+                    case 'Call': shiftExpression(node.callee); node.args.forEach(shiftExpression); break
+                    case 'Function':
+                        for (const param of node.params) {
+                            param.loc = shiftLoc(param.loc)
+                            if (param.defaultValue) shiftExpression(param.defaultValue)
+                        }
+                        node.body.forEach(shiftStatement)
+                        if (node.expressionBody) shiftExpression(node.expressionBody)
+                        break
+                }
+            }
+            const shiftStatement = (statement: Statement): void => {
+                if ('loc' in statement) statement.loc = shiftLoc(statement.loc)
+                switch (statement.kind) {
+                    case 'Variable': if (statement.initializer) shiftExpression(statement.initializer); break
+                    case 'ExpressionStatement': shiftExpression(statement.expression); break
+                    case 'Return': if (statement.value) shiftExpression(statement.value); break
+                    case 'If':
+                        shiftExpression(statement.condition)
+                        statement.consequent.forEach(shiftStatement)
+                        statement.alternate?.forEach(shiftStatement)
+                        break
+                    case 'ForOf': shiftExpression(statement.iterable); statement.body.forEach(shiftStatement); break
+                    case 'While': shiftExpression(statement.condition); statement.body.forEach(shiftStatement); break
+                    case 'FunctionDeclaration': statement.body.forEach(shiftStatement); break
+                    case 'TypeDeclaration': break
+                    case 'Import': break
+                }
+            }
+            shiftExpression(expression)
+            parts.push(expression)
             cursor = end + 1
         }
         if (!parts.length) parts.push(value.replace(/\uE000/g, '$'))
@@ -389,7 +487,16 @@ export class Parser {
         }
         if (this.match('LeftBracket')) {
             const token = this.tokens[this.pos - 1]
-            const elements: Expression[] = []; if (!this.is('RightBracket')) do { elements.push(this.expression()) } while (this.match('Comma')); this.take('RightBracket'); return { kind: 'Array', elements, loc: this.loc(token) }
+            const elements: Expression[] = []
+            this.parenthesisSeparators()
+            while (!this.is('RightBracket') && !this.is('EOF')) {
+                elements.push(this.expression())
+                this.parenthesisSeparators()
+                if (this.match('Comma')) this.parenthesisSeparators()
+                else if (!this.is('RightBracket')) this.fail("Expected ',' or ']' in array")
+            }
+            this.take('RightBracket')
+            return { kind: 'Array', elements, loc: this.loc(token) }
         }
         if (this.match('LeftBrace')) {
             const token = this.tokens[this.pos - 1]
@@ -400,7 +507,9 @@ export class Parser {
                 if (this.match('Colon')) value = this.expression()
                 else if (this.match('LeftParen')) { this.pos--; const params = this.parameters(); this.take('Equal', "Expected '=' for method body"); value = { kind: 'Function', params, body: this.block() } }
                 else value = { kind: 'Identifier', name: property.name, loc: property.loc }
-                properties.push({ key: property.name, keyLoc: property.loc, value }); this.objectSeparators()
+                properties.push({ key: property.name, keyLoc: property.loc, value })
+                this.objectSeparators()
+                if (this.match('Comma')) this.objectSeparators()
             }
             this.take('RightBrace'); return { kind: 'Object', properties, loc: this.loc(token) }
         }
@@ -411,6 +520,8 @@ export class Parser {
 
 type InferredType =
     | { kind: 'primitive'; name: string }
+    | { kind: 'literal'; value: string | number | boolean }
+    | { kind: 'union'; types: InferredType[] }
     | { kind: 'array'; element: InferredType }
     | { kind: 'object'; fields: Map<string, InferredType> }
     | { kind: 'function'; result?: InferredType }
@@ -437,9 +548,7 @@ function inferExpressionType(
     switch (expression.kind) {
         case 'Literal':
             if (typeof expression.value === 'bigint') return primitive('BigInt')
-            if (typeof expression.value === 'number') return primitive('number')
-            if (typeof expression.value === 'string') return primitive('string')
-            if (typeof expression.value === 'boolean') return primitive('boolean')
+            if (typeof expression.value === 'number' || typeof expression.value === 'string' || typeof expression.value === 'boolean') return { kind: 'literal', value: expression.value }
             return primitive('null')
 
         case 'Template':
@@ -464,6 +573,7 @@ function inferExpressionType(
             }
 
         case 'Unary':
+            if (expression.operator === '-' && expression.operand.kind === 'Literal' && typeof expression.operand.value === 'number') return { kind: 'literal', value: -expression.operand.value }
             return inferExpressionType(expression.operand, variables)
 
         case 'Conditional':
@@ -650,6 +760,7 @@ function inferFunctionReturnType(statements: Statement[], variables: Map<string,
 function sameType(a: InferredType, b: InferredType): boolean {
     if (a.kind !== b.kind) return false
     if (a.kind === 'primitive' && b.kind === 'primitive') return a.name === b.name
+    if (a.kind === 'literal' && b.kind === 'literal') return a.value === b.value
     if (a.kind === 'array' && b.kind === 'array') return sameType(a.element, b.element)
     if (a.kind === 'object' && b.kind === 'object') {
         return a.fields.size === b.fields.size && [...a.fields].every(([key, value]) => b.fields.has(key) && sameType(value, b.fields.get(key)!))
@@ -658,6 +769,7 @@ function sameType(a: InferredType, b: InferredType): boolean {
 }
 
 function typeFromNode(type: TypeNode, aliases: Map<string, TypeNode> = new Map(), resolving = new Set<string>()): InferredType {
+    if (type.kind === 'LiteralType') return { kind: 'literal', value: type.value }
     if (type.kind === 'NamedType') {
         const alias = aliases.get(type.name)
         if (alias && !resolving.has(type.name)) {
@@ -673,11 +785,14 @@ function typeFromNode(type: TypeNode, aliases: Map<string, TypeNode> = new Map()
     }
     if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.filter(member => !member.method && !member.optional && member.defaultValue === undefined && !(member.type.kind === 'UnionType' && member.type.types.some(part => part.kind === 'NamedType' && part.name === 'null'))).map(member => [member.name, typeFromNode(member.type, aliases, resolving)])) }
     if (type.kind === 'FunctionType') return { kind: 'function' }
+    if (type.kind === 'UnionType') return { kind: 'union', types: type.types.map(part => typeFromNode(part, aliases, resolving)) }
     return unknownType
 }
 
 function describeType(type: InferredType): string {
     if (type.kind === 'primitive') return type.name
+    if (type.kind === 'literal') return typeof type.value === 'string' ? JSON.stringify(type.value) : String(type.value)
+    if (type.kind === 'union') return type.types.map(describeType).join(' | ')
     if (type.kind === 'array') return `${describeType(type.element)}[]`
     if (type.kind === 'object') return `{ ${[...type.fields].map(([key, value]) => `${key}: ${describeType(value)}`).join(', ')} }`
     return type.kind
@@ -685,6 +800,16 @@ function describeType(type: InferredType): string {
 
 function isAssignable(expected: InferredType, actual: InferredType): boolean {
     if (expected.kind === 'unknown' || actual.kind === 'unknown') return true
+    if (expected.kind === 'union') return actual.kind === 'union'
+        ? actual.types.every(part => expected.types.some(option => isAssignable(option, part)))
+        : expected.types.some(option => isAssignable(option, actual))
+    if (actual.kind === 'union') return actual.types.every(part => isAssignable(expected, part))
+    if (expected.kind === 'literal') {
+        if (actual.kind === 'literal') return expected.value === actual.value
+        if (actual.kind === 'primitive') return actual.name === typeof expected.value
+        return false
+    }
+    if (actual.kind === 'literal' && expected.kind === 'primitive') return expected.name === typeof actual.value
     if (expected.kind !== actual.kind) return false
     if (expected.kind === 'primitive' && actual.kind === 'primitive') return expected.name === actual.name
     if (expected.kind === 'array' && actual.kind === 'array') return isAssignable(expected.element, actual.element)

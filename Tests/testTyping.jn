@@ -38,3 +38,19 @@ console.log(peter?.greet())
 type Address = {
     id : string | number
 }
+
+type StringOrConst = string | 0 | 1 | -1
+
+type StringEnum = 'one' | 'two' | 'three'
+
+type MultiEnum = 0 | 'one' | true | 'two'
+
+type Enum2 = 
+    | 'one'
+    | 'two'
+    | 0
+
+type Or2 = { name : string }
+    | string
+
+const ex2 : Enum2 = 1

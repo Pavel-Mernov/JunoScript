@@ -30,4 +30,14 @@ console.log("Inferred array of objects:", secondPersonName)
 # let invalidField: boolean = person.age
 # let invalidArray: number[] = [1, "two"]
 
+let people2 = [
+    { name: "Ada", age: 36 }, 
+    { name: "Linus", age: 56 },
+    { name: "Paul" }
+]
+
+for const person of people2
+    console.log(person, person.name, person.age)
+
+
 console.log("=== Inference tests complete ===")

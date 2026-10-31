@@ -74,6 +74,7 @@ function globals(): Env {
 export function printType(type: TypeNode): string {
     switch (type.kind) {
         case 'NamedType': return type.name
+        case 'LiteralType': return typeof type.value === 'string' ? JSON.stringify(type.value) : String(type.value)
         case 'GenericType': return `${type.name}<${type.args.map(printType).join(', ')}>`
         case 'UnionType': return type.types.map(printType).join(' | ')
         case 'IntersectionType': return type.types.map(printType).join(' & ')
@@ -176,6 +177,17 @@ function isAssignableTo(expected: TypeNode, actual: TypeNode, env: Env): boolean
             : target.types.some(part => isAssignableTo(part, value, env))
     }
     if (value.kind === 'UnionType') return value.types.every(part => isAssignableTo(target, part, env))
+    if (target.kind === 'LiteralType') {
+        if (value.kind === 'LiteralType') return typeof target.value === typeof value.value && target.value === value.value
+        if (value.kind === 'NamedType') {
+            const literalType = typeof target.value === 'string' ? 'string' : typeof target.value
+            return value.name === literalType || value.name === 'any'
+        }
+        return false
+    }
+    if (value.kind === 'LiteralType' && target.kind === 'NamedType') {
+        return target.name === (typeof value.value === 'string' ? 'string' : typeof value.value)
+    }
     if (target.kind === 'ArrayType' && value.kind === 'ArrayType') return isAssignableTo(target.element, value.element, env)
     if (target.kind === 'ObjectType' && value.kind === 'ObjectType') {
         return target.members.filter(member => !member.optional && !member.method && !isNullable(member.type, env)).every(member => {
@@ -274,6 +286,18 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
         case 'Array': {
             if (!expression.elements.length) return arrayOf(named('any'))
             const elements = expression.elements.map(item => inferExpression(item, env))
+            const resolvedElements = elements.map(item => resolveType(item, env))
+            if (resolvedElements.every(item => item.kind === 'ObjectType')) {
+                const objectElements = resolvedElements as Extract<TypeNode, { kind: 'ObjectType' }>[]
+                const memberNames = [...new Set(objectElements.flatMap(item => item.members.map(member => member.name)))]
+                const members = memberNames.map(name => {
+                    const present = objectElements.flatMap(item => item.members.filter(member => member.name === name))
+                    const types = present.map(member => member.type)
+                    if (present.length < objectElements.length) types.push(named('null'))
+                    return field(name, unionOf(types))
+                })
+                return arrayOf({ kind: 'ObjectType', members })
+            }
             return arrayOf(unionOf(elements))
         }
         case 'Object': {
@@ -449,7 +473,23 @@ class Analyzer {
     }
 
     private statements(statements: Statement[], env: Env): void {
-        for (const statement of statements) this.statement(statement, env)
+        const declaredHere = new Set<string>()
+        for (const statement of statements) {
+            const declarationName = statement.kind === 'Variable' || statement.kind === 'FunctionDeclaration' || statement.kind === 'TypeDeclaration'
+                ? statement.name
+                : undefined
+            if (declarationName && declaredHere.has(declarationName)) {
+                const loc = statement.loc
+                if (loc) this.diagnostics.push({
+                    line: loc.line,
+                    column: loc.column,
+                    length: declarationName.length,
+                    message: `Duplicate declaration '${declarationName}' in the same scope.`
+                })
+            }
+            if (declarationName) declaredHere.add(declarationName)
+            this.statement(statement, env)
+        }
     }
 
     private statement(statement: Statement, env: Env): void {
@@ -597,6 +637,8 @@ class Analyzer {
                 } else this.addHover(type.name, type.loc, `(type) ${type.name}`)
                 return
             }
+            case 'LiteralType':
+                return
             case 'GenericType': {
                 const symbol = env.get(type.name)
                 if (symbol) {
