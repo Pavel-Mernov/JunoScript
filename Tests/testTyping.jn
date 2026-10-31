@@ -28,6 +28,7 @@ const maria : Person? = {
 let peter : Person?
 
 console.log(maria?.surname)
+console.log("Person: ${paul.name} ${paul.surname}")
 console.log(paul.greet())
 console.log(maria?.greet())
 

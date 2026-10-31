@@ -1,0 +1,20 @@
+import { console } from 'juno:node'
+
+const name = "Ada"
+const age = 36
+const punctuation = "!"
+const greeting = `Hello, ${name}${punctuation}`
+const plainBacktick = `This backtick string has no interpolation.`
+const quotedGreeting = 'Welcome, ${name}'
+const escapedInterpolation = "This stays literal: \${name}"
+
+console.log(greeting)
+console.log(plainBacktick)
+console.log(quotedGreeting)
+console.log(escapedInterpolation)
+console.log(`Name: ${name}, next year: ${age + 1}`)
+
+const multiline = `Hello, ${name}!
+Your current age is ${age}.
+Next year you will be ${age + 1}.`
+console.log(multiline)

@@ -32,8 +32,16 @@
           "end": "\"",
           "patterns": [
             {
+              "name": "meta.interpolation.junoscript",
+              "begin": "(?<!\\\\)\\$\\{",
+              "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.junoscript" } },
+              "end": "\\}",
+              "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.junoscript" } },
+              "patterns": [{ "include": "$self" }]
+            },
+            {
               "name": "constant.character.escape.junoscript",
-              "match": "\\\\[nrt0\\\\\"'`]"
+              "match": "\\\\[nrt0\\\\\"'`$]"
             }
           ]
         },
@@ -43,8 +51,16 @@
           "end": "'",
           "patterns": [
             {
+              "name": "meta.interpolation.junoscript",
+              "begin": "(?<!\\\\)\\$\\{",
+              "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.junoscript" } },
+              "end": "\\}",
+              "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.junoscript" } },
+              "patterns": [{ "include": "$self" }]
+            },
+            {
               "name": "constant.character.escape.junoscript",
-              "match": "\\\\[nrt0\\\\\"'`]"
+              "match": "\\\\[nrt0\\\\\"'`$]"
             }
           ]
         },
@@ -54,8 +70,16 @@
           "end": "`",
           "patterns": [
             {
+              "name": "meta.interpolation.junoscript",
+              "begin": "(?<!\\\\)\\$\\{",
+              "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.junoscript" } },
+              "end": "\\}",
+              "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.junoscript" } },
+              "patterns": [{ "include": "$self" }]
+            },
+            {
               "name": "constant.character.escape.junoscript",
-              "match": "\\\\[nrt0\\\\\"'`]"
+              "match": "\\\\[nrt0\\\\\"'`$]"
             }
           ]
         }

@@ -59,6 +59,7 @@ let person = User(
 )
 
 console.log("Person name:", person.name)
+console.log("Formatted greeting: Hello, ${person.name}!")
 console.log("Object method:", person.greet())
 
 let boundGreet = person.greet

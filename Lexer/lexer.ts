@@ -180,6 +180,10 @@ export function Lexer(source: string): Lexer {
                     while (!this.isAtEnd) {
                         const current = advance()
 
+                        if (current === '\n' && quote !== '`') {
+                            throw new SyntaxError(`Unterminated string at ${tokenLine}:${tokenColumn}`)
+                        }
+
                         if (current === quote) {
                             closed = true
                             break
@@ -188,7 +192,7 @@ export function Lexer(source: string): Lexer {
                         if (current === '\\') {
                             if (this.isAtEnd) break
                             const escaped = advance()
-                            value += ({ n: '\n', r: '\r', t: '\t', '0': '\0' } as Record<string, string>)[escaped] ?? escaped
+                            value += escaped === '$' ? '\uE000' : (({ n: '\n', r: '\r', t: '\t', '0': '\0' } as Record<string, string>)[escaped] ?? escaped)
                         } else {
                             value += current
                         }

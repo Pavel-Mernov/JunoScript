@@ -174,6 +174,9 @@ function Lexer(source) {
           let closed = false;
           while (!this.isAtEnd) {
             const current = advance();
+            if (current === "\n" && quote !== "`") {
+              throw new SyntaxError(`Unterminated string at ${tokenLine}:${tokenColumn}`);
+            }
             if (current === quote) {
               closed = true;
               break;
@@ -181,7 +184,7 @@ function Lexer(source) {
             if (current === "\\") {
               if (this.isAtEnd) break;
               const escaped = advance();
-              value += { n: "\n", r: "\r", t: "	", "0": "\0" }[escaped] ?? escaped;
+              value += escaped === "$" ? "\uE000" : { n: "\n", r: "\r", t: "	", "0": "\0" }[escaped] ?? escaped;
             } else {
               value += current;
             }
@@ -253,7 +256,7 @@ function Lexer(source) {
 // ../Lexer/parser.ts
 var precedence = { "==": 1, "!=": 1, "<": 2, "<=": 2, ">": 2, ">=": 2, "|": 3, "&": 4, "+": 5, "-": 5, "??": 6, "*": 7, "/": 7, "%": 7 };
 var opTypes = { EqualEqual: "==", NotEqual: "!=", Less: "<", LessEqual: "<=", Greater: ">", GreaterEqual: ">=", Nullish: "??", Pipe: "|", Ampersand: "&", Plus: "+", Minus: "-", Multiply: "*", Divide: "/", Percent: "%" };
-var Parser = class {
+var Parser = class _Parser {
   constructor(tokens) {
     this.tokens = tokens;
   }
@@ -322,6 +325,13 @@ var Parser = class {
       topSeparators();
     }
     return body;
+  }
+  parseExpressionOnly() {
+    const value = this.expression();
+    while (this.match("Newline")) {
+    }
+    if (!this.is("EOF")) this.fail("Unexpected token after expression");
+    return value;
   }
   statement() {
     if (this.match("Keyword", "import")) return this.importStatement();
@@ -590,6 +600,47 @@ var Parser = class {
     }
     return left;
   }
+  templateExpression(value, loc) {
+    const parts = [];
+    let cursor = 0;
+    while (cursor < value.length) {
+      const start = value.indexOf("${", cursor);
+      if (start < 0) {
+        parts.push(value.slice(cursor).replace(/\uE000/g, "$"));
+        break;
+      }
+      if (start > cursor) parts.push(value.slice(cursor, start).replace(/\uE000/g, "$"));
+      let depth = 1, quote = "", escaped = false, end = start + 2;
+      for (; end < value.length; end++) {
+        const char = value[end];
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (quote) {
+          if (char === quote) quote = "";
+          continue;
+        }
+        if (char === '"' || char === "'" || char === "`") {
+          quote = char;
+          continue;
+        }
+        if (char === "{") depth++;
+        else if (char === "}" && --depth === 0) break;
+      }
+      if (depth !== 0) this.fail("Unterminated string interpolation");
+      const source = value.slice(start + 2, end).trim();
+      if (!source) this.fail("String interpolation cannot be empty");
+      parts.push(new _Parser(Lexer(source).tokenize()).parseExpressionOnly());
+      cursor = end + 1;
+    }
+    if (!parts.length) parts.push(value.replace(/\uE000/g, "$"));
+    return { kind: "Template", parts, loc };
+  }
   prefix() {
     if (this.match("Minus") || this.match("Bang")) {
       const token = this.tokens[this.pos - 1];
@@ -605,7 +656,8 @@ var Parser = class {
     }
     if (this.match("String")) {
       const token = this.tokens[this.pos - 1];
-      return { kind: "Literal", value: this.value(token), loc: this.loc(token) };
+      const value = this.value(token);
+      return value.includes("${") ? this.templateExpression(value, this.loc(token)) : { kind: "Literal", value: value.replace(/\uE000/g, "$"), loc: this.loc(token) };
     }
     if (this.match("Keyword", "true")) return { kind: "Literal", value: true, loc: this.loc(this.tokens[this.pos - 1]) };
     if (this.match("Keyword", "false")) return { kind: "Literal", value: false, loc: this.loc(this.tokens[this.pos - 1]) };
@@ -712,6 +764,8 @@ function inferredTypeNode(expression) {
   switch (expression.kind) {
     case "Literal":
       return { kind: "NamedType", name: typeof expression.value === "bigint" ? "BigInt" : expression.value === null ? "null" : typeof expression.value };
+    case "Template":
+      return { kind: "NamedType", name: "string" };
     case "Array":
       return { kind: "ArrayType", element: expression.elements[0] ? inferredTypeNode(expression.elements[0]) : { kind: "NamedType", name: "any" } };
     case "Object":
@@ -730,6 +784,8 @@ function inferExpressionType(expression, variables) {
       if (typeof expression.value === "string") return primitive("string");
       if (typeof expression.value === "boolean") return primitive("boolean");
       return primitive("null");
+    case "Template":
+      return primitive("string");
     case "Identifier":
       return variables.get(expression.name) ?? unknownType;
     case "Array": {
@@ -1194,6 +1250,8 @@ function binaryErrorMessage(operator, left, right) {
 }
 function inferExpression(expression, env) {
   switch (expression.kind) {
+    case "Template":
+      return named("string");
     case "Literal":
       return inferLiteral(expression.value);
     case "Assignment":
@@ -1559,6 +1617,9 @@ var Analyzer = class {
       case "Literal":
         this.addHover(literalLabel(expression.value), expression.loc, `(${printType(inferLiteral(expression.value))}) ${literalPreview(expression.value)}`);
         return;
+      case "Template":
+        for (const part of expression.parts) if (typeof part !== "string") this.walkExpression(part, env, thisType);
+        return;
       case "Identifier": {
         if (expression.name === "this") {
           const type = env.get("this")?.kind === "var" ? env.get("this").type : named("any");
@@ -1689,6 +1750,8 @@ function expressionStart(expression) {
     case "Array":
     case "Object":
     case "Unary":
+      return expression.loc;
+    case "Template":
       return expression.loc;
     case "Conditional":
       return expressionStart(expression.condition);

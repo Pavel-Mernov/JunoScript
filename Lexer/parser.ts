@@ -6,6 +6,7 @@ export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: bo
 export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression }
 export type Expression =
     | { kind: 'Literal'; value: string | number | bigint | boolean | null; loc?: Loc }
+    | { kind: 'Template'; parts: (string | Expression)[]; loc?: Loc }
     | { kind: 'Identifier'; name: string; loc?: Loc } | { kind: 'Array'; elements: Expression[]; loc?: Loc }
     | { kind: 'Object'; properties: { key: string; keyLoc?: Loc; value: Expression }[]; loc?: Loc }
     | { kind: 'Unary'; operator: string; operand: Expression; loc?: Loc }
@@ -63,6 +64,12 @@ export class Parser {
         topSeparators()
         while (!this.is('EOF')) { body.push(this.statement()); topSeparators() }
         return body
+    }
+    parseExpressionOnly(): Expression {
+        const value = this.expression()
+        while (this.match('Newline')) {}
+        if (!this.is('EOF')) this.fail('Unexpected token after expression')
+        return value
     }
     private statement(): Statement {
         if (this.match('Keyword', 'import')) return this.importStatement()
@@ -285,6 +292,35 @@ export class Parser {
         }
         return left
     }
+    private templateExpression(value: string, loc: Loc): Expression {
+        const parts: (string | Expression)[] = []
+        let cursor = 0
+        while (cursor < value.length) {
+            const start = value.indexOf('${', cursor)
+            if (start < 0) {
+                parts.push(value.slice(cursor).replace(/\uE000/g, '$'))
+                break
+            }
+            if (start > cursor) parts.push(value.slice(cursor, start).replace(/\uE000/g, '$'))
+            let depth = 1, quote = '', escaped = false, end = start + 2
+            for (; end < value.length; end++) {
+                const char = value[end]
+                if (escaped) { escaped = false; continue }
+                if (char === '\\') { escaped = true; continue }
+                if (quote) { if (char === quote) quote = ''; continue }
+                if (char === '"' || char === "'" || char === '`') { quote = char; continue }
+                if (char === '{') depth++
+                else if (char === '}' && --depth === 0) break
+            }
+            if (depth !== 0) this.fail('Unterminated string interpolation')
+            const source = value.slice(start + 2, end).trim()
+            if (!source) this.fail('String interpolation cannot be empty')
+            parts.push(new Parser(Lexer(source).tokenize()).parseExpressionOnly())
+            cursor = end + 1
+        }
+        if (!parts.length) parts.push(value.replace(/\uE000/g, '$'))
+        return { kind: 'Template', parts, loc }
+    }
     private prefix(): Expression {
         if (this.match('Minus') || this.match('Bang')) {
             const token = this.tokens[this.pos - 1]
@@ -300,7 +336,8 @@ export class Parser {
         }
         if (this.match('String')) {
             const token = this.tokens[this.pos - 1]
-            return { kind: 'Literal', value: this.value(token) as string, loc: this.loc(token) }
+            const value = this.value(token) as string
+            return value.includes('${') ? this.templateExpression(value, this.loc(token)) : { kind: 'Literal', value: value.replace(/\uE000/g, '$'), loc: this.loc(token) }
         }
         if (this.match('Keyword', 'true')) return { kind: 'Literal', value: true, loc: this.loc(this.tokens[this.pos - 1]) }
         if (this.match('Keyword', 'false')) return { kind: 'Literal', value: false, loc: this.loc(this.tokens[this.pos - 1]) }
@@ -385,6 +422,7 @@ function primitive(name: string): InferredType { return { kind: 'primitive', nam
 function inferredTypeNode(expression: Expression): TypeNode {
     switch (expression.kind) {
         case 'Literal': return { kind: 'NamedType', name: typeof expression.value === 'bigint' ? 'BigInt' : expression.value === null ? 'null' : typeof expression.value }
+        case 'Template': return { kind: 'NamedType', name: 'string' }
         case 'Array': return { kind: 'ArrayType', element: expression.elements[0] ? inferredTypeNode(expression.elements[0]) : { kind: 'NamedType', name: 'any' } }
         case 'Object': return { kind: 'ObjectType', members: expression.properties.map(property => ({ name: property.key, type: inferredTypeNode(property.value), optional: false, readonly: false, constant: false })) }
         case 'Conditional': return inferredTypeNode(expression.consequent)
@@ -403,6 +441,9 @@ function inferExpressionType(
             if (typeof expression.value === 'string') return primitive('string')
             if (typeof expression.value === 'boolean') return primitive('boolean')
             return primitive('null')
+
+        case 'Template':
+            return primitive('string')
 
         case 'Identifier':
             return variables.get(expression.name) ?? unknownType

@@ -60,6 +60,7 @@ export class Interpreter {
     private evaluate(expression: Expression, env: Environment): any {
         switch (expression.kind) {
             case 'Literal': return expression.value
+            case 'Template': return expression.parts.map(part => typeof part === 'string' ? part : String(this.evaluate(part, env))).join('')
             case 'Identifier':
                 if (expression.name === 'this') return this.lookup(env, 'this')?.value ?? null
                 const binding = this.lookup(env, expression.name)

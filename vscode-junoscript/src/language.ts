@@ -256,6 +256,7 @@ function binaryErrorMessage(operator: string, left: TypeNode, right: TypeNode): 
 
 function inferExpression(expression: Expression, env: Env): TypeNode {
     switch (expression.kind) {
+        case 'Template': return named('string')
         case 'Literal': return inferLiteral(expression.value)
         case 'Assignment': return inferExpression(expression.value, env)
         case 'Identifier': {
@@ -646,6 +647,9 @@ class Analyzer {
             case 'Literal':
                 this.addHover(literalLabel(expression.value), expression.loc, `(${printType(inferLiteral(expression.value))}) ${literalPreview(expression.value)}`)
                 return
+            case 'Template':
+                for (const part of expression.parts) if (typeof part !== 'string') this.walkExpression(part, env, thisType)
+                return
             case 'Identifier': {
                 if (expression.name === 'this') {
                     const type = env.get('this')?.kind === 'var' ? (env.get('this') as { type: TypeNode }).type : named('any')
@@ -782,6 +786,8 @@ function expressionStart(expression: Expression): Loc | undefined {
         case 'Array':
         case 'Object':
         case 'Unary':
+            return expression.loc
+        case 'Template':
             return expression.loc
         case 'Conditional':
             return expressionStart(expression.condition)
