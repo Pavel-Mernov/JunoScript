@@ -256,13 +256,22 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             return arrayOf(unionOf(elements))
         }
         case 'Object': {
+            // Build the object's shape before inferring methods so `this` inside a
+            // method can resolve both fields and other methods on the object.
             const members: TypeMember[] = expression.properties.map(property => {
                 if (property.value.kind === 'Function') {
-                    return method(property.key, property.value.params, property.value.returnType ?? inferFunctionReturnType(property.value.body, env))
+                    return method(property.key, property.value.params, property.value.returnType ?? named('any'))
                 }
                 return field(property.key, inferExpression(property.value, env))
             })
-            return { kind: 'ObjectType', members }
+            const objectType: TypeNode = { kind: 'ObjectType', members }
+            const methodEnv = new Map(env)
+            methodEnv.set('this', { kind: 'var', mutable: false, type: objectType })
+            for (const [index, property] of expression.properties.entries()) {
+                if (property.value.kind !== 'Function' || property.value.returnType) continue
+                members[index] = method(property.key, property.value.params, inferFunctionReturnType(property.value.body, methodEnv))
+            }
+            return objectType
         }
         case 'Unary': return expression.operator === '-' ? named('number') : named('boolean')
         case 'Binary': {
@@ -296,6 +305,7 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
         }
         case 'Call': {
             if (expression.callee.kind === 'Identifier' && expression.callee.name === 'isType') return named('boolean')
+            if (expression.callee.kind === 'Identifier' && env.get(expression.callee.name)?.kind === 'type') return named(expression.callee.name)
             const callee = inferExpression(expression.callee, env)
             if (callee.kind === 'FunctionType') return callee.result
             if (expression.callee.kind === 'Identifier') {
@@ -468,7 +478,7 @@ class Analyzer {
                                 if (property.keyLoc) this.diagnostics.push({ line: property.keyLoc.line, column: property.keyLoc.column, length: property.key.length, message: `Type '${printType(propertyType)}' is not assignable to type '${printType(member.type)}' for '${property.key}'.` })
                             }
                         }
-                        const missing = expected.members.filter(member => !member.optional && !member.method && !actualMembers.some(item => item.name === member.name))
+                        const missing = expected.members.filter(member => !member.optional && !member.method && !member.defaultValue && !actualMembers.some(item => item.name === member.name))
                         if (missing.length) {
                             const loc = statement.initializer.kind === 'Object' ? statement.initializer.loc : undefined
                             if (loc) this.diagnostics.push({

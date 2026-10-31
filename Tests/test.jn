@@ -20,7 +20,7 @@ type Result<T> = T | Error
 type User =
     {
         name: string
-        age?: number
+        age: number = 18
         readonly id: number
         greet(): string
     }
@@ -49,14 +49,14 @@ fun greet(name: string) =
 
 console.log(greet("Pasha"))
 
-let person =
+let person = User(
     {
         name: "Pasha"
-        age: 30
         id: 1
         greet() =
             return "Hello, " + this.name
     }
+)
 
 console.log("Person name:", person.name)
 console.log("Object method:", person.greet())
@@ -81,7 +81,7 @@ for const item of items
 let isNumber = isType<number>(answer)
 console.log("isType<number>(answer):", isNumber)
 
-let combined: User & { active: boolean } = person
+let combined: User & { active: boolean? } = person
 console.log("Intersection-typed value:", combined)
 
 console.log("Введите имя:")

@@ -305,6 +305,10 @@ var Parser = class {
     while (this.match("Newline") || this.match("Comma") || this.match("Indent") || this.match("Dedent")) {
     }
   }
+  parenthesisSeparators() {
+    while (this.match("Newline") || this.match("Indent") || this.match("Dedent")) {
+    }
+  }
   parse() {
     const body = [];
     const topSeparators = () => {
@@ -469,8 +473,9 @@ var Parser = class {
           params = this.parameters();
           type = this.match("Colon") ? this.type() : { kind: "NamedType", name: "void" };
         } else {
-          this.take("Colon", "Expected ':' after field name");
-          type = this.type();
+          if (this.match("Colon")) type = this.type();
+          else if (this.is("Equal")) type = { kind: "NamedType", name: "any" };
+          else this.fail("Expected ':' or '=' after field name");
           if (type.kind === "UnionType") {
             const nonNull = type.types.filter((part) => !(part.kind === "NamedType" && part.name === "null"));
             if (nonNull.length === 1 && nonNull.length !== type.types.length) {
@@ -481,6 +486,7 @@ var Parser = class {
         }
         const defaultValue = this.match("Equal") ? this.expression() : void 0;
         if (constant && defaultValue === void 0) this.fail("const type fields need a default value");
+        if (!method2 && defaultValue && type.kind === "NamedType" && type.name === "any") type = inferredTypeNode(defaultValue);
         members.push({ name, loc, optional, readonly, constant, type, defaultValue, method: method2, params });
         this.objectSeparators();
       }
@@ -553,9 +559,11 @@ var Parser = class {
       }
       if (this.match("LeftParen")) {
         const args = [];
+        this.parenthesisSeparators();
         if (!this.is("RightParen")) do {
           args.push(this.expression());
-        } while (this.match("Comma"));
+          this.parenthesisSeparators();
+        } while (this.match("Comma") && (this.parenthesisSeparators(), true));
         this.take("RightParen");
         left = { kind: "Call", callee: left, args, typeArguments };
         typeArguments = void 0;
@@ -686,6 +694,18 @@ var Parser = class {
 var unknownType = { kind: "unknown" };
 function primitive(name) {
   return { kind: "primitive", name };
+}
+function inferredTypeNode(expression) {
+  switch (expression.kind) {
+    case "Literal":
+      return { kind: "NamedType", name: typeof expression.value === "bigint" ? "BigInt" : expression.value === null ? "null" : typeof expression.value };
+    case "Array":
+      return { kind: "ArrayType", element: expression.elements[0] ? inferredTypeNode(expression.elements[0]) : { kind: "NamedType", name: "any" } };
+    case "Object":
+      return { kind: "ObjectType", members: expression.properties.map((property) => ({ name: property.key, type: inferredTypeNode(property.value), optional: false, readonly: false, constant: false })) };
+    default:
+      return { kind: "NamedType", name: "any" };
+  }
 }
 function inferExpressionType(expression, variables) {
   switch (expression.kind) {
@@ -855,7 +875,7 @@ function typeFromNode(type, aliases = /* @__PURE__ */ new Map(), resolving = /* 
   if (type.kind === "GenericType" && (type.name === "Array" || type.name === "ReadonlyArray")) {
     return { kind: "array", element: type.args[0] ? typeFromNode(type.args[0], aliases, resolving) : unknownType };
   }
-  if (type.kind === "ObjectType") return { kind: "object", fields: new Map(type.members.filter((member) => !member.optional).map((member) => [member.name, typeFromNode(member.type, aliases, resolving)])) };
+  if (type.kind === "ObjectType") return { kind: "object", fields: new Map(type.members.filter((member) => !member.optional && member.defaultValue === void 0).map((member) => [member.name, typeFromNode(member.type, aliases, resolving)])) };
   if (type.kind === "FunctionType") return { kind: "function" };
   return unknownType;
 }
@@ -1165,11 +1185,18 @@ function inferExpression(expression, env) {
     case "Object": {
       const members = expression.properties.map((property) => {
         if (property.value.kind === "Function") {
-          return method(property.key, property.value.params, property.value.returnType ?? inferFunctionReturnType2(property.value.body, env));
+          return method(property.key, property.value.params, property.value.returnType ?? named("any"));
         }
         return field(property.key, inferExpression(property.value, env));
       });
-      return { kind: "ObjectType", members };
+      const objectType = { kind: "ObjectType", members };
+      const methodEnv = new Map(env);
+      methodEnv.set("this", { kind: "var", mutable: false, type: objectType });
+      for (const [index, property] of expression.properties.entries()) {
+        if (property.value.kind !== "Function" || property.value.returnType) continue;
+        members[index] = method(property.key, property.value.params, inferFunctionReturnType2(property.value.body, methodEnv));
+      }
+      return objectType;
     }
     case "Unary":
       return expression.operator === "-" ? named("number") : named("boolean");
@@ -1204,6 +1231,7 @@ function inferExpression(expression, env) {
     }
     case "Call": {
       if (expression.callee.kind === "Identifier" && expression.callee.name === "isType") return named("boolean");
+      if (expression.callee.kind === "Identifier" && env.get(expression.callee.name)?.kind === "type") return named(expression.callee.name);
       const callee = inferExpression(expression.callee, env);
       if (callee.kind === "FunctionType") return callee.result;
       if (expression.callee.kind === "Identifier") {
@@ -1354,7 +1382,7 @@ var Analyzer = class {
                 if (property.keyLoc) this.diagnostics.push({ line: property.keyLoc.line, column: property.keyLoc.column, length: property.key.length, message: `Type '${printType(propertyType)}' is not assignable to type '${printType(member.type)}' for '${property.key}'.` });
               }
             }
-            const missing = expected.members.filter((member) => !member.optional && !member.method && !actualMembers.some((item) => item.name === member.name));
+            const missing = expected.members.filter((member) => !member.optional && !member.method && !member.defaultValue && !actualMembers.some((item) => item.name === member.name));
             if (missing.length) {
               const loc = statement.initializer.kind === "Object" ? statement.initializer.loc : void 0;
               if (loc) this.diagnostics.push({

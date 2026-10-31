@@ -33,8 +33,17 @@ export class Interpreter {
                 }
                 return
             }
-            case 'Variable': this.declare(env, statement.name, statement.initializer ? this.evaluate(statement.initializer, env) : null, statement.mutable, statement.type); return
-            case 'TypeDeclaration': env.types.set(statement.name, statement.value); return
+            case 'Variable': {
+                let value = statement.initializer ? this.evaluate(statement.initializer, env) : null
+                if (statement.type && value && typeof value === 'object' && !Array.isArray(value)) value = this.applyTypeDefaults(value, statement.type, env)
+                this.declare(env, statement.name, value, statement.mutable, statement.type)
+                return
+            }
+            case 'TypeDeclaration': {
+                env.types.set(statement.name, statement.value)
+                this.declare(env, statement.name, { __junoTypeConstructor: true, typeName: statement.name }, false)
+                return
+            }
             case 'FunctionDeclaration': this.declare(env, statement.name, { __junoFunction: true, params: statement.params, body: statement.body, closure: env } satisfies RuntimeFunction, false); return
             case 'Return': throw new ReturnValue(statement.value ? this.evaluate(statement.value, env) : null)
             case 'ExpressionStatement': this.evaluate(statement.expression, env); return
@@ -186,6 +195,11 @@ export class Interpreter {
                 const args = expression.args.map(arg => this.evaluate(arg, env))
                 if (expression.typeArguments?.length) args.push(expression.typeArguments[0].kind === 'NamedType' ? expression.typeArguments[0].name : 'object')
                 if (typeof callee === 'function') return callee.apply(thisValue, args) ?? null
+                if (callee?.__junoTypeConstructor) {
+                    const input = args[0]
+                    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new TypeError(`Constructor '${callee.typeName}' expects an object`)
+                    return this.applyTypeDefaults(input, { kind: 'NamedType', name: callee.typeName }, env)
+                }
                 if (callee?.__junoFunction) return this.callFunction(callee, args, thisValue ?? callee.thisValue)
                 throw new TypeError('Value is not callable')
             }
@@ -226,6 +240,33 @@ export class Interpreter {
             return parentType ? this.findTypeMember(parentType, expression.property, env)?.type ?? null : null
         }
         return null
+    }
+
+    private applyTypeDefaults<T extends Record<string, any>>(value: T, type: TypeNode, env: Environment, resolving = new Set<string>()): T {
+        if (type.kind === 'NamedType') {
+            if (resolving.has(type.name)) return value
+            for (let current: Environment | undefined = env; current; current = current.parent) {
+                const alias = current.types.get(type.name)
+                if (alias) return this.applyTypeDefaults(value, alias, env, new Set([...resolving, type.name]))
+            }
+            return value
+        }
+        if (type.kind === 'IntersectionType') {
+            for (const part of type.types) this.applyTypeDefaults(value, part, env, resolving)
+            return value
+        }
+        if (type.kind !== 'ObjectType') return value
+        for (const member of type.members) {
+            if (member.method) continue
+            if (!Object.prototype.hasOwnProperty.call(value, member.name) && member.defaultValue) {
+                ;(value as Record<string, any>)[member.name] = this.evaluate(member.defaultValue, env)
+            }
+            const fieldValue = value[member.name]
+            if (fieldValue && typeof fieldValue === 'object' && !Array.isArray(fieldValue)) {
+                this.applyTypeDefaults(fieldValue, member.type, env, resolving)
+            }
+        }
+        return value
     }
 
     private findTypeMember(type: TypeNode, name: string, env: Environment, resolving = new Set<string>()): { type: TypeNode; optional: boolean } | null {

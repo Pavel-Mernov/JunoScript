@@ -55,6 +55,7 @@ export class Parser {
     }
     private separators() { while (this.match('Newline') || this.match('Comma')) {} }
     private objectSeparators() { while (this.match('Newline') || this.match('Comma') || this.match('Indent') || this.match('Dedent')) {} }
+    private parenthesisSeparators() { while (this.match('Newline') || this.match('Indent') || this.match('Dedent')) {} }
     parse(): Statement[] {
         const body: Statement[] = []
         const topSeparators = () => { while (this.match('Newline') || this.match('Comma') || this.match('Dedent')) {} }
@@ -187,7 +188,9 @@ export class Parser {
                 let params: Parameter[] | undefined, method = false, type: TypeNode
                 if (this.is('LeftParen')) { method = true; params = this.parameters(); type = this.match('Colon') ? this.type() : { kind: 'NamedType', name: 'void' } }
                 else {
-                    this.take('Colon', "Expected ':' after field name"); type = this.type()
+                    if (this.match('Colon')) type = this.type()
+                    else if (this.is('Equal')) type = { kind: 'NamedType', name: 'any' }
+                    else this.fail("Expected ':' or '=' after field name")
                     // Accept `field: Type?` as optional property syntax as well as `field?: Type`.
                     if (type.kind === 'UnionType') {
                         const nonNull = type.types.filter(part => !(part.kind === 'NamedType' && part.name === 'null'))
@@ -196,6 +199,7 @@ export class Parser {
                 }
                 const defaultValue = this.match('Equal') ? this.expression() : undefined
                 if (constant && defaultValue === undefined) this.fail('const type fields need a default value')
+                if (!method && defaultValue && type.kind === 'NamedType' && type.name === 'any') type = inferredTypeNode(defaultValue)
                 members.push({ name, loc, optional, readonly, constant, type, defaultValue, method, params }); this.objectSeparators()
             }
             this.take('RightBrace'); result = { kind: 'ObjectType', members }
@@ -245,7 +249,16 @@ export class Parser {
                 left = { kind: 'Index', object: left, index, loc: this.loc(token) }
                 continue
             }
-            if (this.match('LeftParen')) { const args: Expression[] = []; if (!this.is('RightParen')) do { args.push(this.expression()) } while (this.match('Comma')); this.take('RightParen'); left = { kind: 'Call', callee: left, args, typeArguments }; typeArguments = undefined; continue }
+            if (this.match('LeftParen')) {
+                const args: Expression[] = []
+                this.parenthesisSeparators()
+                if (!this.is('RightParen')) do {
+                    args.push(this.expression())
+                    this.parenthesisSeparators()
+                } while (this.match('Comma') && (this.parenthesisSeparators(), true))
+                this.take('RightParen')
+                left = { kind: 'Call', callee: left, args, typeArguments }; typeArguments = undefined; continue
+            }
             const op = opTypes[this.current.type], p = op ? precedence[op] : undefined
             if (!op || p === undefined || p < min) break
             const operatorToken = this.current
@@ -349,6 +362,15 @@ type InferredType =
 
 const unknownType: InferredType = { kind: 'unknown' }
 function primitive(name: string): InferredType { return { kind: 'primitive', name } }
+
+function inferredTypeNode(expression: Expression): TypeNode {
+    switch (expression.kind) {
+        case 'Literal': return { kind: 'NamedType', name: typeof expression.value === 'bigint' ? 'BigInt' : expression.value === null ? 'null' : typeof expression.value }
+        case 'Array': return { kind: 'ArrayType', element: expression.elements[0] ? inferredTypeNode(expression.elements[0]) : { kind: 'NamedType', name: 'any' } }
+        case 'Object': return { kind: 'ObjectType', members: expression.properties.map(property => ({ name: property.key, type: inferredTypeNode(property.value), optional: false, readonly: false, constant: false })) }
+        default: return { kind: 'NamedType', name: 'any' }
+    }
+}
 
 function inferExpressionType(
     expression: Expression,
@@ -582,7 +604,7 @@ function typeFromNode(type: TypeNode, aliases: Map<string, TypeNode> = new Map()
     if (type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray')) {
         return { kind: 'array', element: type.args[0] ? typeFromNode(type.args[0], aliases, resolving) : unknownType }
     }
-    if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.filter(member => !member.optional).map(member => [member.name, typeFromNode(member.type, aliases, resolving)])) }
+    if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.filter(member => !member.optional && member.defaultValue === undefined).map(member => [member.name, typeFromNode(member.type, aliases, resolving)])) }
     if (type.kind === 'FunctionType') return { kind: 'function' }
     return unknownType
 }
