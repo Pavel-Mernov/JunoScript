@@ -170,11 +170,15 @@ function isAssignableTo(expected: TypeNode, actual: TypeNode, env: Env): boolean
     const target = resolveType(expected, env)
     const value = resolveType(actual, env)
     if (isNamedType(target, 'any') || isNamedType(value, 'any')) return true
-    if (target.kind === 'UnionType') return target.types.some(part => isAssignableTo(part, value, env))
+    if (target.kind === 'UnionType') {
+        return value.kind === 'UnionType'
+            ? value.types.every(valuePart => target.types.some(targetPart => isAssignableTo(targetPart, valuePart, env)))
+            : target.types.some(part => isAssignableTo(part, value, env))
+    }
     if (value.kind === 'UnionType') return value.types.every(part => isAssignableTo(target, part, env))
     if (target.kind === 'ArrayType' && value.kind === 'ArrayType') return isAssignableTo(target.element, value.element, env)
     if (target.kind === 'ObjectType' && value.kind === 'ObjectType') {
-        return target.members.filter(member => !member.optional && !member.method).every(member => {
+        return target.members.filter(member => !member.optional && !member.method && !isNullable(member.type, env)).every(member => {
             const actualMember = value.members.find(item => item.name === member.name)
             return Boolean(actualMember && isAssignableTo(member.type, actualMember.type, env))
         }) && target.members.filter(member => !member.method).every(member => {
@@ -203,12 +207,28 @@ function isNamedType(type: TypeNode, name: string): boolean {
     return type.kind === 'NamedType' && type.name === name
 }
 
+function removeNull(type: TypeNode): TypeNode {
+    if (type.kind !== 'UnionType') return isNamedType(type, 'null') ? named('any') : type
+    return unionOf(type.types.filter(part => !isNamedType(part, 'null')))
+}
+
+function isNullable(type: TypeNode, env: Env): boolean {
+    const resolved = resolveType(type, env)
+    return isNamedType(resolved, 'null') || (resolved.kind === 'UnionType' && resolved.types.some(part => isNamedType(resolveType(part, env), 'null')))
+}
+
 function hasSameNumericType(left: TypeNode, right: TypeNode): boolean {
     return (isNamedType(left, 'number') && isNamedType(right, 'number')) ||
         (isNamedType(left, 'BigInt') && isNamedType(right, 'BigInt'))
 }
 
 function binaryResultType(operator: string, left: TypeNode, right: TypeNode): TypeNode {
+    if (operator === '??') {
+        const remaining = left.kind === 'UnionType'
+            ? left.types.filter(part => !isNamedType(part, 'null'))
+            : isNamedType(left, 'null') ? [] : [left]
+        return unionOf([...remaining, right])
+    }
     if (operator === '+') {
         if (hasSameNumericType(left, right) || (isNamedType(left, 'string') && isNamedType(right, 'string'))) return left
         return errorType()
@@ -273,7 +293,9 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             }
             return objectType
         }
-        case 'Unary': return expression.operator === '-' ? named('number') : named('boolean')
+        case 'Unary': return expression.operator === 'postfix!' ? removeNull(inferExpression(expression.operand, env)) : expression.operator === '-' ? named('number') : named('boolean')
+        case 'Conditional':
+            return unionOf([inferExpression(expression.consequent, env), inferExpression(expression.alternate, env)])
         case 'Binary': {
             const left = inferExpression(expression.left, env)
             const right = inferExpression(expression.right, env)
@@ -281,11 +303,14 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
         }
         case 'Member': {
             const objectType = inferExpression(expression.object, env)
-            const resolvedObjectType = resolveType(objectType, env)
-            const member = lookupMember(objectType, expression.property, env)
+            const nonNullObjectType = removeNull(resolveType(objectType, env))
+            const resolvedObjectType = resolveType(nonNullObjectType, env)
+            const member = lookupMember(nonNullObjectType, expression.property, env)
             if (!member) return resolvedObjectType.kind === 'ObjectType' ? named('null') : named('any')
-            if (isFunctionSymbol(member)) return { kind: 'FunctionType', params: member.params.map(param => param.type ?? named('any')), result: member.returnType }
-            return member
+            const memberType = isFunctionSymbol(member)
+                ? { kind: 'FunctionType', params: member.params.map(param => param.type ?? named('any')), result: member.returnType } as TypeNode
+                : member
+            return expression.optional ? unionOf([memberType, named('null')]) : memberType
         }
         case 'Index': {
             const objectType = inferExpression(expression.object, env)
@@ -455,10 +480,10 @@ class Analyzer {
             case 'TypeDeclaration': {
                 const symbol: SymbolInfo = { kind: 'type', generics: statement.generics, value: statement.value }
                 this.bind(env, statement.name, symbol)
+                this.walkType(statement.value, env)
                 const printed = printSymbol(statement.name, symbol)
                 this.addHover(statement.name, statement.loc, printed.code, printed.docs)
                 statement.generics.forEach((name, index) => this.addHover(name, statement.genericLocs?.[index], `(type parameter) ${name}`))
-                this.walkType(statement.value, env)
                 return
             }
             case 'Variable': {
@@ -478,7 +503,7 @@ class Analyzer {
                                 if (property.keyLoc) this.diagnostics.push({ line: property.keyLoc.line, column: property.keyLoc.column, length: property.key.length, message: `Type '${printType(propertyType)}' is not assignable to type '${printType(member.type)}' for '${property.key}'.` })
                             }
                         }
-                        const missing = expected.members.filter(member => !member.optional && !member.method && !member.defaultValue && !actualMembers.some(item => item.name === member.name))
+                        const missing = expected.members.filter(member => !member.optional && !member.method && !member.defaultValue && !isNullable(member.type, env) && !actualMembers.some(item => item.name === member.name))
                         if (missing.length) {
                             const loc = statement.initializer.kind === 'Object' ? statement.initializer.loc : undefined
                             if (loc) this.diagnostics.push({
@@ -537,12 +562,14 @@ class Analyzer {
                 return
             case 'If': {
                 this.walkExpression(statement.condition, env)
+                if (isNullable(inferExpression(statement.condition, env), env)) this.addDiagnostic(expressionStart(statement.condition), 'Nullable value cannot be used as a condition; use ! or ?? to handle null.')
                 this.statements(statement.consequent, new Map(env))
                 if (statement.alternate) this.statements(statement.alternate, new Map(env))
                 return
             }
             case 'While':
                 this.walkExpression(statement.condition, env)
+                if (isNullable(inferExpression(statement.condition, env), env)) this.addDiagnostic(expressionStart(statement.condition), 'Nullable value cannot be used as a condition; use ! or ?? to handle null.')
                 this.statements(statement.body, new Map(env))
                 return
             case 'ForOf': {
@@ -590,6 +617,14 @@ class Analyzer {
                 this.walkType(type.result, env)
                 return
             case 'ObjectType':
+                for (const member of type.members) {
+                    if (!member.method || !member.body) continue
+                    const local = new Map(env)
+                    this.bind(local, 'this', { kind: 'var', mutable: false, type })
+                    for (const param of member.params ?? []) this.bind(local, param.name, { kind: 'var', mutable: true, type: param.type ?? named('any') })
+                    if (isNamedType(member.type, 'any')) member.type = inferFunctionReturnType(member.body, local)
+                    this.statements(member.body, local)
+                }
                 for (const member of type.members) {
                     const signature = member.method
                         ? `(method) ${member.name}(${(member.params ?? []).map(printParam).join(', ')}): ${printType(member.type)}`
@@ -644,17 +679,25 @@ class Analyzer {
             }
             case 'Unary':
                 this.walkExpression(expression.operand, env, thisType)
+                if (expression.operator !== 'postfix!' && isNullable(inferExpression(expression.operand, env), env)) this.addDiagnostic(expression.loc, 'Nullable value cannot be used with this operator; use ! or ?? to handle null.')
                 return
             case 'Binary': {
                 this.walkExpression(expression.left, env, thisType)
                 this.walkExpression(expression.right, env, thisType)
-                const message = binaryErrorMessage(expression.operator, inferExpression(expression.left, env), inferExpression(expression.right, env))
-                if (message) this.addDiagnostic(expression.loc, message)
+                const leftType = inferExpression(expression.left, env), rightType = inferExpression(expression.right, env)
+                const nullComparison = ['==', '!='].includes(expression.operator) && (expression.left.kind === 'Literal' && expression.left.value === null || expression.right.kind === 'Literal' && expression.right.value === null)
+                if (expression.operator !== '??' && !nullComparison && (isNullable(leftType, env) || isNullable(rightType, env))) {
+                    this.addDiagnostic(expression.loc, 'Nullable value cannot be used with this operator; use ! or ?? to handle null.')
+                } else {
+                    const message = binaryErrorMessage(expression.operator, leftType, rightType)
+                    if (message) this.addDiagnostic(expression.loc, message)
+                }
                 return
             }
             case 'Index': {
                 this.walkExpression(expression.object, env, thisType)
                 this.walkExpression(expression.index, env, thisType)
+                if (isNullable(inferExpression(expression.object, env), env)) this.addDiagnostic(expression.loc, 'Cannot index a nullable value; use ! or ?? to handle null.')
                 if (expression.loc) {
                     this.hovers.push({
                         line: expression.loc.line,
@@ -668,8 +711,11 @@ class Analyzer {
             case 'Member': {
                 this.walkExpression(expression.object, env, thisType)
                 const objectType = inferExpression(expression.object, env)
-                const resolvedObjectType = resolveType(objectType, env)
-                const member = lookupMember(objectType, expression.property, env)
+                const nullableObject = isNullable(objectType, env)
+                const nonNullObjectType = removeNull(resolveType(objectType, env))
+                const resolvedObjectType = resolveType(nonNullObjectType, env)
+                const member = lookupMember(nonNullObjectType, expression.property, env)
+                if (nullableObject && !expression.optional) this.diagnostics.push({ line: expression.loc?.line ?? 1, column: expression.loc?.column ?? 1, length: expression.property.length, message: `Cannot access '${expression.property}' on a nullable value; use ! or ?., or ?? to handle null.` })
                 if (isFunctionSymbol(member)) {
                     this.addHover(expression.property, expression.loc, `(method) ${expression.property}(${member.params.map(printParam).join(', ')}): ${printType(member.returnType)}`)
                 } else if (member) {
@@ -686,6 +732,9 @@ class Analyzer {
             }
             case 'Call':
                 this.walkExpression(expression.callee, env, thisType)
+                if (isNullable(inferExpression(expression.callee, env), env) && !(expression.callee.kind === 'Member' && expression.callee.optional)) {
+                    this.addDiagnostic(expressionStart(expression.callee), 'Cannot call a nullable value; use ! or ?? to handle null.')
+                }
                 expression.args.forEach(arg => this.walkExpression(arg, env, thisType))
                 expression.typeArguments?.forEach(type => this.walkType(type, env))
                 this.addParameterHints(expression.callee, expression.args, env)
@@ -693,6 +742,11 @@ class Analyzer {
             case 'Function':
                 this.walkFunction(expression, env)
                 return
+        case 'Conditional':
+            this.walkExpression(expression.condition, env, thisType)
+            this.walkExpression(expression.consequent, env, thisType)
+            this.walkExpression(expression.alternate, env, thisType)
+            return
         }
     }
 
@@ -729,9 +783,13 @@ function expressionStart(expression: Expression): Loc | undefined {
         case 'Object':
         case 'Unary':
             return expression.loc
+        case 'Conditional':
+            return expressionStart(expression.condition)
         case 'Binary':
             return expressionStart(expression.left)
         case 'Member':
+            return expressionStart(expression.object)
+        case 'Index':
             return expressionStart(expression.object)
         case 'Call':
             return expressionStart(expression.callee)

@@ -7,9 +7,11 @@ import { console } from 'juno:node'
 const bigint1 = 1n
 
 type Person = {
-    name : string
-    surname : string?,
-    age : number
+    name: string
+    surname: string?
+    age: number
+    greet() =
+        return "Hello, " + this.name + " " + (this.surname ?? '')
 }
 
 const paul : Person = {
@@ -18,12 +20,19 @@ const paul : Person = {
     age : 23
 }
 
-const maria : Person = {
+const maria : Person? = {
     age: 22,
     name : 'Maria'
 }
 
-console.log(maria.surname)
+let peter : Person?
+
+console.log(maria?.surname)
+console.log(paul.greet())
+console.log(maria?.greet())
+
+console.log(peter?.surname)
+console.log(peter?.greet())
 
 type Address = {
     id : string | number

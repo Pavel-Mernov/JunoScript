@@ -1,0 +1,31 @@
+import { console } from 'juno:node'
+
+const ready = true
+const hasName = false
+
+const status = ready ? "ready" : "waiting"
+const alternateStatus = hasName ? "named" : "anonymous"
+console.log("ternary:", status, alternateStatus)
+
+let optionalName: string? = null
+let displayName = optionalName ?? "Guest"
+console.log("nullish:", displayName)
+let providedName: string? = "Pasha"
+let chosenName = providedName ?? "Guest"
+console.log("nullish with a value:", chosenName)
+
+if !hasName
+    console.log("not hasName")
+
+if ready & !hasName
+    console.log("AND condition")
+
+if hasName | ready
+    console.log("OR condition")
+
+if ready & (hasName | !hasName)
+    console.log("combined condition")
+
+const number = ready ? 42 : 0
+const fallbackNumber = optionalName == null ? 7 : 8
+console.log("ternary values:", number, fallbackNumber)

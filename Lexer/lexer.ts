@@ -3,7 +3,7 @@ export type TokenType =
     | 'Newline' | 'Indent' | 'Dedent' | 'EOF'
     | 'Plus' | 'Minus' | 'Multiply' | 'Divide' | 'Percent'
     | 'Equal' | 'EqualEqual' | 'NotEqual'
-    | 'Less' | 'LessEqual' | 'Greater' | 'GreaterEqual'
+    | 'Less' | 'LessEqual' | 'Greater' | 'GreaterEqual' | 'Nullish'
     | 'Arrow' | 'FatArrow' | 'Colon' | 'Comma' | 'Dot' | 'Question'
     | 'Pipe' | 'Ampersand' | 'Bang'
     | 'LeftParen' | 'RightParen' | 'LeftBracket' | 'RightBracket'
@@ -207,6 +207,7 @@ export function Lexer(source: string): Lexer {
                     '!=': 'NotEqual',
                     '<=': 'LessEqual',
                     '>=': 'GreaterEqual',
+                    '??': 'Nullish',
                     '=>': 'FatArrow',
                     '->': 'Arrow'
                 }

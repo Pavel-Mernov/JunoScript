@@ -47,8 +47,8 @@ export class Interpreter {
             case 'FunctionDeclaration': this.declare(env, statement.name, { __junoFunction: true, params: statement.params, body: statement.body, closure: env } satisfies RuntimeFunction, false); return
             case 'Return': throw new ReturnValue(statement.value ? this.evaluate(statement.value, env) : null)
             case 'ExpressionStatement': this.evaluate(statement.expression, env); return
-            case 'If': this.executeStatements(this.evaluate(statement.condition, env) ? statement.consequent : (statement.alternate ?? []), this.childEnvironment(env)); return
-            case 'While': while (this.evaluate(statement.condition, env)) this.executeStatements(statement.body, this.childEnvironment(env)); return
+            case 'If': this.executeStatements(this.requireCondition(this.evaluate(statement.condition, env)) ? statement.consequent : (statement.alternate ?? []), this.childEnvironment(env)); return
+            case 'While': while (this.requireCondition(this.evaluate(statement.condition, env))) this.executeStatements(statement.body, this.childEnvironment(env)); return
             case 'ForOf': {
                 const values = this.evaluate(statement.iterable, env) as any
                 for (const value of values) { const local = this.childEnvironment(env); this.declare(local, statement.binding, value, statement.mutable); this.executeStatements(statement.body, local) }
@@ -84,20 +84,33 @@ export class Interpreter {
                 }
                 return object
             }
-            case 'Unary': { const value = this.evaluate(expression.operand, env); return expression.operator === '-' ? -value : !value }
+            case 'Unary': {
+                const value = this.evaluate(expression.operand, env)
+                if (expression.operator === 'postfix!') {
+                    if (value == null) throw new TypeError('Non-null assertion failed: value is null')
+                    return value
+                }
+                if (value == null) throw new TypeError(`Cannot apply '${expression.operator}' to null`)
+                return expression.operator === '-' ? -value : !value
+            }
             case 'Binary': {
                 const left = this.evaluate(expression.left, env)
+                if (expression.operator === '??') return left ?? this.evaluate(expression.right, env)
                 const right = this.evaluate(expression.right, env)
+                if ((left == null || right == null) && expression.operator !== '==' && expression.operator !== '!=') {
+                    throw new TypeError(`Cannot apply '${expression.operator}' to null; use ! or ?? to handle null`)
+                }
             
                 const bothNumbers = typeof left === 'number' && typeof right === 'number'
                 const bothBigInts = typeof left === 'bigint' && typeof right === 'bigint'
                 const bothStrings = typeof left === 'string' && typeof right === 'string'
+                const typeName = (value: unknown) => value === null ? 'null' : typeof value
             
                 switch (expression.operator) {
                     case '+':
                         if (bothNumbers || bothBigInts || bothStrings) return left + (right as any)
                         throw new TypeError(
-                            `Invalid operands for '+': ${typeof left} and ${typeof right}`
+                            `Invalid operands for '+': ${typeName(left)} and ${typeName(right)}`
                         )
             
                     case '-':
@@ -163,6 +176,10 @@ export class Interpreter {
                         throw new Error(`Unsupported operator '${expression.operator}'`)
                 }
             }
+            case 'Conditional':
+                return this.requireCondition(this.evaluate(expression.condition, env))
+                    ? this.evaluate(expression.consequent, env)
+                    : this.evaluate(expression.alternate, env)
             case 'Member': {
                 const object = this.evaluate(expression.object, env)
                 return this.readMember(object, expression.property, expression.optional, expression.object, env)
@@ -189,6 +206,7 @@ export class Interpreter {
                 let callee: any
                 if (expression.callee.kind === 'Member') {
                     thisValue = this.evaluate(expression.callee.object, env)
+                    if (thisValue == null && expression.callee.optional) return null
                     callee = this.readMember(thisValue, expression.callee.property, expression.callee.optional, expression.callee.object, env)
                 }
                 else callee = this.evaluate(expression.callee, env)
@@ -225,6 +243,10 @@ export class Interpreter {
     }
 
     private childEnvironment(parent: Environment): Environment { return { bindings: new Map(), types: new Map(), parent } }
+    private requireCondition(value: unknown): boolean {
+        if (value == null) throw new TypeError('Cannot use null as a condition; use ! or ?? to handle null')
+        return Boolean(value)
+    }
     private lookup(env: Environment, name: string): Binding | undefined {
         for (let current: Environment | undefined = env; current; current = current.parent) {
             const binding = current.bindings.get(name)
@@ -255,9 +277,21 @@ export class Interpreter {
             for (const part of type.types) this.applyTypeDefaults(value, part, env, resolving)
             return value
         }
+        if (type.kind === 'UnionType') {
+            for (const part of type.types) {
+                if (part.kind === 'NamedType' && part.name === 'null') continue
+                this.applyTypeDefaults(value, part, env, resolving)
+            }
+            return value
+        }
         if (type.kind !== 'ObjectType') return value
         for (const member of type.members) {
-            if (member.method) continue
+            if (member.method) {
+                if (member.body && typeof value[member.name] !== 'function' && !value[member.name]?.__junoFunction) {
+                    ;(value as Record<string, any>)[member.name] = { __junoFunction: true, params: member.params ?? [], body: member.body, closure: env, thisValue: value } satisfies RuntimeFunction
+                }
+                continue
+            }
             if (!Object.prototype.hasOwnProperty.call(value, member.name) && member.defaultValue) {
                 ;(value as Record<string, any>)[member.name] = this.evaluate(member.defaultValue, env)
             }
@@ -280,6 +314,14 @@ export class Interpreter {
         }
         if (type.kind === 'IntersectionType') {
             for (const part of type.types) {
+                const member = this.findTypeMember(part, name, env, resolving)
+                if (member) return member
+            }
+            return null
+        }
+        if (type.kind === 'UnionType') {
+            for (const part of type.types) {
+                if (part.kind === 'NamedType' && part.name === 'null') continue
                 const member = this.findTypeMember(part, name, env, resolving)
                 if (member) return member
             }

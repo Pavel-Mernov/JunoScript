@@ -197,6 +197,7 @@ function Lexer(source) {
           "!=": "NotEqual",
           "<=": "LessEqual",
           ">=": "GreaterEqual",
+          "??": "Nullish",
           "=>": "FatArrow",
           "->": "Arrow"
         };
@@ -250,8 +251,8 @@ function Lexer(source) {
 }
 
 // ../Lexer/parser.ts
-var precedence = { "==": 1, "!=": 1, "<": 2, "<=": 2, ">": 2, ">=": 2, "|": 3, "&": 4, "+": 5, "-": 5, "*": 6, "/": 6, "%": 6 };
-var opTypes = { EqualEqual: "==", NotEqual: "!=", Less: "<", LessEqual: "<=", Greater: ">", GreaterEqual: ">=", Pipe: "|", Ampersand: "&", Plus: "+", Minus: "-", Multiply: "*", Divide: "/", Percent: "%" };
+var precedence = { "==": 1, "!=": 1, "<": 2, "<=": 2, ">": 2, ">=": 2, "|": 3, "&": 4, "+": 5, "-": 5, "??": 6, "*": 7, "/": 7, "%": 7 };
+var opTypes = { EqualEqual: "==", NotEqual: "!=", Less: "<", LessEqual: "<=", Greater: ">", GreaterEqual: ">=", Nullish: "??", Pipe: "|", Ampersand: "&", Plus: "+", Minus: "-", Multiply: "*", Divide: "/", Percent: "%" };
 var Parser = class {
   constructor(tokens) {
     this.tokens = tokens;
@@ -467,27 +468,24 @@ var Parser = class {
       while (!this.is("RightBrace") && !this.is("EOF")) {
         const readonly = this.match("Keyword", "readonly"), constant = this.match("Keyword", "const"), { name, loc } = this.propertyName();
         let optional = this.match("Question");
-        let params, method2 = false, type;
+        let params, method2 = false, type, body;
         if (this.is("LeftParen")) {
           method2 = true;
           params = this.parameters();
-          type = this.match("Colon") ? this.type() : { kind: "NamedType", name: "void" };
+          const returnType = this.match("Colon") ? this.type() : void 0;
+          if (this.match("Equal")) {
+            body = this.block();
+            type = returnType ?? { kind: "NamedType", name: "any" };
+          } else type = returnType ?? { kind: "NamedType", name: "void" };
         } else {
           if (this.match("Colon")) type = this.type();
           else if (this.is("Equal")) type = { kind: "NamedType", name: "any" };
           else this.fail("Expected ':' or '=' after field name");
-          if (type.kind === "UnionType") {
-            const nonNull = type.types.filter((part) => !(part.kind === "NamedType" && part.name === "null"));
-            if (nonNull.length === 1 && nonNull.length !== type.types.length) {
-              optional = true;
-              type = nonNull[0];
-            }
-          }
         }
         const defaultValue = this.match("Equal") ? this.expression() : void 0;
         if (constant && defaultValue === void 0) this.fail("const type fields need a default value");
         if (!method2 && defaultValue && type.kind === "NamedType" && type.name === "any") type = inferredTypeNode(defaultValue);
-        members.push({ name, loc, optional, readonly, constant, type, defaultValue, method: method2, params });
+        members.push({ name, loc, optional, readonly, constant, type, defaultValue, method: method2, params, body });
         this.objectSeparators();
       }
       this.take("RightBrace");
@@ -545,7 +543,8 @@ var Parser = class {
         left = { kind: "Member", object: left, property: property.name, optional: false, loc: property.loc };
         continue;
       }
-      if (this.match("Question") && this.match("Dot")) {
+      if (this.is("Question") && this.tokens[this.pos + 1]?.type === "Dot") {
+        this.pos += 2;
         const property = this.identifier();
         left = { kind: "Member", object: left, property: property.name, optional: true, loc: property.loc };
         continue;
@@ -567,6 +566,20 @@ var Parser = class {
         this.take("RightParen");
         left = { kind: "Call", callee: left, args, typeArguments };
         typeArguments = void 0;
+        continue;
+      }
+      if (this.match("Bang")) {
+        const token = this.tokens[this.pos - 1];
+        left = { kind: "Unary", operator: "postfix!", operand: left, loc: this.loc(token) };
+        continue;
+      }
+      if (this.is("Question") && min <= 0) {
+        const token = this.current;
+        this.pos++;
+        const consequent = this.expression();
+        this.take("Colon", "Expected ':' in conditional expression");
+        const alternate = this.expression();
+        left = { kind: "Conditional", condition: left, consequent, alternate, loc: this.loc(token) };
         continue;
       }
       const op = opTypes[this.current.type], p = op ? precedence[op] : void 0;
@@ -602,7 +615,7 @@ var Parser = class {
       return { kind: "Identifier", name: String(this.value(token)), loc: this.loc(token) };
     }
     if (this.match("LeftParen")) {
-      const saved = this.pos - 1;
+      const saved = this.pos;
       let arrow = false;
       try {
         const params = [];
@@ -703,6 +716,8 @@ function inferredTypeNode(expression) {
       return { kind: "ArrayType", element: expression.elements[0] ? inferredTypeNode(expression.elements[0]) : { kind: "NamedType", name: "any" } };
     case "Object":
       return { kind: "ObjectType", members: expression.properties.map((property) => ({ name: property.key, type: inferredTypeNode(property.value), optional: false, readonly: false, constant: false })) };
+    case "Conditional":
+      return inferredTypeNode(expression.consequent);
     default:
       return { kind: "NamedType", name: "any" };
   }
@@ -732,6 +747,8 @@ function inferExpressionType(expression, variables) {
       };
     case "Unary":
       return inferExpressionType(expression.operand, variables);
+    case "Conditional":
+      return commonType([inferExpressionType(expression.consequent, variables), inferExpressionType(expression.alternate, variables)]);
     case "Member": {
       const object = inferExpressionType(expression.object, variables);
       return object.kind === "object" ? object.fields.get(expression.property) ?? unknownType : unknownType;
@@ -750,6 +767,8 @@ function inferExpressionType(expression, variables) {
       const left = inferExpressionType(expression.left, variables);
       const right = inferExpressionType(expression.right, variables);
       const operator = expression.operator;
+      if (operator === "??") return left.kind === "primitive" && left.name === "null" ? right : left;
+      if (operator === "&" || operator === "|") return primitive("boolean");
       if (left.kind !== "primitive" || right.kind !== "primitive") return unknownType;
       const leftName = left.name, rightName = right.name;
       if (operator === "+") {
@@ -875,7 +894,7 @@ function typeFromNode(type, aliases = /* @__PURE__ */ new Map(), resolving = /* 
   if (type.kind === "GenericType" && (type.name === "Array" || type.name === "ReadonlyArray")) {
     return { kind: "array", element: type.args[0] ? typeFromNode(type.args[0], aliases, resolving) : unknownType };
   }
-  if (type.kind === "ObjectType") return { kind: "object", fields: new Map(type.members.filter((member) => !member.optional && member.defaultValue === void 0).map((member) => [member.name, typeFromNode(member.type, aliases, resolving)])) };
+  if (type.kind === "ObjectType") return { kind: "object", fields: new Map(type.members.filter((member) => !member.method && !member.optional && member.defaultValue === void 0 && !(member.type.kind === "UnionType" && member.type.types.some((part) => part.kind === "NamedType" && part.name === "null"))).map((member) => [member.name, typeFromNode(member.type, aliases, resolving)])) };
   if (type.kind === "FunctionType") return { kind: "function" };
   return unknownType;
 }
@@ -1103,11 +1122,13 @@ function isAssignableTo(expected, actual, env) {
   const target = resolveType(expected, env);
   const value = resolveType(actual, env);
   if (isNamedType(target, "any") || isNamedType(value, "any")) return true;
-  if (target.kind === "UnionType") return target.types.some((part) => isAssignableTo(part, value, env));
+  if (target.kind === "UnionType") {
+    return value.kind === "UnionType" ? value.types.every((valuePart) => target.types.some((targetPart) => isAssignableTo(targetPart, valuePart, env))) : target.types.some((part) => isAssignableTo(part, value, env));
+  }
   if (value.kind === "UnionType") return value.types.every((part) => isAssignableTo(target, part, env));
   if (target.kind === "ArrayType" && value.kind === "ArrayType") return isAssignableTo(target.element, value.element, env);
   if (target.kind === "ObjectType" && value.kind === "ObjectType") {
-    return target.members.filter((member) => !member.optional && !member.method).every((member) => {
+    return target.members.filter((member) => !member.optional && !member.method && !isNullable(member.type, env)).every((member) => {
       const actualMember = value.members.find((item) => item.name === member.name);
       return Boolean(actualMember && isAssignableTo(member.type, actualMember.type, env));
     }) && target.members.filter((member) => !member.method).every((member) => {
@@ -1132,10 +1153,22 @@ var errorType = () => named("<Error-Type>");
 function isNamedType(type, name) {
   return type.kind === "NamedType" && type.name === name;
 }
+function removeNull(type) {
+  if (type.kind !== "UnionType") return isNamedType(type, "null") ? named("any") : type;
+  return unionOf(type.types.filter((part) => !isNamedType(part, "null")));
+}
+function isNullable(type, env) {
+  const resolved = resolveType(type, env);
+  return isNamedType(resolved, "null") || resolved.kind === "UnionType" && resolved.types.some((part) => isNamedType(resolveType(part, env), "null"));
+}
 function hasSameNumericType(left, right) {
   return isNamedType(left, "number") && isNamedType(right, "number") || isNamedType(left, "BigInt") && isNamedType(right, "BigInt");
 }
 function binaryResultType(operator, left, right) {
+  if (operator === "??") {
+    const remaining = left.kind === "UnionType" ? left.types.filter((part) => !isNamedType(part, "null")) : isNamedType(left, "null") ? [] : [left];
+    return unionOf([...remaining, right]);
+  }
   if (operator === "+") {
     if (hasSameNumericType(left, right) || isNamedType(left, "string") && isNamedType(right, "string")) return left;
     return errorType();
@@ -1199,7 +1232,9 @@ function inferExpression(expression, env) {
       return objectType;
     }
     case "Unary":
-      return expression.operator === "-" ? named("number") : named("boolean");
+      return expression.operator === "postfix!" ? removeNull(inferExpression(expression.operand, env)) : expression.operator === "-" ? named("number") : named("boolean");
+    case "Conditional":
+      return unionOf([inferExpression(expression.consequent, env), inferExpression(expression.alternate, env)]);
     case "Binary": {
       const left = inferExpression(expression.left, env);
       const right = inferExpression(expression.right, env);
@@ -1207,11 +1242,12 @@ function inferExpression(expression, env) {
     }
     case "Member": {
       const objectType = inferExpression(expression.object, env);
-      const resolvedObjectType = resolveType(objectType, env);
-      const member = lookupMember(objectType, expression.property, env);
+      const nonNullObjectType = removeNull(resolveType(objectType, env));
+      const resolvedObjectType = resolveType(nonNullObjectType, env);
+      const member = lookupMember(nonNullObjectType, expression.property, env);
       if (!member) return resolvedObjectType.kind === "ObjectType" ? named("null") : named("any");
-      if (isFunctionSymbol(member)) return { kind: "FunctionType", params: member.params.map((param) => param.type ?? named("any")), result: member.returnType };
-      return member;
+      const memberType = isFunctionSymbol(member) ? { kind: "FunctionType", params: member.params.map((param) => param.type ?? named("any")), result: member.returnType } : member;
+      return expression.optional ? unionOf([memberType, named("null")]) : memberType;
     }
     case "Index": {
       const objectType = inferExpression(expression.object, env);
@@ -1359,10 +1395,10 @@ var Analyzer = class {
       case "TypeDeclaration": {
         const symbol = { kind: "type", generics: statement.generics, value: statement.value };
         this.bind(env, statement.name, symbol);
+        this.walkType(statement.value, env);
         const printed = printSymbol(statement.name, symbol);
         this.addHover(statement.name, statement.loc, printed.code, printed.docs);
         statement.generics.forEach((name, index) => this.addHover(name, statement.genericLocs?.[index], `(type parameter) ${name}`));
-        this.walkType(statement.value, env);
         return;
       }
       case "Variable": {
@@ -1382,7 +1418,7 @@ var Analyzer = class {
                 if (property.keyLoc) this.diagnostics.push({ line: property.keyLoc.line, column: property.keyLoc.column, length: property.key.length, message: `Type '${printType(propertyType)}' is not assignable to type '${printType(member.type)}' for '${property.key}'.` });
               }
             }
-            const missing = expected.members.filter((member) => !member.optional && !member.method && !member.defaultValue && !actualMembers.some((item) => item.name === member.name));
+            const missing = expected.members.filter((member) => !member.optional && !member.method && !member.defaultValue && !isNullable(member.type, env) && !actualMembers.some((item) => item.name === member.name));
             if (missing.length) {
               const loc = statement.initializer.kind === "Object" ? statement.initializer.loc : void 0;
               if (loc) this.diagnostics.push({
@@ -1443,12 +1479,14 @@ var Analyzer = class {
         return;
       case "If": {
         this.walkExpression(statement.condition, env);
+        if (isNullable(inferExpression(statement.condition, env), env)) this.addDiagnostic(expressionStart(statement.condition), "Nullable value cannot be used as a condition; use ! or ?? to handle null.");
         this.statements(statement.consequent, new Map(env));
         if (statement.alternate) this.statements(statement.alternate, new Map(env));
         return;
       }
       case "While":
         this.walkExpression(statement.condition, env);
+        if (isNullable(inferExpression(statement.condition, env), env)) this.addDiagnostic(expressionStart(statement.condition), "Nullable value cannot be used as a condition; use ! or ?? to handle null.");
         this.statements(statement.body, new Map(env));
         return;
       case "ForOf": {
@@ -1495,6 +1533,14 @@ var Analyzer = class {
         this.walkType(type.result, env);
         return;
       case "ObjectType":
+        for (const member of type.members) {
+          if (!member.method || !member.body) continue;
+          const local = new Map(env);
+          this.bind(local, "this", { kind: "var", mutable: false, type });
+          for (const param of member.params ?? []) this.bind(local, param.name, { kind: "var", mutable: true, type: param.type ?? named("any") });
+          if (isNamedType(member.type, "any")) member.type = inferFunctionReturnType2(member.body, local);
+          this.statements(member.body, local);
+        }
         for (const member of type.members) {
           const signature = member.method ? `(method) ${member.name}(${(member.params ?? []).map(printParam).join(", ")}): ${printType(member.type)}` : `(property) ${member.readonly ? "readonly " : ""}${member.name}${member.optional ? "?" : ""}: ${printType(member.type)}`;
           this.addHover(member.name, member.loc, signature);
@@ -1544,17 +1590,25 @@ var Analyzer = class {
       }
       case "Unary":
         this.walkExpression(expression.operand, env, thisType);
+        if (expression.operator !== "postfix!" && isNullable(inferExpression(expression.operand, env), env)) this.addDiagnostic(expression.loc, "Nullable value cannot be used with this operator; use ! or ?? to handle null.");
         return;
       case "Binary": {
         this.walkExpression(expression.left, env, thisType);
         this.walkExpression(expression.right, env, thisType);
-        const message = binaryErrorMessage(expression.operator, inferExpression(expression.left, env), inferExpression(expression.right, env));
-        if (message) this.addDiagnostic(expression.loc, message);
+        const leftType = inferExpression(expression.left, env), rightType = inferExpression(expression.right, env);
+        const nullComparison = ["==", "!="].includes(expression.operator) && (expression.left.kind === "Literal" && expression.left.value === null || expression.right.kind === "Literal" && expression.right.value === null);
+        if (expression.operator !== "??" && !nullComparison && (isNullable(leftType, env) || isNullable(rightType, env))) {
+          this.addDiagnostic(expression.loc, "Nullable value cannot be used with this operator; use ! or ?? to handle null.");
+        } else {
+          const message = binaryErrorMessage(expression.operator, leftType, rightType);
+          if (message) this.addDiagnostic(expression.loc, message);
+        }
         return;
       }
       case "Index": {
         this.walkExpression(expression.object, env, thisType);
         this.walkExpression(expression.index, env, thisType);
+        if (isNullable(inferExpression(expression.object, env), env)) this.addDiagnostic(expression.loc, "Cannot index a nullable value; use ! or ?? to handle null.");
         if (expression.loc) {
           this.hovers.push({
             line: expression.loc.line,
@@ -1568,8 +1622,11 @@ var Analyzer = class {
       case "Member": {
         this.walkExpression(expression.object, env, thisType);
         const objectType = inferExpression(expression.object, env);
-        const resolvedObjectType = resolveType(objectType, env);
-        const member = lookupMember(objectType, expression.property, env);
+        const nullableObject = isNullable(objectType, env);
+        const nonNullObjectType = removeNull(resolveType(objectType, env));
+        const resolvedObjectType = resolveType(nonNullObjectType, env);
+        const member = lookupMember(nonNullObjectType, expression.property, env);
+        if (nullableObject && !expression.optional) this.diagnostics.push({ line: expression.loc?.line ?? 1, column: expression.loc?.column ?? 1, length: expression.property.length, message: `Cannot access '${expression.property}' on a nullable value; use ! or ?., or ?? to handle null.` });
         if (isFunctionSymbol(member)) {
           this.addHover(expression.property, expression.loc, `(method) ${expression.property}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}`);
         } else if (member) {
@@ -1586,12 +1643,20 @@ var Analyzer = class {
       }
       case "Call":
         this.walkExpression(expression.callee, env, thisType);
+        if (isNullable(inferExpression(expression.callee, env), env) && !(expression.callee.kind === "Member" && expression.callee.optional)) {
+          this.addDiagnostic(expressionStart(expression.callee), "Cannot call a nullable value; use ! or ?? to handle null.");
+        }
         expression.args.forEach((arg) => this.walkExpression(arg, env, thisType));
         expression.typeArguments?.forEach((type) => this.walkType(type, env));
         this.addParameterHints(expression.callee, expression.args, env);
         return;
       case "Function":
         this.walkFunction(expression, env);
+        return;
+      case "Conditional":
+        this.walkExpression(expression.condition, env, thisType);
+        this.walkExpression(expression.consequent, env, thisType);
+        this.walkExpression(expression.alternate, env, thisType);
         return;
     }
   }
@@ -1625,9 +1690,13 @@ function expressionStart(expression) {
     case "Object":
     case "Unary":
       return expression.loc;
+    case "Conditional":
+      return expressionStart(expression.condition);
     case "Binary":
       return expressionStart(expression.left);
     case "Member":
+      return expressionStart(expression.object);
+    case "Index":
       return expressionStart(expression.object);
     case "Call":
       return expressionStart(expression.callee);

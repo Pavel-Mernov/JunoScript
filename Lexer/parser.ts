@@ -2,7 +2,7 @@ import { Lexer, Token, TokenType } from './lexer'
 
 export type Loc = { line: number; column: number }
 export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; result: TypeNode }
-export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; params?: Parameter[] }
+export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; params?: Parameter[]; body?: Statement[] }
 export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression }
 export type Expression =
     | { kind: 'Literal'; value: string | number | bigint | boolean | null; loc?: Loc }
@@ -11,6 +11,7 @@ export type Expression =
     | { kind: 'Unary'; operator: string; operand: Expression; loc?: Loc }
     | { kind: 'Assignment'; name: string; loc?: Loc; operatorLoc?: Loc; value: Expression }
     | { kind: 'Binary'; operator: string; left: Expression; right: Expression; loc?: Loc }
+    | { kind: 'Conditional'; condition: Expression; consequent: Expression; alternate: Expression; loc?: Loc }
     | { kind: 'Member'; object: Expression; property: string; optional: boolean; loc?: Loc }
     | { kind: 'Index'; object: Expression; index: Expression; loc?: Loc }
     | { kind: 'Call'; callee: Expression; args: Expression[]; typeArguments?: TypeNode[] }
@@ -25,8 +26,8 @@ export type Statement =
     | { kind: 'ForOf'; binding: string; loc?: Loc; mutable: boolean; iterable: Expression; body: Statement[] }
     | { kind: 'While'; condition: Expression; body: Statement[] }
 
-const precedence: Record<string, number> = { '==': 1, '!=': 1, '<': 2, '<=': 2, '>': 2, '>=': 2, '|': 3, '&': 4, '+': 5, '-': 5, '*': 6, '/': 6, '%': 6 }
-const opTypes: Partial<Record<TokenType, string>> = { EqualEqual: '==', NotEqual: '!=', Less: '<', LessEqual: '<=', Greater: '>', GreaterEqual: '>=', Pipe: '|', Ampersand: '&', Plus: '+', Minus: '-', Multiply: '*', Divide: '/', Percent: '%' }
+const precedence: Record<string, number> = { '==': 1, '!=': 1, '<': 2, '<=': 2, '>': 2, '>=': 2, '|': 3, '&': 4, '+': 5, '-': 5, '??': 6, '*': 7, '/': 7, '%': 7 }
+const opTypes: Partial<Record<TokenType, string>> = { EqualEqual: '==', NotEqual: '!=', Less: '<', LessEqual: '<=', Greater: '>', GreaterEqual: '>=', Nullish: '??', Pipe: '|', Ampersand: '&', Plus: '+', Minus: '-', Multiply: '*', Divide: '/', Percent: '%' }
 
 export class Parser {
     private pos = 0
@@ -185,22 +186,25 @@ export class Parser {
             const members: TypeMember[] = []; this.objectSeparators()
             while (!this.is('RightBrace') && !this.is('EOF')) {
                 const readonly = this.match('Keyword', 'readonly'), constant = this.match('Keyword', 'const'), { name, loc } = this.propertyName(); let optional = this.match('Question')
-                let params: Parameter[] | undefined, method = false, type: TypeNode
-                if (this.is('LeftParen')) { method = true; params = this.parameters(); type = this.match('Colon') ? this.type() : { kind: 'NamedType', name: 'void' } }
+                let params: Parameter[] | undefined, method = false, type: TypeNode, body: Statement[] | undefined
+                if (this.is('LeftParen')) {
+                    method = true
+                    params = this.parameters()
+                    const returnType = this.match('Colon') ? this.type() : undefined
+                    if (this.match('Equal')) {
+                        body = this.block()
+                        type = returnType ?? { kind: 'NamedType', name: 'any' }
+                    } else type = returnType ?? { kind: 'NamedType', name: 'void' }
+                }
                 else {
                     if (this.match('Colon')) type = this.type()
                     else if (this.is('Equal')) type = { kind: 'NamedType', name: 'any' }
                     else this.fail("Expected ':' or '=' after field name")
-                    // Accept `field: Type?` as optional property syntax as well as `field?: Type`.
-                    if (type.kind === 'UnionType') {
-                        const nonNull = type.types.filter(part => !(part.kind === 'NamedType' && part.name === 'null'))
-                        if (nonNull.length === 1 && nonNull.length !== type.types.length) { optional = true; type = nonNull[0] }
-                    }
                 }
                 const defaultValue = this.match('Equal') ? this.expression() : undefined
                 if (constant && defaultValue === undefined) this.fail('const type fields need a default value')
                 if (!method && defaultValue && type.kind === 'NamedType' && type.name === 'any') type = inferredTypeNode(defaultValue)
-                members.push({ name, loc, optional, readonly, constant, type, defaultValue, method, params }); this.objectSeparators()
+                members.push({ name, loc, optional, readonly, constant, type, defaultValue, method, params, body }); this.objectSeparators()
             }
             this.take('RightBrace'); result = { kind: 'ObjectType', members }
         } else if (this.match('LeftParen')) {
@@ -237,7 +241,8 @@ export class Parser {
                 left = { kind: 'Member', object: left, property: property.name, optional: false, loc: property.loc }
                 continue
             }
-            if (this.match('Question') && this.match('Dot')) {
+            if (this.is('Question') && this.tokens[this.pos + 1]?.type === 'Dot') {
+                this.pos += 2
                 const property = this.identifier()
                 left = { kind: 'Member', object: left, property: property.name, optional: true, loc: property.loc }
                 continue
@@ -258,6 +263,20 @@ export class Parser {
                 } while (this.match('Comma') && (this.parenthesisSeparators(), true))
                 this.take('RightParen')
                 left = { kind: 'Call', callee: left, args, typeArguments }; typeArguments = undefined; continue
+            }
+            if (this.match('Bang')) {
+                const token = this.tokens[this.pos - 1]
+                left = { kind: 'Unary', operator: 'postfix!', operand: left, loc: this.loc(token) }
+                continue
+            }
+            if (this.is('Question') && min <= 0) {
+                const token = this.current
+                this.pos++
+                const consequent = this.expression()
+                this.take('Colon', "Expected ':' in conditional expression")
+                const alternate = this.expression()
+                left = { kind: 'Conditional', condition: left, consequent, alternate, loc: this.loc(token) }
+                continue
             }
             const op = opTypes[this.current.type], p = op ? precedence[op] : undefined
             if (!op || p === undefined || p < min) break
@@ -291,7 +310,7 @@ export class Parser {
             return { kind: 'Identifier', name: String(this.value(token)), loc: this.loc(token) }
         }
         if (this.match('LeftParen')) {
-            const saved = this.pos - 1
+            const saved = this.pos
             let arrow = false
             try {
                 const params: Parameter[] = []
@@ -368,6 +387,7 @@ function inferredTypeNode(expression: Expression): TypeNode {
         case 'Literal': return { kind: 'NamedType', name: typeof expression.value === 'bigint' ? 'BigInt' : expression.value === null ? 'null' : typeof expression.value }
         case 'Array': return { kind: 'ArrayType', element: expression.elements[0] ? inferredTypeNode(expression.elements[0]) : { kind: 'NamedType', name: 'any' } }
         case 'Object': return { kind: 'ObjectType', members: expression.properties.map(property => ({ name: property.key, type: inferredTypeNode(property.value), optional: false, readonly: false, constant: false })) }
+        case 'Conditional': return inferredTypeNode(expression.consequent)
         default: return { kind: 'NamedType', name: 'any' }
     }
 }
@@ -405,6 +425,9 @@ function inferExpressionType(
         case 'Unary':
             return inferExpressionType(expression.operand, variables)
 
+        case 'Conditional':
+            return commonType([inferExpressionType(expression.consequent, variables), inferExpressionType(expression.alternate, variables)])
+
         case 'Member': {
             const object = inferExpressionType(expression.object, variables)
             return object.kind === 'object' ? object.fields.get(expression.property) ?? unknownType : unknownType
@@ -425,6 +448,9 @@ function inferExpressionType(
             const left = inferExpressionType(expression.left, variables)
             const right = inferExpressionType(expression.right, variables)
             const operator = expression.operator
+
+            if (operator === '??') return left.kind === 'primitive' && left.name === 'null' ? right : left
+            if (operator === '&' || operator === '|') return primitive('boolean')
 
             if (left.kind !== 'primitive' || right.kind !== 'primitive') return unknownType
             const leftName = left.name, rightName = right.name
@@ -604,7 +630,7 @@ function typeFromNode(type: TypeNode, aliases: Map<string, TypeNode> = new Map()
     if (type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray')) {
         return { kind: 'array', element: type.args[0] ? typeFromNode(type.args[0], aliases, resolving) : unknownType }
     }
-    if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.filter(member => !member.optional && member.defaultValue === undefined).map(member => [member.name, typeFromNode(member.type, aliases, resolving)])) }
+    if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.filter(member => !member.method && !member.optional && member.defaultValue === undefined && !(member.type.kind === 'UnionType' && member.type.types.some(part => part.kind === 'NamedType' && part.name === 'null'))).map(member => [member.name, typeFromNode(member.type, aliases, resolving)])) }
     if (type.kind === 'FunctionType') return { kind: 'function' }
     return unknownType
 }
