@@ -97,7 +97,32 @@ export function printType(type: TypeNode): string {
 }
 
 function printParam(param: Parameter): string {
-    return param.type ? `${param.name}: ${printType(param.type)}` : param.name
+    return `${param.rest === true ? '...' : ''}${param.name}${param.type ? `: ${printType(param.type)}` : ''}${param.defaultValue !== undefined ? ' = …' : ''}`
+}
+
+function parameterType(param: Parameter): TypeNode {
+    const type = param.type ?? named('any')
+    return param.rest === true && type.kind === 'ArrayType' ? type : param.rest === true && type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray')
+        ? arrayOf(type.args[0] ?? named('any'))
+        : type
+}
+
+function parameterBodyType(param: Parameter): TypeNode {
+    const type = parameterType(param)
+    return type
+}
+
+function bindInferredParameters(params: Parameter[], env: Env): Map<string, SymbolInfo> {
+    const local = new Map(env)
+    for (const param of params) {
+        const type = param.type ? parameterBodyType(param) : param.defaultValue ? inferExpression(param.defaultValue, local) : parameterBodyType(param)
+        local.set(param.name, { kind: 'var', mutable: true, type })
+    }
+    return local
+}
+
+function parameterHover(param: Parameter, type = parameterType(param)): string {
+    return `(parameter) ${param.rest === true ? '...' : ''}${param.name}: ${printType(type)}${param.defaultValue !== undefined ? ' = …' : ''}`
 }
 
 function printFunction(name: string, params: Parameter[], returnType: TypeNode): string {
@@ -279,7 +304,7 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             const symbol = env.get(expression.name)
             if (!symbol) return named('any')
             if (symbol.kind === 'var') return symbol.type
-            if (symbol.kind === 'fun') return { kind: 'FunctionType', params: symbol.params.map(param => param.type ?? named('any')), result: symbol.returnType }
+            if (symbol.kind === 'fun') return { kind: 'FunctionType', params: symbol.params.map(parameterType), result: symbol.returnType }
             if (symbol.kind === 'module') return moduleType(symbol.module)
             return named(expression.name)
         }
@@ -314,7 +339,7 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             methodEnv.set('this', { kind: 'var', mutable: false, type: objectType })
             for (const [index, property] of expression.properties.entries()) {
                 if (property.value.kind !== 'Function' || property.value.returnType) continue
-                members[index] = method(property.key, property.value.params, inferFunctionReturnType(property.value.body, methodEnv))
+                members[index] = method(property.key, property.value.params, inferFunctionReturnType(property.value.body, methodEnv, property.value.params))
             }
             return objectType
         }
@@ -333,7 +358,7 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             const member = lookupMember(nonNullObjectType, expression.property, env)
             if (!member) return resolvedObjectType.kind === 'ObjectType' ? named('null') : named('any')
             const memberType = isFunctionSymbol(member)
-                ? { kind: 'FunctionType', params: member.params.map(param => param.type ?? named('any')), result: member.returnType } as TypeNode
+                ? { kind: 'FunctionType', params: member.params.map(parameterType), result: member.returnType } as TypeNode
                 : member
             return expression.optional ? unionOf([memberType, named('null')]) : memberType
         }
@@ -369,11 +394,11 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             }
             return named('any')
         }
-        case 'Function': return { kind: 'FunctionType', params: expression.params.map(param => param.type ?? named('any')), result: expression.returnType ?? (expression.expressionBody ? inferExpression(expression.expressionBody, env) : inferFunctionReturnType(expression.body, env)) }
+        case 'Function': return { kind: 'FunctionType', params: expression.params.map(parameterType), result: expression.returnType ?? (expression.expressionBody ? inferExpression(expression.expressionBody, env) : inferFunctionReturnType(expression.body, env, expression.params)) }
     }
 }
 
-function inferFunctionReturnType(statements: Statement[], outer: Env): TypeNode {
+function inferFunctionReturnType(statements: Statement[], outer: Env, params: Parameter[] = []): TypeNode {
     const returns: TypeNode[] = []
     const collect = (body: Statement[], env: Env): void => {
         for (const statement of body) {
@@ -389,7 +414,8 @@ function inferFunctionReturnType(statements: Statement[], outer: Env): TypeNode 
             }
         }
     }
-    collect(statements, new Map(outer))
+    const local = bindInferredParameters(params, outer)
+    collect(statements, local)
     return returns.length ? unionOf(returns) : named('null')
 }
 
@@ -401,7 +427,7 @@ function unionOf(types: TypeNode[]): TypeNode {
 }
 
 function functionType(params: Parameter[], returnType?: TypeNode): TypeNode {
-    return { kind: 'FunctionType', params: params.map(param => param.type ?? named('any')), result: returnType ?? named('any') }
+    return { kind: 'FunctionType', params: params.map(parameterType), result: returnType ?? named('any') }
 }
 
 function contains(loc: Loc | undefined, name: string, line: number, column: number): boolean {
@@ -454,17 +480,21 @@ class Analyzer {
             if (isFunctionSymbol(member)) params = member.params
         }
         if (!params) return
-        args.forEach((arg, index) => {
-            const param = params![index]
+        let positional = 0
+        args.forEach(arg => {
+            const param = params!.find((item, index) => item.rest === true ? positional >= index : index === positional)
             const loc = expressionStart(arg)
-            if (!param || !loc || param.name.startsWith('.')) return
+            if (!param || !loc) return
+            const inferredParamType = parameterType(param)
+            const argumentType = param.rest === true && inferredParamType.kind === 'ArrayType' ? inferredParamType.element : inferredParamType
             this.hints.push({
                 line: loc.line,
                 column: loc.column,
                 label: `${param.name}:`,
-                tooltip: param.type ? `${param.name}: ${printType(param.type)}` : param.name,
+                tooltip: `${param.name}: ${printType(argumentType)}`,
                 kind: 'parameter'
             })
+            positional++
         })
     }
 
@@ -568,19 +598,21 @@ class Analyzer {
                 return
             }
             case 'FunctionDeclaration': {
-                const inferenceEnv = new Map(env)
-                for (const param of statement.params) this.bind(inferenceEnv, param.name, { kind: 'var', mutable: true, type: param.type ?? named('any') })
-                const returnType = statement.returnType ?? inferFunctionReturnType(statement.body, inferenceEnv)
+                const inferenceEnv = bindInferredParameters(statement.params, env)
+                const returnType = statement.returnType ?? inferFunctionReturnType(statement.body, inferenceEnv, statement.params)
                 const symbol: SymbolInfo = { kind: 'fun', params: statement.params, returnType }
+                statement.params.forEach((param, index) => {
+                    if (!param.type && param.defaultValue !== undefined) symbol.params[index] = { ...param, type: (inferenceEnv.get(param.name) as Extract<SymbolInfo, { kind: 'var' }>).type }
+                })
                 this.bind(env, statement.name, symbol)
                 const printed = printSymbol(statement.name, symbol)
                 this.addHover(statement.name, statement.loc, printed.code)
-                const local = new Map(env)
+                const local = bindInferredParameters(statement.params, env)
                 for (const param of statement.params) {
-                    const type = param.type ?? named('any')
-                    this.bind(local, param.name, { kind: 'var', mutable: true, type })
-                    this.addHover(param.name, param.loc, `(parameter) ${param.name}: ${printType(type)}`)
-                    this.addTypeHint(param.loc, param.name, Boolean(param.type), type)
+                    const bodyType = (local.get(param.name) as Extract<SymbolInfo, { kind: 'var' }>).type
+                    const type = param.rest ? parameterType(param) : bodyType
+                    this.addHover(param.name, param.loc, parameterHover(param, param.rest ? parameterType(param) : bodyType))
+                    this.addTypeHint(param.loc, param.name, Boolean(param.type), bodyType)
                     if (param.type) this.walkType(param.type, env)
                     if (param.defaultValue) this.walkExpression(param.defaultValue, local)
                 }
@@ -664,8 +696,12 @@ class Analyzer {
                     if (!member.method || !member.body) continue
                     const local = new Map(env)
                     this.bind(local, 'this', { kind: 'var', mutable: false, type })
-                    for (const param of member.params ?? []) this.bind(local, param.name, { kind: 'var', mutable: true, type: param.type ?? named('any') })
-                    if (isNamedType(member.type, 'any')) member.type = inferFunctionReturnType(member.body, local)
+                    for (const param of member.params ?? []) {
+                        const paramType = parameterBodyType(param)
+                        this.bind(local, param.name, { kind: 'var', mutable: true, type: paramType })
+                        if (param.defaultValue) this.walkExpression(param.defaultValue, local)
+                    }
+                    if (isNamedType(member.type, 'any')) member.type = inferFunctionReturnType(member.body, local, member.params ?? [])
                     this.statements(member.body, local)
                 }
                 for (const member of type.members) {
@@ -674,10 +710,13 @@ class Analyzer {
                         : `(property) ${member.readonly ? 'readonly ' : ''}${member.name}${member.optional ? '?' : ''}: ${printType(member.type)}`
                     this.addHover(member.name, member.loc, signature)
                     this.walkType(member.type, env)
-                    for (const param of member.params ?? []) {
-                        const type = param.type ?? named('any')
-                        this.addHover(param.name, param.loc, `(parameter) ${param.name}: ${printType(type)}`)
-                        if (param.type) this.walkType(param.type, env)
+                    if (member.method) {
+                        for (const param of member.params ?? []) {
+                        const paramType = parameterBodyType(param)
+                            this.addHover(param.name, param.loc, parameterHover(param, paramType))
+                            this.addTypeHint(param.loc, param.name, Boolean(param.type), paramType)
+                            if (param.type) this.walkType(param.type, env)
+                        }
                     }
                 }
         }
@@ -797,13 +836,17 @@ class Analyzer {
     }
 
     private walkFunction(expression: Extract<Expression, { kind: 'Function' }>, env: Env): void {
-        const local = new Map(env)
+        const local = bindInferredParameters(expression.params, env)
         for (const param of expression.params) {
-            const type = param.type ?? named('any')
-            this.bind(local, param.name, { kind: 'var', mutable: true, type })
-            this.addHover(param.name, param.loc, `(parameter) ${param.name}: ${printType(type)}`)
+            const type = (local.get(param.name) as Extract<SymbolInfo, { kind: 'var' }>).type
+            if (!param.type && param.defaultValue !== undefined) {
+                const index = expression.params.indexOf(param)
+                expression.params[index] = { ...param, type }
+            }
+            this.addHover(param.name, param.loc, parameterHover(param, type))
             this.addTypeHint(param.loc, param.name, Boolean(param.type), type)
             if (param.type) this.walkType(param.type, env)
+            if (param.defaultValue) this.walkExpression(param.defaultValue, local)
         }
         if (expression.returnType) this.walkType(expression.returnType, env)
         this.statements(expression.body, local)
@@ -851,7 +894,8 @@ export function analyze(source: string): { hovers: HoverInfo[]; hints: InlayHint
         const analyzer = new Analyzer()
         analyzer.analyze(parse(source, { validate: false }))
         return { hovers: analyzer.hovers, hints: analyzer.hints, diagnostics: analyzer.diagnostics }
-    } catch {
+    } catch (error) {
+        return undefined
         return undefined
     }
 }
@@ -866,3 +910,4 @@ export function hoverAt(source: string, line: number, column: number): HoverInfo
 export function inlayHintsFor(source: string): InlayHintInfo[] {
     return analyze(source)?.hints ?? []
 }
+

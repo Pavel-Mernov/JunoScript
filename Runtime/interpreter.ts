@@ -234,7 +234,17 @@ export class Interpreter {
     private callFunction(fn: RuntimeFunction, args: unknown[], thisValue?: unknown): unknown {
         const local = this.childEnvironment(fn.closure)
         if (thisValue !== undefined) local.bindings.set('this', { value: thisValue, mutable: false })
-        fn.params.forEach((param, index) => this.declare(local, param.name, args[index] ?? (param.defaultValue ? this.evaluate(param.defaultValue, local) : null), true))
+        let argumentIndex = 0
+        for (const param of fn.params) {
+            if (param.rest) {
+                this.declare(local, param.name, args.slice(argumentIndex), true)
+                argumentIndex = args.length
+            } else {
+                const value = argumentIndex < args.length ? args[argumentIndex] : param.defaultValue ? this.evaluate(param.defaultValue, local) : null
+                argumentIndex++
+                this.declare(local, param.name, value, true)
+            }
+        }
         return this.executeStatements(fn.body, local) ?? null
     }
 

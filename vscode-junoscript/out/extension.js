@@ -439,9 +439,19 @@ var Parser = class _Parser {
   parameters() {
     this.take("LeftParen");
     const params = [];
+    let optionalSeen = false, restSeen = false;
     while (!this.is("RightParen")) {
+      const rest = this.is("Dot") && this.tokens[this.pos + 1]?.type === "Dot" && this.tokens[this.pos + 2]?.type === "Dot";
+      if (rest) this.pos += 3;
+      if (restSeen) this.fail("A rest parameter must be the last parameter");
       const { name, loc } = this.identifier(), type = this.match("Colon") ? this.type() : void 0, defaultValue = this.match("Equal") ? this.expression() : void 0;
-      params.push({ name, loc, type, defaultValue });
+      if (rest && defaultValue !== void 0) this.fail("A rest parameter cannot have a default value");
+      if (rest && !type) this.fail("A rest parameter must have an array type");
+      if (rest && type && type.kind !== "ArrayType" && !(type.kind === "GenericType" && (type.name === "Array" || type.name === "ReadonlyArray"))) this.fail("A rest parameter must have an array type");
+      if (!rest && defaultValue !== void 0) optionalSeen = true;
+      else if (!rest && optionalSeen) this.fail("Parameters with default values must follow parameters without default values");
+      params.push({ name, loc, type, defaultValue, rest });
+      restSeen ||= rest;
       if (!this.match("Comma") && !this.is("RightParen")) this.fail("Expected ',' or ')' in parameters");
     }
     this.take("RightParen");
@@ -807,8 +817,11 @@ var Parser = class _Parser {
         const params = [];
         if (!this.is("RightParen")) {
           do {
+            const rest = this.is("Dot") && this.tokens[this.pos + 1]?.type === "Dot" && this.tokens[this.pos + 2]?.type === "Dot";
+            if (rest) this.pos += 3;
             const { name, loc } = this.identifier(), type = this.match("Colon") ? this.type() : void 0;
-            params.push({ name, loc, type });
+            if (rest && (!type || type.kind !== "ArrayType" && !(type.kind === "GenericType" && (type.name === "Array" || type.name === "ReadonlyArray")))) this.fail("A rest parameter must have an array type");
+            params.push({ name, loc, type, rest });
           } while (this.match("Comma"));
         }
         this.take("RightParen");
@@ -1033,12 +1046,40 @@ function inferExpressionType(expression, variables) {
     case "Assignment":
       return unknownType;
     case "Function": {
-      const result = expression.returnType ? typeFromNode(expression.returnType) : expression.expressionBody ? inferExpressionType(expression.expressionBody, variables) : inferFunctionReturnType(expression.body, variables);
-      return { kind: "function", result };
+      const scope = new Map(variables);
+      for (const param of expression.params) {
+        const declared = param.type ? typeFromNode(param.type) : void 0;
+        const inferred = param.defaultValue ? inferExpressionType(param.defaultValue, scope) : unknownType;
+        const parameterType2 = declared ?? (param.rest ? { kind: "array", element: inferred } : inferred);
+        scope.set(param.name, parameterType2);
+      }
+      const result = expression.returnType ? typeFromNode(expression.returnType) : expression.expressionBody ? inferExpressionType(expression.expressionBody, scope) : inferFunctionReturnType(expression.body, scope);
+      return { kind: "function", params: expression.params.map((param) => ({
+        type: param.type ? typeFromNode(param.type) : param.defaultValue ? inferExpressionType(param.defaultValue, scope) : unknownType,
+        optional: param.defaultValue !== void 0,
+        rest: param.rest === true
+      })), result };
     }
     case "Call": {
       const callee = inferExpressionType(expression.callee, variables);
-      return callee.kind === "function" ? callee.result ?? primitive("null") : unknownType;
+      if (callee.kind !== "function") return unknownType;
+      if (callee.params) {
+        const required = callee.params.filter((param) => !param.optional && !param.rest).length;
+        const rest = callee.params.some((param) => param.rest);
+        const maximum = rest ? Infinity : callee.params.length;
+        if (expression.args.length < required || expression.args.length > maximum) {
+          throw new SyntaxError(`Expected ${required}${maximum === required ? "" : ` to ${maximum === Infinity ? "any number of" : maximum}`} arguments, received ${expression.args.length}`);
+        }
+        expression.args.forEach((argument, index) => {
+          const parameter = callee.params.find((item, paramIndex) => item.rest ? index >= paramIndex : paramIndex === index);
+          if (!parameter) return;
+          const actual = inferExpressionType(argument, variables);
+          if (!isAssignable(parameter.rest && parameter.type.kind === "array" ? parameter.type.element : parameter.type, actual)) {
+            throw new SyntaxError(`Argument ${index + 1} has type ${describeType(actual)}; expected ${describeType(parameter.rest && parameter.type.kind === "array" ? parameter.type.element : parameter.type)}`);
+          }
+        });
+      }
+      return callee.result ?? primitive("null");
     }
   }
 }
@@ -1163,7 +1204,19 @@ function validateArithmeticTypes(statements, variables = /* @__PURE__ */ new Map
         validateArithmeticTypes(statement.body, new Map(variables));
         break;
       case "FunctionDeclaration":
-        validateArithmeticTypes(statement.body, new Map(variables));
+        {
+          const scope = new Map(variables);
+          const params = statement.params.map((param) => {
+            const declared = param.type ? typeFromNode(param.type, aliases) : void 0;
+            const inferred = param.defaultValue ? inferExpressionType(param.defaultValue, scope) : unknownType;
+            const type = declared ?? (param.rest ? { kind: "array", element: inferred } : inferred);
+            scope.set(param.name, type);
+            return { type: param.rest && type.kind !== "array" ? unknownType : type, optional: param.defaultValue !== void 0, rest: param.rest === true };
+          });
+          validateArithmeticTypes(statement.body, scope);
+          const result = statement.returnType ? typeFromNode(statement.returnType, aliases) : inferFunctionReturnType(statement.body, scope);
+          variables.set(statement.name, { kind: "function", params, result });
+        }
         break;
       case "Import":
       case "TypeDeclaration":
@@ -1263,7 +1316,26 @@ function printType(type) {
   }
 }
 function printParam(param) {
-  return param.type ? `${param.name}: ${printType(param.type)}` : param.name;
+  return `${param.rest === true ? "..." : ""}${param.name}${param.type ? `: ${printType(param.type)}` : ""}${param.defaultValue !== void 0 ? " = \u2026" : ""}`;
+}
+function parameterType(param) {
+  const type = param.type ?? named("any");
+  return param.rest === true && type.kind === "ArrayType" ? type : param.rest === true && type.kind === "GenericType" && (type.name === "Array" || type.name === "ReadonlyArray") ? arrayOf(type.args[0] ?? named("any")) : type;
+}
+function parameterBodyType(param) {
+  const type = parameterType(param);
+  return type;
+}
+function bindInferredParameters(params, env) {
+  const local = new Map(env);
+  for (const param of params) {
+    const type = param.type ? parameterBodyType(param) : param.defaultValue ? inferExpression(param.defaultValue, local) : parameterBodyType(param);
+    local.set(param.name, { kind: "var", mutable: true, type });
+  }
+  return local;
+}
+function parameterHover(param, type = parameterType(param)) {
+  return `(parameter) ${param.rest === true ? "..." : ""}${param.name}: ${printType(type)}${param.defaultValue !== void 0 ? " = \u2026" : ""}`;
 }
 function printFunction(name, params, returnType) {
   return `fun ${name}(${params.map(printParam).join(", ")}): ${printType(returnType)}`;
@@ -1428,7 +1500,7 @@ function inferExpression(expression, env) {
       const symbol = env.get(expression.name);
       if (!symbol) return named("any");
       if (symbol.kind === "var") return symbol.type;
-      if (symbol.kind === "fun") return { kind: "FunctionType", params: symbol.params.map((param) => param.type ?? named("any")), result: symbol.returnType };
+      if (symbol.kind === "fun") return { kind: "FunctionType", params: symbol.params.map(parameterType), result: symbol.returnType };
       if (symbol.kind === "module") return moduleType(symbol.module);
       return named(expression.name);
     }
@@ -1461,7 +1533,7 @@ function inferExpression(expression, env) {
       methodEnv.set("this", { kind: "var", mutable: false, type: objectType });
       for (const [index, property] of expression.properties.entries()) {
         if (property.value.kind !== "Function" || property.value.returnType) continue;
-        members[index] = method(property.key, property.value.params, inferFunctionReturnType2(property.value.body, methodEnv));
+        members[index] = method(property.key, property.value.params, inferFunctionReturnType2(property.value.body, methodEnv, property.value.params));
       }
       return objectType;
     }
@@ -1480,7 +1552,7 @@ function inferExpression(expression, env) {
       const resolvedObjectType = resolveType(nonNullObjectType, env);
       const member = lookupMember(nonNullObjectType, expression.property, env);
       if (!member) return resolvedObjectType.kind === "ObjectType" ? named("null") : named("any");
-      const memberType = isFunctionSymbol(member) ? { kind: "FunctionType", params: member.params.map((param) => param.type ?? named("any")), result: member.returnType } : member;
+      const memberType = isFunctionSymbol(member) ? { kind: "FunctionType", params: member.params.map(parameterType), result: member.returnType } : member;
       return expression.optional ? unionOf([memberType, named("null")]) : memberType;
     }
     case "Index": {
@@ -1516,10 +1588,10 @@ function inferExpression(expression, env) {
       return named("any");
     }
     case "Function":
-      return { kind: "FunctionType", params: expression.params.map((param) => param.type ?? named("any")), result: expression.returnType ?? (expression.expressionBody ? inferExpression(expression.expressionBody, env) : inferFunctionReturnType2(expression.body, env)) };
+      return { kind: "FunctionType", params: expression.params.map(parameterType), result: expression.returnType ?? (expression.expressionBody ? inferExpression(expression.expressionBody, env) : inferFunctionReturnType2(expression.body, env, expression.params)) };
   }
 }
-function inferFunctionReturnType2(statements, outer) {
+function inferFunctionReturnType2(statements, outer, params = []) {
   const returns = [];
   const collect = (body, env) => {
     for (const statement of body) {
@@ -1535,7 +1607,8 @@ function inferFunctionReturnType2(statements, outer) {
       }
     }
   };
-  collect(statements, new Map(outer));
+  const local = bindInferredParameters(params, outer);
+  collect(statements, local);
   return returns.length ? unionOf(returns) : named("null");
 }
 function unionOf(types) {
@@ -1583,17 +1656,21 @@ var Analyzer = class {
       if (isFunctionSymbol(member)) params = member.params;
     }
     if (!params) return;
-    args.forEach((arg, index) => {
-      const param = params[index];
+    let positional = 0;
+    args.forEach((arg) => {
+      const param = params.find((item, index) => item.rest === true ? positional >= index : index === positional);
       const loc = expressionStart(arg);
-      if (!param || !loc || param.name.startsWith(".")) return;
+      if (!param || !loc) return;
+      const inferredParamType = parameterType(param);
+      const argumentType = param.rest === true && inferredParamType.kind === "ArrayType" ? inferredParamType.element : inferredParamType;
       this.hints.push({
         line: loc.line,
         column: loc.column,
         label: `${param.name}:`,
-        tooltip: param.type ? `${param.name}: ${printType(param.type)}` : param.name,
+        tooltip: `${param.name}: ${printType(argumentType)}`,
         kind: "parameter"
       });
+      positional++;
     });
   }
   bind(env, name, symbol) {
@@ -1692,19 +1769,21 @@ var Analyzer = class {
         return;
       }
       case "FunctionDeclaration": {
-        const inferenceEnv = new Map(env);
-        for (const param of statement.params) this.bind(inferenceEnv, param.name, { kind: "var", mutable: true, type: param.type ?? named("any") });
-        const returnType = statement.returnType ?? inferFunctionReturnType2(statement.body, inferenceEnv);
+        const inferenceEnv = bindInferredParameters(statement.params, env);
+        const returnType = statement.returnType ?? inferFunctionReturnType2(statement.body, inferenceEnv, statement.params);
         const symbol = { kind: "fun", params: statement.params, returnType };
+        statement.params.forEach((param, index) => {
+          if (!param.type && param.defaultValue !== void 0) symbol.params[index] = { ...param, type: inferenceEnv.get(param.name).type };
+        });
         this.bind(env, statement.name, symbol);
         const printed = printSymbol(statement.name, symbol);
         this.addHover(statement.name, statement.loc, printed.code);
-        const local = new Map(env);
+        const local = bindInferredParameters(statement.params, env);
         for (const param of statement.params) {
-          const type = param.type ?? named("any");
-          this.bind(local, param.name, { kind: "var", mutable: true, type });
-          this.addHover(param.name, param.loc, `(parameter) ${param.name}: ${printType(type)}`);
-          this.addTypeHint(param.loc, param.name, Boolean(param.type), type);
+          const bodyType = local.get(param.name).type;
+          const type = param.rest ? parameterType(param) : bodyType;
+          this.addHover(param.name, param.loc, parameterHover(param, param.rest ? parameterType(param) : bodyType));
+          this.addTypeHint(param.loc, param.name, Boolean(param.type), bodyType);
           if (param.type) this.walkType(param.type, env);
           if (param.defaultValue) this.walkExpression(param.defaultValue, local);
         }
@@ -1787,18 +1866,25 @@ var Analyzer = class {
           if (!member.method || !member.body) continue;
           const local = new Map(env);
           this.bind(local, "this", { kind: "var", mutable: false, type });
-          for (const param of member.params ?? []) this.bind(local, param.name, { kind: "var", mutable: true, type: param.type ?? named("any") });
-          if (isNamedType(member.type, "any")) member.type = inferFunctionReturnType2(member.body, local);
+          for (const param of member.params ?? []) {
+            const paramType = parameterBodyType(param);
+            this.bind(local, param.name, { kind: "var", mutable: true, type: paramType });
+            if (param.defaultValue) this.walkExpression(param.defaultValue, local);
+          }
+          if (isNamedType(member.type, "any")) member.type = inferFunctionReturnType2(member.body, local, member.params ?? []);
           this.statements(member.body, local);
         }
         for (const member of type.members) {
           const signature = member.method ? `(method) ${member.name}(${(member.params ?? []).map(printParam).join(", ")}): ${printType(member.type)}` : `(property) ${member.readonly ? "readonly " : ""}${member.name}${member.optional ? "?" : ""}: ${printType(member.type)}`;
           this.addHover(member.name, member.loc, signature);
           this.walkType(member.type, env);
-          for (const param of member.params ?? []) {
-            const type2 = param.type ?? named("any");
-            this.addHover(param.name, param.loc, `(parameter) ${param.name}: ${printType(type2)}`);
-            if (param.type) this.walkType(param.type, env);
+          if (member.method) {
+            for (const param of member.params ?? []) {
+              const paramType = parameterBodyType(param);
+              this.addHover(param.name, param.loc, parameterHover(param, paramType));
+              this.addTypeHint(param.loc, param.name, Boolean(param.type), paramType);
+              if (param.type) this.walkType(param.type, env);
+            }
           }
         }
     }
@@ -1914,13 +2000,17 @@ var Analyzer = class {
     }
   }
   walkFunction(expression, env) {
-    const local = new Map(env);
+    const local = bindInferredParameters(expression.params, env);
     for (const param of expression.params) {
-      const type = param.type ?? named("any");
-      this.bind(local, param.name, { kind: "var", mutable: true, type });
-      this.addHover(param.name, param.loc, `(parameter) ${param.name}: ${printType(type)}`);
+      const type = local.get(param.name).type;
+      if (!param.type && param.defaultValue !== void 0) {
+        const index = expression.params.indexOf(param);
+        expression.params[index] = { ...param, type };
+      }
+      this.addHover(param.name, param.loc, parameterHover(param, type));
       this.addTypeHint(param.loc, param.name, Boolean(param.type), type);
       if (param.type) this.walkType(param.type, env);
+      if (param.defaultValue) this.walkExpression(param.defaultValue, local);
     }
     if (expression.returnType) this.walkType(expression.returnType, env);
     this.statements(expression.body, local);
@@ -1964,7 +2054,8 @@ function analyze(source) {
     const analyzer = new Analyzer();
     analyzer.analyze(parse(source, { validate: false }));
     return { hovers: analyzer.hovers, hints: analyzer.hints, diagnostics: analyzer.diagnostics };
-  } catch {
+  } catch (error) {
+    return void 0;
     return void 0;
   }
 }

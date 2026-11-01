@@ -21,3 +21,40 @@ console.log("nullable value:", maybeNumber)
 console.log("foo result:", anotherMaybe)
 console.log("describe null:", describe(maybeNumber))
 console.log("describe number:", describe(directResult))
+
+# Default parameters are evaluated when the corresponding argument is omitted.
+fun greetWithDefault(name: string = "friend"): string =
+    return "Hello, " + name
+console.log("default parameter:", greetWithDefault())
+console.log("provided parameter:", greetWithDefault("Ada"))
+
+# Rest parameters collect the remaining arguments into a typed array.
+fun sum(first: number, ...rest: number[]): number =
+    let total = first
+    for const value of rest
+        total = total + value
+    return total
+
+console.log("rest arguments:", sum(1, 2, 3, 4))
+console.log("rest with no extras:", sum(5))
+
+# Required parameters precede defaults; rest parameters follow both.
+fun format(prefix: string, suffix: string = "!", ...parts: string[]): string =
+    let result = prefix
+    for const part of parts
+        result = result + " " + part
+    return result + suffix
+
+console.log("defaults and rest:", format("Hi", "!", "there", "Ada"))
+
+# Inference uses the declared parameter and return types when checking calls.
+fun inferredDefault(value = 7) =
+    return value + 1
+
+fun inferredRest(...values: number[]) =
+    return values[0] + values[1]
+
+const defaultResult: number = inferredDefault()
+const restResult: number = inferredRest(3, 4)
+console.log("inferred default result:", defaultResult)
+console.log("inferred rest result:", restResult)

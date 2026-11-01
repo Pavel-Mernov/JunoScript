@@ -3,7 +3,7 @@ import { Lexer, Token, TokenType } from './lexer'
 export type Loc = { line: number; column: number }
 export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'LiteralType'; value: string | number | boolean; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; result: TypeNode }
 export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; params?: Parameter[]; body?: Statement[] }
-export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression }
+export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression; rest?: boolean }
 export type Expression =
     | { kind: 'Literal'; value: string | number | bigint | boolean | null; loc?: Loc }
     | { kind: 'Template'; parts: (string | Expression)[]; loc?: Loc }
@@ -165,9 +165,19 @@ export class Parser {
     }
     private parameters(): Parameter[] {
         this.take('LeftParen'); const params: Parameter[] = []
+        let optionalSeen = false, restSeen = false
         while (!this.is('RightParen')) {
+            const rest = this.is('Dot') && this.tokens[this.pos + 1]?.type === 'Dot' && this.tokens[this.pos + 2]?.type === 'Dot'
+            if (rest) this.pos += 3
+            if (restSeen) this.fail('A rest parameter must be the last parameter')
             const { name, loc } = this.identifier(), type = this.match('Colon') ? this.type() : undefined, defaultValue = this.match('Equal') ? this.expression() : undefined
-            params.push({ name, loc, type, defaultValue })
+            if (rest && defaultValue !== undefined) this.fail('A rest parameter cannot have a default value')
+            if (rest && !type) this.fail('A rest parameter must have an array type')
+            if (rest && type && type.kind !== 'ArrayType' && !(type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) this.fail('A rest parameter must have an array type')
+            if (!rest && defaultValue !== undefined) optionalSeen = true
+            else if (!rest && optionalSeen) this.fail('Parameters with default values must follow parameters without default values')
+            params.push({ name, loc, type, defaultValue, rest })
+            restSeen ||= rest
             if (!this.match('Comma') && !this.is('RightParen')) this.fail("Expected ',' or ')' in parameters")
         }
         this.take('RightParen'); return params
@@ -451,8 +461,11 @@ export class Parser {
                 const params: Parameter[] = []
                 if (!this.is('RightParen')) {
                     do {
+                        const rest = this.is('Dot') && this.tokens[this.pos + 1]?.type === 'Dot' && this.tokens[this.pos + 2]?.type === 'Dot'
+                        if (rest) this.pos += 3
                         const { name, loc } = this.identifier(), type = this.match('Colon') ? this.type() : undefined
-                        params.push({ name, loc, type })
+                        if (rest && (!type || (type.kind !== 'ArrayType' && !(type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))))) this.fail('A rest parameter must have an array type')
+                        params.push({ name, loc, type, rest })
                     } while (this.match('Comma'))
                 }
                 this.take('RightParen')
@@ -524,7 +537,7 @@ type InferredType =
     | { kind: 'union'; types: InferredType[] }
     | { kind: 'array'; element: InferredType }
     | { kind: 'object'; fields: Map<string, InferredType> }
-    | { kind: 'function'; result?: InferredType }
+    | { kind: 'function'; params?: { type: InferredType; optional: boolean; rest: boolean }[]; result?: InferredType }
     | { kind: 'unknown' }
 
 const unknownType: InferredType = { kind: 'unknown' }
@@ -718,16 +731,44 @@ function inferExpressionType(
         case 'Assignment':
             return unknownType
         case 'Function': {
+            const scope = new Map(variables)
+            for (const param of expression.params) {
+                const declared = param.type ? typeFromNode(param.type) : undefined
+                const inferred = param.defaultValue ? inferExpressionType(param.defaultValue, scope) : unknownType
+                const parameterType = declared ?? (param.rest ? { kind: 'array', element: inferred } as InferredType : inferred)
+                scope.set(param.name, parameterType)
+            }
             const result = expression.returnType
                 ? typeFromNode(expression.returnType)
                 : expression.expressionBody
-                    ? inferExpressionType(expression.expressionBody, variables)
-                    : inferFunctionReturnType(expression.body, variables)
-            return { kind: 'function', result }
+                    ? inferExpressionType(expression.expressionBody, scope)
+                    : inferFunctionReturnType(expression.body, scope)
+            return { kind: 'function', params: expression.params.map(param => ({
+                type: param.type ? typeFromNode(param.type) : param.defaultValue ? inferExpressionType(param.defaultValue, scope) : unknownType,
+                optional: param.defaultValue !== undefined,
+                rest: param.rest === true
+            })), result }
         }
         case 'Call': {
             const callee = inferExpressionType(expression.callee, variables)
-            return callee.kind === 'function' ? callee.result ?? primitive('null') : unknownType
+            if (callee.kind !== 'function') return unknownType
+            if (callee.params) {
+                const required = callee.params.filter(param => !param.optional && !param.rest).length
+                const rest = callee.params.some(param => param.rest)
+                const maximum = rest ? Infinity : callee.params.length
+                if (expression.args.length < required || expression.args.length > maximum) {
+                    throw new SyntaxError(`Expected ${required}${maximum === required ? '' : ` to ${maximum === Infinity ? 'any number of' : maximum}`} arguments, received ${expression.args.length}`)
+                }
+                expression.args.forEach((argument, index) => {
+                    const parameter = callee.params!.find((item, paramIndex) => item.rest ? index >= paramIndex : paramIndex === index)
+                    if (!parameter) return
+                    const actual = inferExpressionType(argument, variables)
+                    if (!isAssignable(parameter.rest && parameter.type.kind === 'array' ? parameter.type.element : parameter.type, actual)) {
+                        throw new SyntaxError(`Argument ${index + 1} has type ${describeType(actual)}; expected ${describeType(parameter.rest && parameter.type.kind === 'array' ? parameter.type.element : parameter.type)}`)
+                    }
+                })
+            }
+            return callee.result ?? primitive('null')
         }
     }
 }
@@ -871,7 +912,21 @@ function validateArithmeticTypes(statements: Statement[], variables = new Map<st
                 break
 
             case 'FunctionDeclaration':
-                validateArithmeticTypes(statement.body, new Map(variables))
+                {
+                    const scope = new Map(variables)
+                    const params = statement.params.map(param => {
+                        const declared = param.type ? typeFromNode(param.type, aliases) : undefined
+                        const inferred = param.defaultValue ? inferExpressionType(param.defaultValue, scope) : unknownType
+                        const type = declared ?? (param.rest ? { kind: 'array', element: inferred } as InferredType : inferred)
+                        scope.set(param.name, type)
+                        return { type: param.rest && type.kind !== 'array' ? unknownType : type, optional: param.defaultValue !== undefined, rest: param.rest === true }
+                    })
+                    validateArithmeticTypes(statement.body, scope)
+                    const result = statement.returnType
+                        ? typeFromNode(statement.returnType, aliases)
+                        : inferFunctionReturnType(statement.body, scope)
+                    variables.set(statement.name, { kind: 'function', params, result })
+                }
                 break
 
             case 'Import':
@@ -882,7 +937,7 @@ function validateArithmeticTypes(statements: Statement[], variables = new Map<st
 }
 
 export function parse(source: string, options: { validate?: boolean } = {}): Statement[] {
-    const statements = new Parser(Lexer(source).tokenize()).parse()
+        const statements = new Parser(Lexer(source).tokenize()).parse()
     if (options.validate !== false) {
         validateDeclarations(statements)
         validateArithmeticTypes(statements)
