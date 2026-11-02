@@ -18,3 +18,8 @@ const multiline = `Hello, ${name}!
 Your current age is ${age}.
 Next year you will be ${age + 1}.`
 console.log(multiline)
+
+const str = 'My test string'
+
+for const char of str
+    console.log(char)

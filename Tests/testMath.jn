@@ -1,0 +1,38 @@
+import { Math } from 'juno'
+import { console } from 'juno:node'
+
+const math = Math
+
+console.log("=== Math library tests ===")
+
+# Constants
+console.log("constants:", math.PI, math.E, math.SQRT2, math.LN2)
+
+# Rounding and absolute value
+console.log("abs / sign:", math.abs(-7), math.sign(-7), math.sign(0), math.sign(7))
+console.log("ceil / floor / round / trunc:", math.ceil(2.3), math.floor(2.8), math.round(2.5), math.trunc(-2.8))
+
+# Min, max, powers, and roots
+console.log("min / max:", math.min(4, -2, 9), math.max(4, -2, 9))
+console.log("pow / sqrt / cbrt / hypot:", math.pow(3, 2), math.sqrt(81), math.cbrt(27), math.hypot(3, 4))
+
+# Exponential and logarithmic functions
+console.log("exp / log:", math.exp(1), math.log(math.E))
+console.log("log2 / log10:", math.log2(8), math.log10(1000))
+
+# Trigonometric functions (angles are in radians)
+console.log("sin / cos / tan:", math.sin(0), math.cos(0), math.tan(0))
+console.log("asin / acos / atan / atan2:", math.asin(0), math.acos(1), math.atan(0), math.atan2(0, 1))
+
+# Hyperbolic functions
+console.log("sinh / cosh / tanh:", math.sinh(0), math.cosh(0), math.tanh(0))
+
+# Integer and floating-point helpers
+console.log("clz32 / imul:", math.clz32(1), math.imul(6, 7))
+console.log("fround:", math.fround(1.337))
+
+# random() should return a value in [0, 1).
+const randomValue = math.random()
+console.log("random in [0, 1):", randomValue >= 0 & randomValue < 1)
+
+console.log("=== Math library tests complete ===")

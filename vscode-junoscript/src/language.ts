@@ -56,8 +56,26 @@ function consoleType(): TypeNode {
     }
 }
 
+function mathType(): TypeNode {
+    const number = named('number')
+    const unary = (name: string) => method(name, [{ name: 'value', type: number }], number)
+    const binary = (name: string) => method(name, [{ name: 'x', type: number }, { name: 'y', type: number }], number)
+    return {
+        kind: 'ObjectType',
+        members: [
+            ...['E', 'LN10', 'LN2', 'LOG10E', 'LOG2E', 'PI', 'SQRT1_2', 'SQRT2'].map(name => field(name, number, true)),
+            ...['abs', 'acos', 'acosh', 'asin', 'asinh', 'atan', 'atanh', 'cbrt', 'ceil', 'clz32', 'cos', 'cosh', 'exp', 'expm1', 'floor', 'fround', 'log', 'log10', 'log1p', 'log2', 'round', 'sign', 'sin', 'sinh', 'sqrt', 'tan', 'tanh', 'trunc'].map(unary),
+            binary('atan2'), binary('imul'), binary('pow'),
+            method('hypot', [{ name: 'values', type: arrayOf(number), rest: true }], number),
+            method('max', [{ name: 'values', type: arrayOf(number), rest: true }], number),
+            method('min', [{ name: 'values', type: arrayOf(number), rest: true }], number),
+            method('random', [], number)
+        ]
+    }
+}
+
 function moduleType(module: 'juno' | 'juno:node'): TypeNode {
-    return { kind: 'ObjectType', members: [field('console', consoleType(), true)] }
+    return { kind: 'ObjectType', members: [field('console', consoleType(), true), ...(module === 'juno' ? [field('Math', mathType(), true)] : [])] }
 }
 
 function globals(): Env {
@@ -85,7 +103,10 @@ export function printType(type: TypeNode): string {
                 : `${inner}[]`
         }
         case 'ObjectType': {
-            const members = type.members.map(member => {
+            const displayedMembers = type.members.some(member => member.name === 'toString')
+                ? type.members
+                : [...type.members, method('toString', [], named('string'))]
+            const members = displayedMembers.map(member => {
                 const prefix = `${member.readonly ? 'readonly ' : ''}${member.constant ? 'const ' : ''}${member.name}${member.optional ? '?' : ''}`
                 if (member.method) return `${prefix}(${(member.params ?? []).map(printParam).join(', ')}): ${printType(member.type)}`
                 return `${prefix}: ${printType(member.type)}`
@@ -185,11 +206,17 @@ function isFunctionSymbol(value: TypeNode | FunctionSymbol | undefined): value i
 
 function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | FunctionSymbol | undefined {
     const resolved = resolveType(type, env)
-    if (resolved.kind !== 'ObjectType') return undefined
-    const member = resolved.members.find(item => item.name === name)
-    if (!member) return undefined
-    if (member.method) return { kind: 'fun', params: member.params ?? [], returnType: member.type }
-    return member.type
+    if (resolved.kind === 'ObjectType') {
+        const member = resolved.members.find(item => item.name === name)
+        if (member) {
+            if (member.method) return { kind: 'fun', params: member.params ?? [], returnType: member.type }
+            return member.type
+        }
+    }
+    if (name === 'toString' && !(resolved.kind === 'NamedType' && resolved.name === 'null') && !(resolved.kind === 'LiteralType' && resolved.value === null)) {
+        return { kind: 'fun', params: [], returnType: named('string') }
+    }
+    return undefined
 }
 
 function isAssignableTo(expected: TypeNode, actual: TypeNode, env: Env): boolean {
@@ -247,6 +274,17 @@ function isNamedType(type: TypeNode, name: string): boolean {
 function removeNull(type: TypeNode): TypeNode {
     if (type.kind !== 'UnionType') return isNamedType(type, 'null') ? named('any') : type
     return unionOf(type.types.filter(part => !isNamedType(part, 'null')))
+}
+
+function iterableElementType(type: TypeNode, env: Env): TypeNode {
+    const resolved = resolveType(type, env)
+    if (resolved.kind === 'ArrayType') return resolved.element
+    if (resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray')) {
+        return resolved.args[0] ?? named('any')
+    }
+    if (resolved.kind === 'UnionType') return unionOf(resolved.types.map(part => iterableElementType(part, env)))
+    if (isNamedType(resolved, 'string')) return named('string')
+    return named('any')
 }
 
 function isNullable(type: TypeNode, env: Env): boolean {
@@ -535,12 +573,14 @@ class Analyzer {
                     this.addHover(statement.defaultImport, statement.defaultImportLoc, printed.code, printed.docs)
                 }
                 statement.namedImports.forEach((name, index) => {
-                    const type = name === 'console' ? consoleType() : named('any')
+                    const type = name === 'console' ? consoleType() : name === 'Math' && statement.module === 'juno' ? mathType() : named('any')
                     const symbol: SymbolInfo = {
                         kind: 'var',
                         mutable: false,
                         type,
-                        docs: name === 'console' ? (statement.module === 'juno:node' ? 'Console with `log`, `args`, `read`, and `readLines`.' : 'Host console (`log`, `error`, `warn`).') : imported
+                        docs: name === 'console'
+                            ? (statement.module === 'juno:node' ? 'Console with `log`, `args`, `read`, and `readLines`.' : 'Host console (`log`, `error`, `warn`).')
+                            : name === 'Math' && statement.module === 'juno' ? 'Standard JavaScript Math constants and functions.' : imported
                     }
                     this.bind(env, name, symbol)
                     const printed = printSymbol(name, symbol)
@@ -648,7 +688,7 @@ class Analyzer {
             case 'ForOf': {
                 this.walkExpression(statement.iterable, env)
                 const iterable = inferExpression(statement.iterable, env)
-                const bindingType = iterable.kind === 'ArrayType' ? iterable.element : named('any')
+                const bindingType = iterableElementType(iterable, env)
                 const local = new Map(env)
                 this.bind(local, statement.binding, { kind: 'var', mutable: statement.mutable, type: bindingType })
                 this.addHover(statement.binding, statement.loc, `${statement.mutable ? 'let' : 'const'} ${statement.binding}: ${printType(bindingType)}`)
@@ -815,15 +855,20 @@ class Analyzer {
                 }
                 return
             }
-            case 'Call':
+            case 'Call': {
                 this.walkExpression(expression.callee, env, thisType)
                 if (isNullable(inferExpression(expression.callee, env), env) && !(expression.callee.kind === 'Member' && expression.callee.optional)) {
                     this.addDiagnostic(expressionStart(expression.callee), 'Cannot call a nullable value; use ! or ?? to handle null.')
+                }
+                if (expression.callee.kind === 'Member' && expression.callee.loc) {
+                    const hover = this.hovers.find(item => item.line === expression.callee.loc?.line && item.column === expression.callee.loc?.column && item.code.startsWith('(method)'))
+                    if (hover) hover.code += `\n(infer) ${printType(inferExpression(expression, env))}`
                 }
                 expression.args.forEach(arg => this.walkExpression(arg, env, thisType))
                 expression.typeArguments?.forEach(type => this.walkType(type, env))
                 this.addParameterHints(expression.callee, expression.args, env)
                 return
+            }
             case 'Function':
                 this.walkFunction(expression, env)
                 return

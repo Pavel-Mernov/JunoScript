@@ -26,10 +26,11 @@ export class Interpreter {
         switch (statement.kind) {
             case 'Import': {
                 const module = resolveModule(statement.module) as Record<string, unknown>
-                if (statement.defaultImport) this.declare(env, statement.defaultImport, module, false)
+                const adaptedModule = this.adaptModule(module, env)
+                if (statement.defaultImport) this.declare(env, statement.defaultImport, adaptedModule, false)
                 for (const name of statement.namedImports) {
                     if (!(name in module)) throw new Error(`Module '${statement.module}' has no export '${name}'`)
-                    this.declare(env, name, module[name], false)
+                    this.declare(env, name, name === 'console' ? this.adaptConsole(module[name] as Record<string, any>) : module[name], false)
                 }
                 return
             }
@@ -60,7 +61,7 @@ export class Interpreter {
     private evaluate(expression: Expression, env: Environment): any {
         switch (expression.kind) {
             case 'Literal': return expression.value
-            case 'Template': return expression.parts.map(part => typeof part === 'string' ? part : String(this.evaluate(part, env))).join('')
+            case 'Template': return expression.parts.map(part => typeof part === 'string' ? part : this.toJunoString(this.evaluate(part, env))).join('')
             case 'Identifier':
                 if (expression.name === 'this') return this.lookup(env, 'this')?.value ?? null
                 const binding = this.lookup(env, expression.name)
@@ -73,10 +74,15 @@ export class Interpreter {
                 binding.value = this.evaluate(expression.value, env)
                 return binding.value
             }
-            case 'Array': return expression.elements.map(item => this.evaluate(item, env))
+            case 'Array': {
+                const array = expression.elements.map(item => this.evaluate(item, env))
+                Object.defineProperty(array, 'toString', { enumerable: false, value: function(this: object) { return stringifyJunoObject(this) } })
+                return array
+            }
             case 'Object': {
                 const object: Record<string, any> = {}
                 Object.defineProperty(object, 'keys', { enumerable: false, value: function(this: object) { return Object.keys(this) } })
+                object.toString = this.defaultToString()
                 for (const property of expression.properties) {
                     if (property.value.kind === 'Function') {
                         const fn = property.value
@@ -254,6 +260,38 @@ export class Interpreter {
     }
 
     private childEnvironment(parent: Environment): Environment { return { bindings: new Map(), types: new Map(), parent } }
+
+    private adaptModule(module: Record<string, any>, env: Environment): Record<string, any> {
+        if (!('console' in module)) return module
+        return { ...module, console: this.adaptConsole(module.console) }
+    }
+
+    private adaptConsole(consoleObject: Record<string, any>): Record<string, any> {
+        const convert = (args: unknown[]) => args.map(value => value !== null && (typeof value === 'object' || typeof value === 'function') ? this.toJunoString(value) : value)
+        return {
+            ...consoleObject,
+            log: (...args: unknown[]) => consoleObject.log(...convert(args)),
+            error: (...args: unknown[]) => consoleObject.error(...convert(args)),
+            warn: (...args: unknown[]) => consoleObject.warn(...convert(args))
+        }
+    }
+
+    private toJunoString(value: unknown): string {
+        if (value === null || value === undefined) return String(value)
+        if ((typeof value === 'object' || typeof value === 'function') && value !== null) {
+            const method = (value as any).toString
+            if (typeof method === 'function') return String(method.call(value))
+            if (method?.__junoFunction) return String(this.callFunction(method, [], value))
+        }
+        return String(value)
+    }
+
+    private defaultToString(): (this: object) => string {
+        const method = function(this: object) { return stringifyJunoObject(this) }
+        Object.defineProperty(method, '__junoDefaultToString', { value: true })
+        return method
+    }
+
     private requireCondition(value: unknown): boolean {
         if (value == null) throw new TypeError('Cannot use null as a condition; use ! or ?? to handle null')
         return Boolean(value)
@@ -296,9 +334,14 @@ export class Interpreter {
             return value
         }
         if (type.kind !== 'ObjectType') return value
+        const runtimeValue = value as Record<string, any>
+        if (typeof runtimeValue.toString !== 'function' && !(runtimeValue.toString as any)?.__junoFunction) {
+            runtimeValue.toString = this.defaultToString()
+        }
         for (const member of type.members) {
             if (member.method) {
-                if (member.body && typeof value[member.name] !== 'function' && !value[member.name]?.__junoFunction) {
+                const isDefaultToString = member.name === 'toString' && runtimeValue[member.name]?.__junoDefaultToString
+                if (member.body && (isDefaultToString || (typeof runtimeValue[member.name] !== 'function' && !runtimeValue[member.name]?.__junoFunction))) {
                     ;(value as Record<string, any>)[member.name] = { __junoFunction: true, params: member.params ?? [], body: member.body, closure: env, thisValue: value } satisfies RuntimeFunction
                 }
                 continue
@@ -338,9 +381,14 @@ export class Interpreter {
             }
             return null
         }
-        if (type.kind !== 'ObjectType') return null
-        const member = type.members.find(item => item.name === name)
-        return member ? { type: member.type, optional: member.optional } : null
+        if (type.kind === 'ObjectType') {
+            const member = type.members.find(item => item.name === name)
+            if (member) return { type: member.type, optional: member.optional }
+        }
+        if (name === 'toString' && !(type.kind === 'LiteralType' && type.value === null)) {
+            return { type: { kind: 'NamedType', name: 'string' }, optional: false }
+        }
+        return null
     }
 
     private readMember(object: unknown, property: string, optional: boolean, owner: Expression, env: Environment): unknown {
@@ -363,6 +411,14 @@ function deepEqual(a: any, b: any): boolean {
     if (Array.isArray(a) !== Array.isArray(b)) return false
     const keysA = Object.keys(a), keysB = Object.keys(b)
     return keysA.length === keysB.length && keysA.every(key => Object.prototype.hasOwnProperty.call(b, key) && deepEqual(a[key], b[key]))
+}
+
+function stringifyJunoObject(value: object): string {
+    return JSON.stringify(value, (_key, item) => {
+        if (item && typeof item === 'object' && item.__junoFunction) return undefined
+        if (typeof item === 'bigint') return String(item)
+        return item
+    }) ?? 'null'
 }
 
 function matchesType(value: unknown, type: unknown): boolean {

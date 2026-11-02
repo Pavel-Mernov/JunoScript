@@ -27,7 +27,7 @@ export type Statement =
     | { kind: 'ForOf'; binding: string; loc?: Loc; mutable: boolean; iterable: Expression; body: Statement[] }
     | { kind: 'While'; condition: Expression; body: Statement[] }
 
-const precedence: Record<string, number> = { '==': 1, '!=': 1, '<': 2, '<=': 2, '>': 2, '>=': 2, '|': 3, '&': 4, '+': 5, '-': 5, '??': 6, '*': 7, '/': 7, '%': 7 }
+const precedence: Record<string, number> = { '|': 1, '&': 2, '??': 3, '==': 4, '!=': 4, '<': 5, '<=': 5, '>': 5, '>=': 5, '+': 6, '-': 6, '*': 7, '/': 7, '%': 7 }
 const opTypes: Partial<Record<TokenType, string>> = { EqualEqual: '==', NotEqual: '!=', Less: '<', LessEqual: '<=', Greater: '>', GreaterEqual: '>=', Nullish: '??', Pipe: '|', Ampersand: '&', Plus: '+', Minus: '-', Multiply: '*', Divide: '/', Percent: '%' }
 
 export class Parser {

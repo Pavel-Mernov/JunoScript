@@ -8,6 +8,8 @@ console.log("isType<object>(values) =", isType<object>(values))
 console.log("array[0] =", values[0])
 console.log("array[1] =", values[1])
 console.log("array[2] =", values[2])
+console.log("array.toString() =", values.toString())
+console.log("primitive toString() =", 42.toString(), true.toString(), "Juno".toString())
 
 # Arrays can contain values of different types, including objects and functions.
 let mixedValues = [42, "hello", true, { name: "Ada" }, () => "called from array"]
@@ -31,6 +33,24 @@ console.log("person.name =", person.name)
 console.log("person['name'] =", person["name"])
 console.log("person[1] =", person[1])
 console.log("person.greet() =", person.greet())
+console.log("person.toString() =", person.toString())
+console.log("person in a template = ${person}")
+console.log("person sent to console =", person)
+
+let namedObject = {
+    name: "Ada"
+    toString() =
+        return "Person: " + this.name
+}
+console.log("custom toString() =", namedObject.toString())
+console.log("custom object in a template = ${namedObject}")
+console.log("custom object sent to console =", namedObject)
+
+type PlainPerson = {
+    name: string
+}
+let typedPerson: PlainPerson = { name: "Grace" }
+console.log("typed object default toString() =", typedPerson.toString())
 
 # Each invalid-index case should stop execution with TypeError.
 # Uncomment one case at a time to inspect the error.
