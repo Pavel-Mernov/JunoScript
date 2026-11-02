@@ -1,0 +1,21 @@
+import { Partial, Pick, Omit} from 'types'
+import { console } from 'juno:node'
+
+type User = {
+    name: string
+    age: number
+    active: boolean
+}
+
+type PartialUser = Partial<User>
+const partialUser : PartialUser = { name: "Ada" }
+console.log("Partial<User> accepts missing fields =", isType<PartialUser>(partialUser))
+
+type NamedUser = Pick<User, "name">
+const namedUser : NamedUser = { name: "Grace", extra: "preserved" }
+console.log("Pick<User, name> accepts extra fields =", isType<NamedUser>(namedUser))
+console.log("Pick leaves extra fields on the object =", namedUser.toString())
+
+type UserWithoutAge = Omit<User, "age">
+const activeUser : UserWithoutAge = { name: "Lin", active: true }
+console.log("Omit<User, age> accepts the remaining shape =", isType<UserWithoutAge>(activeUser))

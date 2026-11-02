@@ -4,7 +4,8 @@ import { Expression, Parameter, Statement, TypeNode, parse } from '../Lexer/pars
 import { resolveModule } from '../Modules'
 
 type Binding = { value: unknown; mutable: boolean; declaredType?: TypeNode }
-type Environment = { bindings: Map<string, Binding>; types: Map<string, TypeNode>; parent?: Environment }
+type TypeAlias = { value: TypeNode; generics: string[] }
+type Environment = { bindings: Map<string, Binding>; types: Map<string, TypeAlias>; parent?: Environment }
 type RuntimeFunction = { __junoFunction: true; params: Parameter[]; body: Statement[]; closure: Environment; thisValue?: unknown }
 class ReturnValue { constructor(readonly value: unknown) {} }
 
@@ -42,8 +43,8 @@ export class Interpreter {
                 return
             }
             case 'TypeDeclaration': {
-                env.types.set(statement.name, statement.value)
-                this.declare(env, statement.name, { __junoTypeConstructor: true, typeName: statement.name }, false)
+                env.types.set(statement.name, { value: statement.value, generics: statement.generics })
+                this.declare(env, statement.name, { __junoTypeConstructor: true, typeName: statement.name, typeNode: statement.value, generics: statement.generics }, false)
                 return
             }
             case 'FunctionDeclaration': this.declare(env, statement.name, { __junoFunction: true, params: statement.params, body: statement.body, closure: env } satisfies RuntimeFunction, false); return
@@ -228,6 +229,13 @@ export class Interpreter {
                     const value = expression.args[0] ? this.evaluate(expression.args[0], env) : null
                     return this.matchesTypeNode(value, expression.typeArguments[0], env)
                 }
+                if (expression.callee.kind === 'Identifier' && expression.callee.name === 'isType' && expression.args.length >= 2) {
+                    const value = this.evaluate(expression.args[0], env)
+                    const target = this.evaluate(expression.args[1], env) as any
+                    const targetType = target?.typeNode as TypeNode | undefined
+                    if (targetType) return this.matchesTypeNode(value, targetType, env)
+                    return matchesType(value, target)
+                }
                 let thisValue: unknown
                 let callee: any
                 if (expression.callee.kind === 'Member') {
@@ -372,17 +380,76 @@ export class Interpreter {
             if (resolving.has(type.name)) return type
             for (let current: Environment | undefined = env; current; current = current.parent) {
                 const alias = current.types.get(type.name)
-                if (alias) return this.resolveAliasType(alias, env, new Set([...resolving, type.name]))
+                if (alias && alias.generics.length === 0) return this.resolveAliasType(alias.value, env, new Set([...resolving, type.name]))
             }
             return type
         }
+        if (type.kind === 'GenericType') {
+            for (let current: Environment | undefined = env; current; current = current.parent) {
+                const alias = current.types.get(type.name)
+                if (alias) return this.resolveAliasType(this.instantiateAlias(alias, type.args), env, resolving)
+            }
+            const utility = this.instantiateUtilityType(type, env)
+            return utility ?? type
+        }
         if (type.kind === 'UnionType' || type.kind === 'IntersectionType') return { ...type, types: type.types.map(part => this.resolveAliasType(part, env, resolving)) }
         if (type.kind === 'ArrayType') return { ...type, element: this.resolveAliasType(type.element, env, resolving) }
+        if (type.kind === 'ObjectType') return { ...type, members: type.members.map(member => ({ ...member, type: this.resolveAliasType(member.type, env, resolving) })) }
+        if (type.kind === 'FunctionType') return { ...type, params: type.params.map(param => this.resolveAliasType(param, env, resolving)), result: this.resolveAliasType(type.result, env, resolving) }
         return type
+    }
+
+    private instantiateAlias(alias: TypeAlias, args: TypeNode[]): TypeNode {
+        const substitutions = new Map(alias.generics.map((name, index) => [name, args[index] ?? { kind: 'NamedType', name } as TypeNode]))
+        const replace = (node: TypeNode): TypeNode => {
+            if (node.kind === 'NamedType' && substitutions.has(node.name)) return substitutions.get(node.name)!
+            if (node.kind === 'GenericType') return { ...node, args: node.args.map(replace) }
+            if (node.kind === 'UnionType' || node.kind === 'IntersectionType') return { ...node, types: node.types.map(replace) }
+            if (node.kind === 'ArrayType') return { ...node, element: replace(node.element) }
+            if (node.kind === 'FunctionType') return { ...node, params: node.params.map(replace), result: replace(node.result) }
+            if (node.kind === 'ObjectType') return { ...node, members: node.members.map(member => ({ ...member, type: replace(member.type) })) }
+            return node
+        }
+        return replace(alias.value)
     }
 
     private isCallableType(type: TypeNode): boolean {
         return type.kind === 'FunctionType' || (type.kind === 'NamedType' && type.name === 'any')
+    }
+
+    private instantiateUtilityType(type: Extract<TypeNode, { kind: 'GenericType' }>, env: Environment): TypeNode | null {
+        if (!['Partial', 'Required', 'Readonly', 'Pick', 'Omit'].includes(type.name) || !type.args[0]) return null
+        const source = this.resolveAliasType(type.args[0], env)
+        if (source.kind !== 'ObjectType') return null
+        let members = source.members
+        if (type.name === 'Partial') members = members.map(member => ({ ...member, optional: true }))
+        else if (type.name === 'Required') members = members.map(member => ({ ...member, optional: false }))
+        else if (type.name === 'Readonly') members = members.map(member => ({ ...member, readonly: true }))
+        else if (type.name === 'Pick' || type.name === 'Omit') {
+            const keyArgument = type.args[1]
+            const keys = keyArgument?.kind === 'ArrayType'
+                ? this.literalKeys(keyArgument.element)
+                : this.literalKeys(keyArgument)
+            if (!keys) return null
+            members = members.filter(member => type.name === 'Pick' ? keys.has(member.name) : !keys.has(member.name))
+        }
+        return { ...source, members }
+    }
+
+    private literalKeys(type?: TypeNode): Set<string> | null {
+        if (!type) return null
+        if (type.kind === 'LiteralType' && typeof type.value === 'string') return new Set([type.value])
+        if (type.kind === 'UnionType') {
+            const keys = new Set<string>()
+            for (const part of type.types) {
+                const values = this.literalKeys(part)
+                if (!values) return null
+                for (const value of values) keys.add(value)
+            }
+            return keys
+        }
+        if (type.kind === 'ArrayType') return this.literalKeys(type.element)
+        return null
     }
 
     private matchesTypeNode(value: unknown, type: TypeNode, env: Environment, resolving = new Set<string>()): boolean {
@@ -392,9 +459,9 @@ export class Interpreter {
             if (type.name === 'Array' || type.name === 'ReadonlyArray') return Array.isArray(value)
             for (let current: Environment | undefined = env; current; current = current.parent) {
                 const alias = current.types.get(type.name)
-                if (alias) {
+                if (alias && alias.generics.length === 0) {
                     if (resolving.has(type.name)) return false
-                    return this.matchesTypeNode(value, alias, env, new Set([...resolving, type.name]))
+                    return this.matchesTypeNode(value, alias.value, env, new Set([...resolving, type.name]))
                 }
             }
             switch (type.name) {
@@ -413,6 +480,8 @@ export class Interpreter {
             if ((type.name === 'Array' || type.name === 'ReadonlyArray') && type.args[0]) {
                 return Array.isArray(value) && value.every(item => this.matchesTypeNode(item, type.args[0], env, resolving))
             }
+            const resolved = this.resolveAliasType(type, env)
+            if (resolved !== type) return this.matchesTypeNode(value, resolved, env, resolving)
             return this.matchesTypeNode(value, { kind: 'NamedType', name: type.name }, env, resolving)
         }
         if (type.kind === 'UnionType') return type.types.some(part => this.matchesTypeNode(value, part, env, resolving))
@@ -436,7 +505,7 @@ export class Interpreter {
             if (resolving.has(type.name)) return value
             for (let current: Environment | undefined = env; current; current = current.parent) {
                 const alias = current.types.get(type.name)
-                if (alias) return this.applyTypeDefaults(value, alias, env, new Set([...resolving, type.name]))
+                if (alias && alias.generics.length === 0) return this.applyTypeDefaults(value, alias.value, env, new Set([...resolving, type.name]))
             }
             return value
         }
@@ -480,7 +549,7 @@ export class Interpreter {
             if (resolving.has(type.name)) return null
             for (let current: Environment | undefined = env; current; current = current.parent) {
                 const alias = current.types.get(type.name)
-                if (alias) return this.findTypeMember(alias, name, env, new Set([...resolving, type.name]))
+                if (alias && alias.generics.length === 0) return this.findTypeMember(alias.value, name, env, new Set([...resolving, type.name]))
             }
             if (name === 'toString' && type.name !== 'null') return { type: { kind: 'NamedType', name: 'string' }, optional: false }
             return null

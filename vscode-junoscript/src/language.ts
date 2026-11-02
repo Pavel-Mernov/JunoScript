@@ -28,7 +28,7 @@ type SymbolInfo =
     | { kind: 'var'; mutable: boolean; type: TypeNode; docs?: string }
     | { kind: 'fun'; params: Parameter[]; returnType: TypeNode; docs?: string }
     | { kind: 'type'; generics: string[]; value: TypeNode; docs?: string }
-    | { kind: 'module'; module: 'juno' | 'juno:node'; docs?: string }
+    | { kind: 'module'; module: 'juno' | 'juno:node' | 'types'; docs?: string }
 
 type Env = Map<string, SymbolInfo>
 
@@ -74,8 +74,19 @@ function mathType(): TypeNode {
     }
 }
 
-function moduleType(module: 'juno' | 'juno:node'): TypeNode {
-    return { kind: 'ObjectType', members: [field('console', consoleType(), true), ...(module === 'juno' ? [field('Math', mathType(), true)] : [])] }
+function typeUtilitiesType(): TypeNode {
+    const any = named('any')
+    return {
+        kind: 'ObjectType',
+        members: ['Partial', 'Required', 'Readonly', 'Pick', 'Omit'].map(name => field(name, {
+            kind: 'FunctionType', params: name === 'Pick' || name === 'Omit' ? [any, arrayOf(named('string'))] : [any], result: any
+        }))
+    }
+}
+
+function moduleType(module: 'juno' | 'juno:node' | 'types'): TypeNode {
+    if (module === 'types') return typeUtilitiesType()
+    return { kind: 'ObjectType', members: [field('console', consoleType(), true), ...(module === 'juno' ? [field('Math', mathType(), true), field('types', typeUtilitiesType(), true)] : [])] }
 }
 
 function globals(): Env {
@@ -103,10 +114,7 @@ export function printType(type: TypeNode): string {
                 : `${inner}[]`
         }
         case 'ObjectType': {
-            const displayedMembers = type.members.some(member => member.name === 'toString')
-                ? type.members
-                : [...type.members, method('toString', [], named('string'))]
-            const members = displayedMembers.map(member => {
+            const members = type.members.map(member => {
                 const prefix = `${member.readonly ? 'readonly ' : ''}${member.constant ? 'const ' : ''}${member.name}${member.optional ? '?' : ''}`
                 if (member.method) return `${prefix}(${(member.params ?? []).map(printParam).join(', ')}): ${printType(member.type)}`
                 return `${prefix}: ${printType(member.type)}`
@@ -185,6 +193,27 @@ function resolveType(type: TypeNode, env: Env): TypeNode {
     if (type.kind === 'GenericType') {
         const symbol = env.get(type.name)
         if (symbol?.kind === 'type') return resolveType(instantiate(symbol.value, symbol.generics, type.args), env)
+        if (['Partial', 'Required', 'Readonly', 'Pick', 'Omit'].includes(type.name) && type.args[0]) {
+            const source = resolveType(type.args[0], env)
+            if (source.kind === 'ObjectType') {
+                let members = source.members
+                if (type.name === 'Partial') members = members.map(member => ({ ...member, optional: true }))
+                else if (type.name === 'Required') members = members.map(member => ({ ...member, optional: false }))
+                else if (type.name === 'Readonly') members = members.map(member => ({ ...member, readonly: true }))
+                else if (type.name === 'Pick' || type.name === 'Omit') {
+                    const keysOf = (node: TypeNode | undefined): string[] => {
+                        if (!node) return []
+                        if (node.kind === 'LiteralType' && typeof node.value === 'string') return [node.value]
+                        if (node.kind === 'UnionType') return node.types.flatMap(keysOf)
+                        if (node.kind === 'ArrayType') return keysOf(node.element)
+                        return []
+                    }
+                    const keys = new Set(keysOf(type.args[1]))
+                    members = members.filter(member => type.name === 'Pick' ? keys.has(member.name) : !keys.has(member.name))
+                }
+                return { ...source, members }
+            }
+        }
         return type
     }
     if (type.kind === 'IntersectionType') {
@@ -195,6 +224,10 @@ function resolveType(type: TypeNode, env: Env): TypeNode {
         }
         return members.length ? { kind: 'ObjectType', members } : { kind: 'IntersectionType', types: parts }
     }
+    if (type.kind === 'UnionType') return { ...type, types: type.types.map(part => resolveType(part, env)) }
+    if (type.kind === 'ArrayType') return { ...type, element: resolveType(type.element, env) }
+    if (type.kind === 'ObjectType') return { ...type, members: type.members.map(member => ({ ...member, type: resolveType(member.type, env) })) }
+    if (type.kind === 'FunctionType') return { ...type, params: type.params.map(param => resolveType(param, env)), result: resolveType(type.result, env) }
     return type
 }
 
@@ -569,7 +602,7 @@ class Analyzer {
             case 'Import': {
                 const imported = statement.module === 'juno:node'
                     ? 'Node.js helpers for JunoScript (`console.args`, `console.read`, `console.readLines`).'
-                    : 'Standard JunoScript module. `console` mirrors the host console.'
+                    : statement.module === 'types' ? 'Runtime type utilities for transforming Juno type declarations.' : 'Standard JunoScript module. `console` mirrors the host console.'
                 if (statement.defaultImport) {
                     const symbol: SymbolInfo = { kind: 'module', module: statement.module, docs: imported }
                     this.bind(env, statement.defaultImport, symbol)
@@ -577,14 +610,19 @@ class Analyzer {
                     this.addHover(statement.defaultImport, statement.defaultImportLoc, printed.code, printed.docs)
                 }
                 statement.namedImports.forEach((name, index) => {
-                    const type = name === 'console' ? consoleType() : name === 'Math' && statement.module === 'juno' ? mathType() : named('any')
+                    const type = name === 'console' ? consoleType()
+                        : name === 'Math' && statement.module === 'juno' ? mathType()
+                        : name === 'types' && statement.module === 'juno' ? typeUtilitiesType()
+                        : statement.module === 'types' && ['Partial', 'Required', 'Readonly', 'Pick', 'Omit'].includes(name) ? typeUtilitiesType().kind === 'ObjectType' ? typeUtilitiesType().members.find(member => member.name === name)?.type ?? named('any') : named('any')
+                        : named('any')
                     const symbol: SymbolInfo = {
                         kind: 'var',
                         mutable: false,
                         type,
                         docs: name === 'console'
                             ? (statement.module === 'juno:node' ? 'Console with `log`, `args`, `read`, and `readLines`.' : 'Host console (`log`, `error`, `warn`).')
-                            : name === 'Math' && statement.module === 'juno' ? 'Standard JavaScript Math constants and functions.' : imported
+                            : name === 'Math' && statement.module === 'juno' ? 'Standard JavaScript Math constants and functions.'
+                            : name === 'types' && statement.module === 'juno' ? 'Runtime type transformation utilities.' : imported
                     }
                     this.bind(env, name, symbol)
                     const printed = printSymbol(name, symbol)
@@ -596,14 +634,17 @@ class Analyzer {
                 const symbol: SymbolInfo = { kind: 'type', generics: statement.generics, value: statement.value }
                 this.bind(env, statement.name, symbol)
                 this.walkType(statement.value, env)
-                const printed = printSymbol(statement.name, symbol)
-                this.addHover(statement.name, statement.loc, printed.code, printed.docs)
+                const resolved = resolveType(statement.value, env)
+                const printed = {
+                    code: `type ${statement.name}${statement.generics.length ? `<${statement.generics.join(', ')}>` : ''} = ${printType(resolved)}`
+                }
+                this.addHover(statement.name, statement.loc, printed.code)
                 statement.generics.forEach((name, index) => this.addHover(name, statement.genericLocs?.[index], `(type parameter) ${name}`))
                 return
             }
             case 'Variable': {
                 this.walkExpression(statement.initializer, env)
-                const type = statement.type ?? (statement.initializer ? inferExpression(statement.initializer, env) : named('any'))
+                const type = statement.type ? resolveType(statement.type, env) : statement.initializer ? inferExpression(statement.initializer, env) : named('any')
                 if (statement.type && statement.initializer?.kind === 'Object') {
                     const expected = resolveType(statement.type, env)
                     if (expected.kind === 'ObjectType') {
@@ -717,10 +758,16 @@ class Analyzer {
                 return
             case 'GenericType': {
                 const symbol = env.get(type.name)
-                if (symbol) {
+                if (['Partial', 'Required', 'Readonly', 'Pick', 'Omit'].includes(type.name)) {
+                    const parameters = type.name === 'Pick' || type.name === 'Omit' ? '<T, K>' : '<T>'
+                    this.addHover(type.name, type.loc, `type ${type.name}${parameters}`)
+                } else if (symbol && symbol.kind !== 'type') {
                     const printed = printSymbol(type.name, symbol)
                     this.addHover(type.name, type.loc, printed.code, printed.docs)
-                } else this.addHover(type.name, type.loc, `(type) ${printType(type)}`)
+                } else {
+                    const resolved = resolveType(type, env)
+                    this.addHover(type.name, type.loc, `(type) ${printType(resolved)}`)
+                }
                 type.args.forEach(arg => this.walkType(arg, env))
                 return
             }

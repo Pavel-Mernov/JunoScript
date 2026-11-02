@@ -19,7 +19,7 @@ export type Expression =
     | { kind: 'Function'; params: Parameter[]; returnType?: TypeNode; body: Statement[]; expressionBody?: Expression }
 export type Statement =
     | { kind: 'Variable'; name: string; loc?: Loc; mutable: boolean; type?: TypeNode; initializer?: Expression }
-    | { kind: 'Import'; module: 'juno' | 'juno:node'; defaultImport?: string; defaultImportLoc?: Loc; namedImports: string[]; namedImportLocs?: Loc[] }
+    | { kind: 'Import'; module: 'juno' | 'juno:node' | 'types'; defaultImport?: string; defaultImportLoc?: Loc; namedImports: string[]; namedImportLocs?: Loc[] }
     | { kind: 'FunctionDeclaration'; name: string; loc?: Loc; params: Parameter[]; returnType?: TypeNode; body: Statement[] }
     | { kind: 'TypeDeclaration'; name: string; loc?: Loc; generics: string[]; genericLocs?: Loc[]; value: TypeNode }
     | { kind: 'Return'; value?: Expression } | { kind: 'ExpressionStatement'; expression: Expression }
@@ -151,9 +151,9 @@ export class Parser {
             }
         }
         this.take('Keyword', "Expected 'from' after import names")
-        const moduleToken = this.take('String', "Expected 'juno' or 'juno:node' module name")
+        const moduleToken = this.take('String', "Expected 'juno', 'juno:node', or 'types' module name")
         const module = this.value(moduleToken)
-        if (module !== 'juno' && module !== 'juno:node') this.fail(`Unsupported module '${module}'`)
+        if (module !== 'juno' && module !== 'juno:node' && module !== 'types') this.fail(`Unsupported module '${module}'`)
         if (!defaultImport && namedImports.length === 0) this.fail('Import must name at least one binding')
         return { kind: 'Import', module, defaultImport, defaultImportLoc, namedImports, namedImportLocs }
     }
@@ -823,6 +823,24 @@ function typeFromNode(type: TypeNode, aliases: Map<string, TypeNode> = new Map()
     if (type.kind === 'ArrayType') return { kind: 'array', element: typeFromNode(type.element, aliases, resolving) }
     if (type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray')) {
         return { kind: 'array', element: type.args[0] ? typeFromNode(type.args[0], aliases, resolving) : unknownType }
+    }
+    if (type.kind === 'GenericType' && ['Partial', 'Required', 'Readonly', 'Pick', 'Omit'].includes(type.name) && type.args[0]) {
+        const source = typeFromNode(type.args[0], aliases, resolving)
+        if (source.kind !== 'object') return unknownType
+        let fields = [...source.fields]
+        if (type.name === 'Pick' || type.name === 'Omit') {
+            const keyValues = (node: TypeNode | undefined): string[] => {
+                if (!node) return []
+                if (node.kind === 'LiteralType' && typeof node.value === 'string') return [node.value]
+                if (node.kind === 'UnionType') return node.types.flatMap(keyValues)
+                if (node.kind === 'ArrayType') return keyValues(node.element)
+                return []
+            }
+            const keys = new Set(keyValues(type.args[1]))
+            fields = fields.filter(([key]) => type.name === 'Pick' ? keys.has(key) : !keys.has(key))
+        }
+        if (type.name === 'Partial') return { kind: 'object', fields: new Map() }
+        return { kind: 'object', fields: new Map(fields) }
     }
     if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.filter(member => !member.method && !member.optional && member.defaultValue === undefined && !(member.type.kind === 'UnionType' && member.type.types.some(part => part.kind === 'NamedType' && part.name === 'null'))).map(member => [member.name, typeFromNode(member.type, aliases, resolving)])) }
     if (type.kind === 'FunctionType') return { kind: 'function' }
