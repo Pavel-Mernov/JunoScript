@@ -261,7 +261,7 @@ export class Parser {
             this.take('RightBrace'); result = { kind: 'ObjectType', members }
         } else if (this.match('LeftParen')) {
             const args: TypeNode[] = []; if (!this.is('RightParen')) do { args.push(this.type()) } while (this.match('Comma'))
-            this.take('RightParen'); if (this.match('Arrow')) result = { kind: 'FunctionType', params: args, result: this.type() }; else if (args.length === 1) result = args[0]; else this.fail('Expected function return type after ->')
+            this.take('RightParen'); if (this.match('Arrow') || this.match('FatArrow')) result = { kind: 'FunctionType', params: args, result: this.type() }; else if (args.length === 1) result = args[0]; else this.fail('Expected function return type after -> or =>')
         } else if (this.match('Keyword', 'null')) {
             result = { kind: 'NamedType', name: 'null', loc: this.loc(this.tokens[this.pos - 1]) }
         } else {
@@ -277,7 +277,7 @@ export class Parser {
         let typeArguments: TypeNode[] | undefined
         while (true) {
             // Generic call type arguments are compile-time only: parse and discard them here.
-            if (this.is('Less') && left.kind === 'Identifier') {
+            if (this.is('Less') && (left.kind === 'Identifier' || left.kind === 'Member')) {
                 const saved = this.pos
                 try {
                     this.pos++
@@ -289,13 +289,13 @@ export class Parser {
                 if (typeArguments) continue
             }
             if (this.match('Dot')) {
-                const property = this.identifier()
+                const property = this.propertyName()
                 left = { kind: 'Member', object: left, property: property.name, optional: false, loc: property.loc }
                 continue
             }
             if (this.is('Question') && this.tokens[this.pos + 1]?.type === 'Dot') {
                 this.pos += 2
-                const property = this.identifier()
+                const property = this.propertyName()
                 left = { kind: 'Member', object: left, property: property.name, optional: true, loc: property.loc }
                 continue
             }

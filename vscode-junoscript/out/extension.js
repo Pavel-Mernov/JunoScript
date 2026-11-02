@@ -550,9 +550,9 @@ var Parser = class _Parser {
         args.push(this.type());
       } while (this.match("Comma"));
       this.take("RightParen");
-      if (this.match("Arrow")) result = { kind: "FunctionType", params: args, result: this.type() };
+      if (this.match("Arrow") || this.match("FatArrow")) result = { kind: "FunctionType", params: args, result: this.type() };
       else if (args.length === 1) result = args[0];
-      else this.fail("Expected function return type after ->");
+      else this.fail("Expected function return type after -> or =>");
     } else if (this.match("Keyword", "null")) {
       result = { kind: "NamedType", name: "null", loc: this.loc(this.tokens[this.pos - 1]) };
     } else {
@@ -575,7 +575,7 @@ var Parser = class _Parser {
     let left = this.prefix();
     let typeArguments;
     while (true) {
-      if (this.is("Less") && left.kind === "Identifier") {
+      if (this.is("Less") && (left.kind === "Identifier" || left.kind === "Member")) {
         const saved = this.pos;
         try {
           this.pos++;
@@ -593,13 +593,13 @@ var Parser = class _Parser {
         if (typeArguments) continue;
       }
       if (this.match("Dot")) {
-        const property = this.identifier();
+        const property = this.propertyName();
         left = { kind: "Member", object: left, property: property.name, optional: false, loc: property.loc };
         continue;
       }
       if (this.is("Question") && this.tokens[this.pos + 1]?.type === "Dot") {
         this.pos += 2;
-        const property = this.identifier();
+        const property = this.propertyName();
         left = { kind: "Member", object: left, property: property.name, optional: true, loc: property.loc };
         continue;
       }
@@ -1423,6 +1423,9 @@ function lookupMember(type, name, env) {
   if (name === "toString" && !(resolved.kind === "NamedType" && resolved.name === "null") && !(resolved.kind === "LiteralType" && resolved.value === null)) {
     return { kind: "fun", params: [], returnType: named("string") };
   }
+  if (name === "as" && !(resolved.kind === "NamedType" && resolved.name === "null") && !(resolved.kind === "LiteralType" && resolved.value === null)) {
+    return { kind: "fun", params: [], returnType: named("any") };
+  }
   return void 0;
 }
 function isAssignableTo(expected, actual, env) {
@@ -1609,6 +1612,7 @@ function inferExpression(expression, env) {
     }
     case "Call": {
       if (expression.callee.kind === "Identifier" && expression.callee.name === "isType") return named("boolean");
+      if (expression.callee.kind === "Member" && expression.callee.property === "as" && expression.typeArguments?.length) return expression.typeArguments[0];
       if (expression.callee.kind === "Identifier" && env.get(expression.callee.name)?.kind === "type") return named(expression.callee.name);
       const callee = inferExpression(expression.callee, env);
       if (callee.kind === "FunctionType") return callee.result;
@@ -2003,9 +2007,19 @@ var Analyzer = class {
         const member = lookupMember(nonNullObjectType, expression.property, env);
         if (nullableObject && !expression.optional) this.diagnostics.push({ line: expression.loc?.line ?? 1, column: expression.loc?.column ?? 1, length: expression.property.length, message: `Cannot access '${expression.property}' on a nullable value; use ! or ?., or ?? to handle null.` });
         if (isFunctionSymbol(member)) {
-          this.addHover(expression.property, expression.loc, `(method) ${expression.property}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}`);
+          const signature = expression.property === "as" ? "(method) as<T>(): T" : `(method) ${expression.property}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}`;
+          this.addHover(expression.property, expression.loc, signature);
         } else if (member) {
           this.addHover(expression.property, expression.loc, `(property) ${expression.property}: ${printType(member)}`);
+        } else if (resolvedObjectType.kind === "UnionType") {
+          const missingPart = resolvedObjectType.types.find((part) => !lookupMember(part, expression.property, env));
+          if (missingPart && expression.loc) this.diagnostics.push({
+            line: expression.loc.line,
+            column: expression.loc.column,
+            length: expression.property.length,
+            message: `Property '${expression.property}' does not exist on type '${printType(objectType)}'.
+  Property '${expression.property}' does not exist on type '${printType(missingPart)}'.`
+          });
         } else if (resolvedObjectType.kind === "ObjectType") {
           if (expression.loc) this.diagnostics.push({
             line: expression.loc.line,
@@ -2018,8 +2032,34 @@ var Analyzer = class {
       }
       case "Call": {
         this.walkExpression(expression.callee, env, thisType);
-        if (isNullable(inferExpression(expression.callee, env), env) && !(expression.callee.kind === "Member" && expression.callee.optional)) {
+        const calleeType = resolveType(inferExpression(expression.callee, env), env);
+        if (isNullable(calleeType, env) && !(expression.callee.kind === "Member" && expression.callee.optional)) {
           this.addDiagnostic(expressionStart(expression.callee), "Cannot call a nullable value; use ! or ?? to handle null.");
+        }
+        if (calleeType.kind === "UnionType") {
+          const nonCallable = calleeType.types.find((part) => {
+            const resolved = resolveType(part, env);
+            return !isNamedType(resolved, "any") && resolved.kind !== "FunctionType";
+          });
+          if (nonCallable) {
+            let loc = expressionStart(expression.callee);
+            let length = 1;
+            if (expression.callee.kind === "Index" && expression.callee.loc) {
+              const objectLoc = expressionStart(expression.callee.object) ?? expression.callee.loc;
+              loc = objectLoc;
+              const indexLoc = expressionStart(expression.callee.index) ?? expression.callee.loc;
+              const indexLength = expression.callee.index.kind === "Literal" ? String(expression.callee.index.value).length : 1;
+              length = Math.max(1, indexLoc.column + indexLength + 1 - objectLoc.column);
+            }
+            if (loc) this.diagnostics.push({
+              line: loc.line,
+              column: loc.column,
+              length,
+              message: `This expression is not callable.
+  Not all constituents of type '${printType(calleeType)}' are callable.
+    Type '${printType(nonCallable)}' has no call signatures.`
+            });
+          }
         }
         if (expression.callee.kind === "Member" && expression.callee.loc) {
           const hover = this.hovers.find((item) => item.line === expression.callee.loc?.line && item.column === expression.callee.loc?.column && item.code.startsWith("(method)"));
@@ -2028,6 +2068,14 @@ var Analyzer = class {
         }
         expression.args.forEach((arg) => this.walkExpression(arg, env, thisType));
         expression.typeArguments?.forEach((type) => this.walkType(type, env));
+        if (expression.callee.kind === "Member" && expression.callee.property === "as" && expression.typeArguments?.length) {
+          const target = expression.typeArguments[0];
+          if (target.loc) {
+            const hover = this.hovers.find((item) => item.line === target.loc?.line && item.column === target.loc?.column);
+            if (hover && !hover.code.includes("(infer)")) hover.code += `
+(infer) ${printType(inferExpression(expression, env))}`;
+          }
+        }
         this.addParameterHints(expression.callee, expression.args, env);
         return;
       }

@@ -37,7 +37,8 @@ export class Interpreter {
             case 'Variable': {
                 let value = statement.initializer ? this.evaluate(statement.initializer, env) : null
                 if (statement.type && value && typeof value === 'object' && !Array.isArray(value)) value = this.applyTypeDefaults(value, statement.type, env)
-                this.declare(env, statement.name, value, statement.mutable, statement.type)
+                const declaredType = statement.type ?? (statement.initializer ? this.inferValueType(statement.initializer, env) : undefined)
+                this.declare(env, statement.name, value, statement.mutable, declaredType)
                 return
             }
             case 'TypeDeclaration': {
@@ -209,6 +210,24 @@ export class Interpreter {
                 return (object as any)[index as any] ?? null
             }
             case 'Call': {
+                if (expression.callee.kind === 'Member' && expression.callee.property === 'as' && expression.typeArguments?.length) {
+                    const value = this.evaluate(expression.callee.object, env)
+                    if (value === null || value === undefined) throw new TypeError('Cannot cast null with as<T>()')
+                    const targetType = expression.typeArguments[0]
+                    if (!this.matchesTypeNode(value, targetType, env)) {
+                        throw new TypeError(`Value does not match type '${typeName(targetType)}'`)
+                    }
+                    return value
+                }
+                const staticCalleeType = this.typeOf(expression.callee, env) ?? this.inferValueType(expression.callee, env)
+                if (staticCalleeType.kind === 'UnionType') {
+                    const nonCallable = staticCalleeType.types.find(part => !this.isCallableType(part))
+                    if (nonCallable) throw new TypeError(`This expression is not callable. Type '${typeName(nonCallable)}' has no call signatures.`)
+                }
+                if (expression.callee.kind === 'Identifier' && expression.callee.name === 'isType' && expression.typeArguments?.length) {
+                    const value = expression.args[0] ? this.evaluate(expression.args[0], env) : null
+                    return this.matchesTypeNode(value, expression.typeArguments[0], env)
+                }
                 let thisValue: unknown
                 let callee: any
                 if (expression.callee.kind === 'Member') {
@@ -310,7 +329,106 @@ export class Interpreter {
             const parentType = this.typeOf(expression.object, env)
             return parentType ? this.findTypeMember(parentType, expression.property, env)?.type ?? null : null
         }
+        if (expression.kind === 'Index') {
+            const parentType = this.typeOf(expression.object, env) ?? this.inferValueType(expression.object, env)
+            const resolved = this.resolveAliasType(parentType, env)
+            if (resolved.kind === 'ArrayType') return resolved.element
+            if (resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray')) return resolved.args[0] ?? { kind: 'NamedType', name: 'any' }
+        }
         return null
+    }
+
+    private inferValueType(expression: Expression, env: Environment): TypeNode {
+        switch (expression.kind) {
+            case 'Literal':
+                return { kind: 'NamedType', name: expression.value === null ? 'null' : typeof expression.value === 'bigint' ? 'BigInt' : typeof expression.value }
+            case 'Template': return { kind: 'NamedType', name: 'string' }
+            case 'Identifier': return this.lookup(env, expression.name)?.declaredType ?? { kind: 'NamedType', name: 'any' }
+            case 'Array': {
+                const elements = expression.elements.map(item => this.inferValueType(item, env))
+                const flattened = elements.flatMap(type => type.kind === 'UnionType' ? type.types : [type])
+                return { kind: 'ArrayType', element: flattened.length === 0 ? { kind: 'NamedType', name: 'any' } : flattened.length === 1 ? flattened[0] : { kind: 'UnionType', types: flattened } }
+            }
+            case 'Object':
+                return { kind: 'ObjectType', members: expression.properties.map(property => property.value.kind === 'Function'
+                    ? { name: property.key, type: this.inferValueType(property.value, env), optional: false, readonly: false, constant: false }
+                    : { name: property.key, type: this.inferValueType(property.value, env), optional: false, readonly: false, constant: false }) }
+            case 'Function':
+                return {
+                    kind: 'FunctionType',
+                    params: expression.params.map(param => param.type ?? { kind: 'NamedType', name: 'any' }),
+                    result: expression.returnType ?? { kind: 'NamedType', name: 'any' }
+                }
+            case 'Index': return this.typeOf(expression, env) ?? { kind: 'NamedType', name: 'any' }
+            case 'Call':
+                if (expression.callee.kind === 'Member' && expression.callee.property === 'as' && expression.typeArguments?.length) return expression.typeArguments[0]
+                return { kind: 'NamedType', name: 'any' }
+            default: return { kind: 'NamedType', name: 'any' }
+        }
+    }
+
+    private resolveAliasType(type: TypeNode, env: Environment, resolving = new Set<string>()): TypeNode {
+        if (type.kind === 'NamedType') {
+            if (resolving.has(type.name)) return type
+            for (let current: Environment | undefined = env; current; current = current.parent) {
+                const alias = current.types.get(type.name)
+                if (alias) return this.resolveAliasType(alias, env, new Set([...resolving, type.name]))
+            }
+            return type
+        }
+        if (type.kind === 'UnionType' || type.kind === 'IntersectionType') return { ...type, types: type.types.map(part => this.resolveAliasType(part, env, resolving)) }
+        if (type.kind === 'ArrayType') return { ...type, element: this.resolveAliasType(type.element, env, resolving) }
+        return type
+    }
+
+    private isCallableType(type: TypeNode): boolean {
+        return type.kind === 'FunctionType' || (type.kind === 'NamedType' && type.name === 'any')
+    }
+
+    private matchesTypeNode(value: unknown, type: TypeNode, env: Environment, resolving = new Set<string>()): boolean {
+        if (type.kind === 'NamedType') {
+            if (type.name === 'any' || type.name === 'unknown') return true
+            if (type.name === 'null') return value === null
+            if (type.name === 'Array' || type.name === 'ReadonlyArray') return Array.isArray(value)
+            for (let current: Environment | undefined = env; current; current = current.parent) {
+                const alias = current.types.get(type.name)
+                if (alias) {
+                    if (resolving.has(type.name)) return false
+                    return this.matchesTypeNode(value, alias, env, new Set([...resolving, type.name]))
+                }
+            }
+            switch (type.name) {
+                case 'string': return typeof value === 'string'
+                case 'number': return typeof value === 'number'
+                case 'boolean': return typeof value === 'boolean'
+                case 'BigInt': return typeof value === 'bigint'
+                case 'object': return value !== null && typeof value === 'object'
+                case 'Function': return typeof value === 'function' || Boolean((value as any)?.__junoFunction)
+                default: return false
+            }
+        }
+        if (type.kind === 'LiteralType') return value === type.value
+        if (type.kind === 'ArrayType') return Array.isArray(value) && value.every(item => this.matchesTypeNode(item, type.element, env, resolving))
+        if (type.kind === 'GenericType') {
+            if ((type.name === 'Array' || type.name === 'ReadonlyArray') && type.args[0]) {
+                return Array.isArray(value) && value.every(item => this.matchesTypeNode(item, type.args[0], env, resolving))
+            }
+            return this.matchesTypeNode(value, { kind: 'NamedType', name: type.name }, env, resolving)
+        }
+        if (type.kind === 'UnionType') return type.types.some(part => this.matchesTypeNode(value, part, env, resolving))
+        if (type.kind === 'IntersectionType') return type.types.every(part => this.matchesTypeNode(value, part, env, resolving))
+        if (type.kind === 'FunctionType') return typeof value === 'function' || Boolean((value as any)?.__junoFunction)
+        if (type.kind === 'ObjectType') {
+            if (value === null || typeof value !== 'object') return false
+            const object = value as Record<string, any>
+            return type.members.every(member => {
+                if (!Object.prototype.hasOwnProperty.call(object, member.name)) return member.optional || member.defaultValue !== undefined
+                const memberValue = object[member.name]
+                if (member.method) return typeof memberValue === 'function' || Boolean(memberValue?.__junoFunction)
+                return this.matchesTypeNode(memberValue, member.type, env, resolving)
+            })
+        }
+        return false
     }
 
     private applyTypeDefaults<T extends Record<string, any>>(value: T, type: TypeNode, env: Environment, resolving = new Set<string>()): T {
@@ -364,6 +482,7 @@ export class Interpreter {
                 const alias = current.types.get(type.name)
                 if (alias) return this.findTypeMember(alias, name, env, new Set([...resolving, type.name]))
             }
+            if (name === 'toString' && type.name !== 'null') return { type: { kind: 'NamedType', name: 'string' }, optional: false }
             return null
         }
         if (type.kind === 'IntersectionType') {
@@ -374,12 +493,13 @@ export class Interpreter {
             return null
         }
         if (type.kind === 'UnionType') {
+            let commonMember: { type: TypeNode; optional: boolean } | null = null
             for (const part of type.types) {
-                if (part.kind === 'NamedType' && part.name === 'null') continue
                 const member = this.findTypeMember(part, name, env, resolving)
-                if (member) return member
+                if (!member) return null
+                commonMember ??= member
             }
-            return null
+            return commonMember
         }
         if (type.kind === 'ObjectType') {
             const member = type.members.find(item => item.name === name)
@@ -400,6 +520,7 @@ export class Interpreter {
         if (declaredType && !this.findTypeMember(declaredType, property, env)) {
             throw new TypeError(`Property '${property}' does not exist on declared type`)
         }
+        if (!(property in Object(object))) throw new TypeError(`Property '${property}' does not exist on value`)
         const value = (object as any)[property]
         return value === undefined ? null : value
     }
@@ -431,6 +552,19 @@ function matchesType(value: unknown, type: unknown): boolean {
         case 'Array': return Array.isArray(value)
         case 'object': return value !== null && typeof value === 'object'
         default: return false
+    }
+}
+
+function typeName(type: TypeNode): string {
+    switch (type.kind) {
+        case 'NamedType': return type.name
+        case 'LiteralType': return String(type.value)
+        case 'GenericType': return `${type.name}<${type.args.map(typeName).join(', ')}>`
+        case 'ArrayType': return `${typeName(type.element)}[]`
+        case 'UnionType': return type.types.map(typeName).join(' | ')
+        case 'IntersectionType': return type.types.map(typeName).join(' & ')
+        case 'FunctionType': return 'function'
+        case 'ObjectType': return 'object'
     }
 }
 

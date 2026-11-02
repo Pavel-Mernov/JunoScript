@@ -16,8 +16,8 @@ let mixedValues = [42, "hello", true, { name: "Ada" }, () => "called from array"
 console.log("mixed array number =", mixedValues[0])
 console.log("mixed array string =", mixedValues[1])
 console.log("mixed array boolean =", mixedValues[2])
-console.log("mixed array object field =", mixedValues[3].name)
-console.log("mixed array function result =", mixedValues[4]())
+console.log("mixed array object field =", mixedValues[3].as<{ name: string }>().name)
+console.log("mixed array function result =", mixedValues[4].as<() => string>()())
 
 let person =
     {
@@ -51,6 +51,16 @@ type PlainPerson = {
 }
 let typedPerson: PlainPerson = { name: "Grace" }
 console.log("typed object default toString() =", typedPerson.toString())
+
+type HasName = {
+    name: string
+}
+let extendedPerson = { name: "Ada", role: "admin", employeeId: 42 }
+let personView = extendedPerson.as<HasName>()
+console.log("as<T>() retains extra fields =", personView.toString())
+console.log("as<T>() on a number =", 42.as<number>())
+console.log("as<T>() on a string =", "Juno".as<string>())
+console.log("as<T>() on an array =", [1, 2, 3].as<number[]>().toString())
 
 # Each invalid-index case should stop execution with TypeError.
 # Uncomment one case at a time to inspect the error.
