@@ -7,7 +7,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     const updateDiagnostics = (document: vscode.TextDocument): void => {
         if (document.languageId !== 'junoscript') return
-        const result = analyze(document.getText())
+        const result = analyze(document.getText(), document.uri.fsPath)
         diagnostics.set(document.uri, (result?.diagnostics ?? []).map(info => {
             const start = new vscode.Position(info.line - 1, info.column - 1)
             const end = new vscode.Position(info.line - 1, info.column - 1 + info.length)
@@ -15,16 +15,29 @@ export function activate(context: vscode.ExtensionContext): void {
         }))
     }
 
+    const keywordHover = vscode.languages.registerHoverProvider(selector, {
+        provideHover(document, position) {
+            const range = document.getWordRangeAtPosition(position, /\b(?:export|import)\b/)
+            if (!range) return
+            const word = document.getText(range)
+            const markdown = new vscode.MarkdownString()
+            markdown.appendCodeblock(word === 'export' ? 'export const | fun | type' : "import { name } from 'module'", 'junoscript')
+            markdown.appendMarkdown(word === 'export' ? 'Exports this declaration from the current Juno module.' : 'Imports exported bindings from a Juno module.')
+            return new vscode.Hover(markdown, range)
+        }
+    })
+
     vscode.workspace.textDocuments.forEach(updateDiagnostics)
 
     context.subscriptions.push(
         diagnostics,
+        keywordHover,
         vscode.workspace.onDidOpenTextDocument(updateDiagnostics),
         vscode.workspace.onDidChangeTextDocument(event => updateDiagnostics(event.document)),
         vscode.workspace.onDidCloseTextDocument(document => diagnostics.delete(document.uri)),
         vscode.languages.registerHoverProvider(selector, {
             provideHover(document, position) {
-                const info = hoverAt(document.getText(), position.line + 1, position.character + 1)
+                const info = hoverAt(document.getText(), position.line + 1, position.character + 1, document.uri.fsPath)
                 if (!info) return
                 const markdown = new vscode.MarkdownString()
                 markdown.appendCodeblock(info.code, 'junoscript')
@@ -38,7 +51,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 const config = vscode.workspace.getConfiguration('junoscript.inlayHints')
                 const variableTypes = config.get<boolean>('variableTypes.enabled', true)
                 const parameterNames = config.get<boolean>('parameterNames.enabled', true)
-                return inlayHintsFor(document.getText()).flatMap(hint => {
+                return inlayHintsFor(document.getText(), document.uri.fsPath).flatMap(hint => {
                     if (hint.kind === 'type' && !variableTypes) return []
                     if (hint.kind === 'parameter' && !parameterNames) return []
                     const position = new vscode.Position(hint.line - 1, hint.column - 1)
@@ -57,7 +70,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }),
         vscode.languages.registerCodeActionsProvider(selector, {
             provideCodeActions(document, _range, context) {
-                const result = analyze(document.getText())
+                const result = analyze(document.getText(), document.uri.fsPath)
                 if (!result) return []
                 const actions: vscode.CodeAction[] = []
                 for (const diagnostic of context.diagnostics) {

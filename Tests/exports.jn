@@ -1,0 +1,8 @@
+export const answer = 42
+
+export fun greet(name: string): string =
+    return `Hello, ${name}`
+
+export type Greeting = {
+    text: string
+}

@@ -21,6 +21,8 @@ export type {
     ThisParameterType,
     ThisType
 } from './types'
+export type { Error } from './juno'
+export type { Iterable } from './juno-types'
 
 /** Runtime module table used to resolve JunoScript import specifiers. */
 export const modules = {

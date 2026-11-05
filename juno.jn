@@ -1,0 +1,10 @@
+# Public type declarations mirrored by the TypeScript package entry point.
+export type Error = {
+    name: string
+    message: string
+    stack?: string
+}
+
+export type Iterable = {
+    iterator: () => any
+}

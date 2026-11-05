@@ -1,0 +1,229 @@
+# Shared Iterable type definition used by JunoScript and the TypeScript build.
+export type Iterable<T> = ({
+    iterator(): () -> ({ value: T } | null)
+} | {
+    toArray(): T[]
+}) & {
+    toArray(): T[] =
+        let result: T[] = []
+        if this.has("iterator")
+            const nextFunction = this.iterator()
+
+            let next = nextFunction()
+            while next != null
+                result.push(next.value)
+                next = nextFunction()
+        else
+            return this.toArray()
+        return result
+
+    get length(): number =
+        let _length = 0
+        for const item of this.toArray()
+            _length++
+        return _length
+
+    at(index: number): T | null =
+        let position = index
+        let array = this.toArray()
+
+        if position < 0
+            position = this.length + position
+        return array[position] ?? null
+
+    concat(other: T[]): T[] =
+        let result: T[] = []
+        for const item of this.toArray()
+            result.push(item)
+        for const item of other
+            result.push(item)
+        return result
+
+    every(callback: (T) -> boolean): boolean =
+        for const item of this.toArray()
+            if !callback(item)
+                return false
+        return true
+
+    filter(callback: (T) -> boolean): T[] =
+        let result: T[] = []
+        for const item of this.toArray()
+            if callback(item)
+                result.push(item)
+        return result
+
+    flat(): any[] =
+        return this.toArray().flat()
+
+    find(callback: (T) -> boolean): T | null =
+        let array = this.toArray()
+
+        for const item of array
+            if callback(item)
+                return item
+        return null
+
+    findIndex(callback: (T) -> boolean): number =
+        let index = 0
+        let array = this.toArray()
+        for const item of array
+            if callback(item)
+                return index
+            index++
+        return -1
+
+    findLast(callback: (T) -> boolean): T | null =
+        let index = this.length - 1
+        let array = this.toArray()
+
+        while index >= 0
+            let item = array[index]
+            if callback(item)
+                return item
+            index--
+        return null
+
+    findLastIndex(callback: (T) -> boolean): number =
+        let index = this.length - 1
+        let array = this.toArray()
+        while index >= 0
+            if callback(array[index])
+                return index
+            index--
+        return -1
+
+    flatMap(callback: (T) -> T[]): T[] =
+        let result: T[] = []
+        for const item of this.toArray()
+            for const mapped of callback(item)
+                result.push(mapped)
+        return result
+
+    forEach(callback: (T) -> any): void =
+        for const item of this.toArray()
+            callback(item)
+
+    includes(value: T): boolean =
+        for const item of this.toArray()
+            if item == value
+                return true
+        return false
+
+    indexOf(value: T): number =
+        let index = 0
+        for const item of this.toArray()
+            if item == value
+                return index
+            index++
+        return -1
+
+    lastIndexOf(value: T): number =
+        let index = this.length - 1
+        while index >= 0
+            if this.toArray()[index] == value
+                return index
+            index--
+        return -1
+
+    join(separator: string = ","): string =
+        let result = ""
+        let first = true
+        for const item of this.toArray()
+            if !first
+                result = result + separator
+            result = result + item
+            first = false
+        return result
+
+    map(callback: (T) -> T): T[] =
+        let result: T[] = []
+        for const item of this.toArray()
+            result.push(callback(item))
+        return result
+
+    reduce(callback: (T, T) -> T, initial: T): T =
+        let result = initial
+        for const item of this.toArray()
+            result = callback(result, item)
+        return result
+
+    reduceRight(callback: (T, T) -> T, initial: T): T =
+        let result = initial
+        let index = this.toArray().length - 1
+        while index >= 0
+            result = callback(result, this.toArray()[index])
+            index = index - 1
+        return result
+
+    slice(start: number = 0, end: number = this.toArray().length): T[] =
+        let result: T[] = []
+        let index = 0
+        let normalizedStart = start
+        let normalizedEnd = end
+        if normalizedStart < 0
+            normalizedStart = this.toArray().length + normalizedStart
+        if normalizedEnd < 0
+            normalizedEnd = this.toArray().length + normalizedEnd
+        for const item of this.toArray()
+            if index >= normalizedStart & index < normalizedEnd
+                result.push(item)
+            index = index + 1
+        return result
+
+    toReversed(): T[] =
+        let result: T[] = []
+        let index = this.toArray().length - 1
+        while index >= 0
+            result.push(this.toArray()[index])
+            index = index - 1
+        return result
+
+    toSorted(): T[] =
+        let result: T[] = []
+        for const item of this.toArray()
+            result.push(item)
+        return result.sort()
+
+    toLocaleString(): string =
+        return this.toArray().toLocaleString()
+
+    toString(): string =
+        return this.toArray().toString()
+
+    toSpliced(start: number, deleteCount: number, items: T[] = []): T[] =
+        let result: T[] = []
+        let index = 0
+        let insertAt = start
+        let inserted = false
+        if insertAt < 0
+            insertAt = this.toArray().length + insertAt
+        for const item of this.toArray()
+            if !inserted & index >= insertAt
+                for const insertion of items
+                    result.push(insertion)
+                inserted = true
+            if index < insertAt | index >= insertAt + deleteCount
+                result.push(item)
+            index = index + 1
+        if !inserted
+            for const insertion of items
+                result.push(insertion)
+        return result
+
+    with(index: number, value: T): T[] =
+        let result: T[] = []
+        let position = 0
+        for const item of this.toArray()
+            if position == index
+                result.push(value)
+            else
+                result.push(item)
+            position = position + 1
+        return result
+
+    some(callback: (T) -> boolean): boolean =
+        for const item of this.toArray()
+            if callback(item)
+                return true
+        return false
+}

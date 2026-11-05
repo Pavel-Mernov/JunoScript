@@ -6,7 +6,7 @@
     "junode": "./dist/CLI/junode.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc --target ES2022 --module commonjs --moduleResolution node --strict --skipLibCheck --types node --outDir .build-tools Lexer/lexer.ts Lexer/parser.ts CLI/generate-juno-types.ts && node .build-tools/CLI/generate-juno-types.js && tsc",
     "start": "node ./dist/CLI/junode.js"
   },
   "devDependencies": {

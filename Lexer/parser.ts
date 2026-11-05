@@ -2,15 +2,16 @@ import { Lexer, Token, TokenType } from './lexer'
 
 export type Loc = { line: number; column: number }
 export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'LiteralType'; value: string | number | boolean; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; result: TypeNode }
-export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; params?: Parameter[]; body?: Statement[] }
+export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; accessor?: 'get' | 'set'; params?: Parameter[]; body?: Statement[] }
 export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression; rest?: boolean }
 export type Expression =
     | { kind: 'Literal'; value: string | number | bigint | boolean | null; loc?: Loc }
     | { kind: 'Template'; parts: (string | Expression)[]; loc?: Loc }
     | { kind: 'Identifier'; name: string; loc?: Loc } | { kind: 'Array'; elements: Expression[]; loc?: Loc }
-    | { kind: 'Object'; properties: { key: string; keyLoc?: Loc; value: Expression }[]; loc?: Loc }
+      | { kind: 'Object'; properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set' }[]; loc?: Loc }
     | { kind: 'Unary'; operator: string; operand: Expression; loc?: Loc }
-    | { kind: 'Assignment'; name: string; loc?: Loc; operatorLoc?: Loc; value: Expression }
+    | { kind: 'Assignment'; name: string; loc?: Loc; operatorLoc?: Loc; operator?: string; value: Expression }
+    | { kind: 'MemberAssignment'; object: Expression; property?: string; index?: Expression; loc?: Loc; operator?: string; value: Expression }
     | { kind: 'Binary'; operator: string; left: Expression; right: Expression; loc?: Loc }
     | { kind: 'Conditional'; condition: Expression; consequent: Expression; alternate: Expression; loc?: Loc }
     | { kind: 'Member'; object: Expression; property: string; optional: boolean; loc?: Loc }
@@ -19,7 +20,8 @@ export type Expression =
     | { kind: 'Function'; params: Parameter[]; returnType?: TypeNode; body: Statement[]; expressionBody?: Expression }
 export type Statement =
     | { kind: 'Variable'; name: string; loc?: Loc; mutable: boolean; type?: TypeNode; initializer?: Expression }
-    | { kind: 'Import'; module: 'juno' | 'juno:node' | 'types'; defaultImport?: string; defaultImportLoc?: Loc; namedImports: string[]; namedImportLocs?: Loc[] }
+    | { kind: 'Import'; module: string; defaultImport?: string; defaultImportLoc?: Loc; namedImports: string[]; namedImportLocs?: Loc[]; importedTypes?: Record<string, TypeNode>; importedSymbols?: Record<string, { kind: string; value?: TypeNode; generics?: string[]; params?: Parameter[]; returnType?: TypeNode; type?: TypeNode }> }
+    | { kind: 'Export'; declaration: Statement; default?: boolean }
     | { kind: 'FunctionDeclaration'; name: string; loc?: Loc; params: Parameter[]; returnType?: TypeNode; body: Statement[] }
     | { kind: 'TypeDeclaration'; name: string; loc?: Loc; generics: string[]; genericLocs?: Loc[]; value: TypeNode }
     | { kind: 'Return'; value?: Expression } | { kind: 'ExpressionStatement'; expression: Expression }
@@ -29,6 +31,7 @@ export type Statement =
 
 const precedence: Record<string, number> = { '|': 1, '&': 2, '??': 3, '==': 4, '!=': 4, '<': 5, '<=': 5, '>': 5, '>=': 5, '+': 6, '-': 6, '*': 7, '/': 7, '%': 7 }
 const opTypes: Partial<Record<TokenType, string>> = { EqualEqual: '==', NotEqual: '!=', Less: '<', LessEqual: '<=', Greater: '>', GreaterEqual: '>=', Nullish: '??', Pipe: '|', Ampersand: '&', Plus: '+', Minus: '-', Multiply: '*', Divide: '/', Percent: '%' }
+const assignmentOperators: Partial<Record<TokenType, string>> = { Equal: '=', PlusEqual: '+=', MinusEqual: '-=', MultiplyEqual: '*=', DivideEqual: '/=', PercentEqual: '%=', PipeEqual: '|=', AmpersandEqual: '&=' }
 
 export class Parser {
     private pos = 0
@@ -73,6 +76,12 @@ export class Parser {
     }
     private statement(): Statement {
         if (this.match('Keyword', 'import')) return this.importStatement()
+        if (this.match('Keyword', 'export')) {
+            const isDefault = this.match('Keyword', 'default')
+            const declaration = this.statement()
+            if (!['Variable', 'FunctionDeclaration', 'TypeDeclaration'].includes(declaration.kind)) this.fail('export must precede a declaration')
+            return { kind: 'Export', declaration, default: isDefault }
+        }
         if (this.match('Keyword', 'let') || this.match('Keyword', 'const')) {
             const mutable = this.value(this.tokens[this.pos - 1]) === 'let', { name, loc } = this.identifier()
             const type = this.match('Colon') ? this.type() : undefined
@@ -107,9 +116,10 @@ export class Parser {
             return { kind: 'TypeDeclaration', name, loc, generics, genericLocs, value }
         }
         if (this.match('Keyword', 'return')) return { kind: 'Return', value: this.is('Newline') || this.is('Dedent') || this.is('EOF') ? undefined : this.expression() }
-        if (this.is('Identifier') && (this.tokens[this.pos + 1]?.type === 'Equal')) {
-            const { name, loc } = this.identifier(), operatorLoc = this.loc(this.take('Equal'))
-            return { kind: 'ExpressionStatement', expression: { kind: 'Assignment', name, loc, operatorLoc, value: this.expression() } }
+        if (this.is('Identifier') && assignmentOperators[this.tokens[this.pos + 1]?.type]) {
+            const { name, loc } = this.identifier(), operatorToken = this.current, operator = assignmentOperators[operatorToken.type]!
+            this.pos++
+            return { kind: 'ExpressionStatement', expression: { kind: 'Assignment', name, loc, operatorLoc: this.loc(operatorToken), operator, value: this.expression() } }
         }
         if (this.match('Keyword', 'if')) {
             const condition = this.expression(), consequent = this.block(); this.separators()
@@ -122,7 +132,16 @@ export class Parser {
             this.take('Keyword', "Expected 'of'"); const iterable = this.expression()
             return { kind: 'ForOf', binding, loc, mutable, iterable, body: this.block() }
         }
-        return { kind: 'ExpressionStatement', expression: this.expression() }
+        const expression = this.expression()
+        const assignmentOperator = assignmentOperators[this.current.type]
+        if (assignmentOperator) {
+            const operatorToken = this.current
+            this.pos++
+            if (expression.kind === 'Member') return { kind: 'ExpressionStatement', expression: { kind: 'MemberAssignment', object: expression.object, property: expression.property, loc: this.loc(operatorToken), operator: assignmentOperator, value: this.expression() } }
+            if (expression.kind === 'Index') return { kind: 'ExpressionStatement', expression: { kind: 'MemberAssignment', object: expression.object, index: expression.index, loc: this.loc(operatorToken), operator: assignmentOperator, value: this.expression() } }
+            this.fail('Only variables and object properties can be assigned here')
+        }
+        return { kind: 'ExpressionStatement', expression }
     }
     private importStatement(): Statement {
         let defaultImport: string | undefined
@@ -152,8 +171,7 @@ export class Parser {
         }
         this.take('Keyword', "Expected 'from' after import names")
         const moduleToken = this.take('String', "Expected 'juno', 'juno:node', or 'types' module name")
-        const module = this.value(moduleToken)
-        if (module !== 'juno' && module !== 'juno:node' && module !== 'types') this.fail(`Unsupported module '${module}'`)
+        const module = String(this.value(moduleToken))
         if (!defaultImport && namedImports.length === 0) this.fail('Import must name at least one binding')
         return { kind: 'Import', module, defaultImport, defaultImportLoc, namedImports, namedImportLocs }
     }
@@ -237,7 +255,11 @@ export class Parser {
         } else if (this.match('LeftBrace')) {
             const members: TypeMember[] = []; this.objectSeparators()
             while (!this.is('RightBrace') && !this.is('EOF')) {
-                const readonly = this.match('Keyword', 'readonly'), constant = this.match('Keyword', 'const'), { name, loc } = this.propertyName(); let optional = this.match('Question')
+                const readonly = this.match('Keyword', 'readonly'), constant = this.match('Keyword', 'const')
+                const accessor = this.is('Identifier') && ['get', 'set'].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === 'Identifier'
+                    ? String(this.value(this.tokens[this.pos++])) as 'get' | 'set'
+                    : undefined
+                const { name, loc } = this.propertyName(); let optional = this.match('Question')
                 let params: Parameter[] | undefined, method = false, type: TypeNode, body: Statement[] | undefined
                 if (this.is('LeftParen')) {
                     method = true
@@ -256,7 +278,10 @@ export class Parser {
                 const defaultValue = this.match('Equal') ? this.expression() : undefined
                 if (constant && defaultValue === undefined) this.fail('const type fields need a default value')
                 if (!method && defaultValue && type.kind === 'NamedType' && type.name === 'any') type = inferredTypeNode(defaultValue)
-                members.push({ name, loc, optional, readonly, constant, type, defaultValue, method, params, body }); this.objectSeparators()
+                if (accessor === 'get' && params?.length) this.fail('A getter cannot have parameters')
+                if (accessor === 'set' && params?.length !== 1) this.fail('A setter must have exactly one parameter')
+                const accessorType = accessor === 'set' ? params?.[0]?.type ?? { kind: 'NamedType', name: 'any' } : type
+                members.push({ name, loc, optional, readonly, constant, type: accessorType, defaultValue, method, accessor, params, body }); this.objectSeparators()
             }
             this.take('RightBrace'); result = { kind: 'ObjectType', members }
         } else if (this.match('LeftParen')) {
@@ -319,6 +344,12 @@ export class Parser {
             if (this.match('Bang')) {
                 const token = this.tokens[this.pos - 1]
                 left = { kind: 'Unary', operator: 'postfix!', operand: left, loc: this.loc(token) }
+                continue
+            }
+            if (this.match('Increment') || this.match('Decrement')) {
+                const token = this.tokens[this.pos - 1]
+                if (!['Identifier', 'Member', 'Index'].includes(left.kind)) this.fail('Increment and decrement require an assignable target')
+                left = { kind: 'Unary', operator: token.type === 'Increment' ? 'postfix++' : 'postfix--', operand: left, loc: this.loc(token) }
                 continue
             }
             if (this.is('Question') && min <= 0) {
@@ -389,6 +420,7 @@ export class Parser {
                         break
                     case 'Unary': shiftExpression(node.operand); break
                     case 'Assignment': shiftExpression(node.value); break
+                    case 'MemberAssignment': shiftExpression(node.object); if (node.index) shiftExpression(node.index); shiftExpression(node.value); break
                     case 'Binary': shiftExpression(node.left); shiftExpression(node.right); break
                     case 'Conditional': shiftExpression(node.condition); shiftExpression(node.consequent); shiftExpression(node.alternate); break
                     case 'Member': shiftExpression(node.object); break
@@ -430,6 +462,12 @@ export class Parser {
         return { kind: 'Template', parts, loc }
     }
     private prefix(): Expression {
+        if (this.match('Increment') || this.match('Decrement')) {
+            const token = this.tokens[this.pos - 1]
+            const operand = this.expression(8)
+            if (!['Identifier', 'Member', 'Index'].includes(operand.kind)) this.fail('Increment and decrement require an assignable target')
+            return { kind: 'Unary', operator: token.type === 'Increment' ? 'prefix++' : 'prefix--', operand, loc: this.loc(token) }
+        }
         if (this.match('Minus') || this.match('Bang')) {
             const token = this.tokens[this.pos - 1]
             return { kind: 'Unary', operator: token.type === 'Minus' ? '-' : '!', operand: this.expression(7), loc: this.loc(token) }
@@ -513,14 +551,25 @@ export class Parser {
         }
         if (this.match('LeftBrace')) {
             const token = this.tokens[this.pos - 1]
-            const properties: { key: string; keyLoc?: Loc; value: Expression }[] = []; this.objectSeparators()
+            const properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set' }[] = []; this.objectSeparators()
             while (!this.is('RightBrace') && !this.is('EOF')) {
+                const accessor = this.is('Identifier') && ['get', 'set'].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === 'Identifier'
+                    ? String(this.value(this.tokens[this.pos++])) as 'get' | 'set'
+                    : undefined
                 const property = this.propertyName()
                 let value: Expression
-                if (this.match('Colon')) value = this.expression()
+                if (accessor) {
+                    const params = this.parameters()
+                    const returnType = this.match('Colon') ? this.type() : undefined
+                    if (accessor === 'get' && params.length) this.fail('A getter cannot have parameters')
+                    if (accessor === 'set' && params.length !== 1) this.fail('A setter must have exactly one parameter')
+                    this.take('Equal', "Expected '=' before accessor body")
+                    value = { kind: 'Function', params, returnType, body: this.block() }
+                }
+                else if (this.match('Colon')) value = this.expression()
                 else if (this.match('LeftParen')) { this.pos--; const params = this.parameters(); this.take('Equal', "Expected '=' for method body"); value = { kind: 'Function', params, body: this.block() } }
                 else value = { kind: 'Identifier', name: property.name, loc: property.loc }
-                properties.push({ key: property.name, keyLoc: property.loc, value })
+                properties.push({ key: property.name, keyLoc: property.loc, value, accessor })
                 this.objectSeparators()
                 if (this.match('Comma')) this.objectSeparators()
             }
@@ -548,7 +597,13 @@ function inferredTypeNode(expression: Expression): TypeNode {
         case 'Literal': return { kind: 'NamedType', name: typeof expression.value === 'bigint' ? 'BigInt' : expression.value === null ? 'null' : typeof expression.value }
         case 'Template': return { kind: 'NamedType', name: 'string' }
         case 'Array': return { kind: 'ArrayType', element: expression.elements[0] ? inferredTypeNode(expression.elements[0]) : { kind: 'NamedType', name: 'any' } }
-        case 'Object': return { kind: 'ObjectType', members: expression.properties.map(property => ({ name: property.key, type: inferredTypeNode(property.value), optional: false, readonly: false, constant: false })) }
+        case 'Object': return { kind: 'ObjectType', members: expression.properties.flatMap(property => property.accessor === 'set' ? [] : [{
+            name: property.key,
+            type: property.accessor === 'get' && property.value.kind === 'Function' ? property.value.returnType ?? { kind: 'NamedType', name: 'any' } : inferredTypeNode(property.value),
+            optional: false,
+            readonly: false,
+            constant: false
+        }]) }
         case 'Conditional': return inferredTypeNode(expression.consequent)
         default: return { kind: 'NamedType', name: 'any' }
     }
@@ -579,9 +634,11 @@ function inferExpressionType(
         case 'Object':
             return {
                 kind: 'object',
-                fields: new Map(expression.properties.map(property => [
+                fields: new Map(expression.properties.filter(property => property.accessor !== 'set').map(property => [
                     property.key,
-                    inferExpressionType(property.value, variables)
+                    property.accessor === 'get' && property.value.kind === 'Function'
+                        ? property.value.returnType ? typeFromNode(property.value.returnType) : inferFunctionReturnType(property.value.body, variables)
+                        : inferExpressionType(property.value, variables)
                 ]))
             }
 
@@ -730,6 +787,8 @@ function inferExpressionType(
 
         case 'Assignment':
             return unknownType
+        case 'MemberAssignment':
+            return unknownType
         case 'Function': {
             const scope = new Map(variables)
             for (const param of expression.params) {
@@ -842,7 +901,7 @@ function typeFromNode(type: TypeNode, aliases: Map<string, TypeNode> = new Map()
         if (type.name === 'Partial') return { kind: 'object', fields: new Map() }
         return { kind: 'object', fields: new Map(fields) }
     }
-    if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.filter(member => !member.method && !member.optional && member.defaultValue === undefined && !(member.type.kind === 'UnionType' && member.type.types.some(part => part.kind === 'NamedType' && part.name === 'null'))).map(member => [member.name, typeFromNode(member.type, aliases, resolving)])) }
+    if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.filter(member => (!member.method || member.accessor === 'get') && member.accessor !== 'set' && !member.optional && member.defaultValue === undefined && !(member.type.kind === 'UnionType' && member.type.types.some(part => part.kind === 'NamedType' && part.name === 'null'))).map(member => [member.name, typeFromNode(member.type, aliases, resolving)])) }
     if (type.kind === 'FunctionType') return { kind: 'function' }
     if (type.kind === 'UnionType') return { kind: 'union', types: type.types.map(part => typeFromNode(part, aliases, resolving)) }
     return unknownType
@@ -882,6 +941,26 @@ function validateArithmeticTypes(statements: Statement[], variables = new Map<st
     const aliases = new Map<string, TypeNode>()
     for (const statement of statements) {
         if (statement.kind === 'TypeDeclaration') aliases.set(statement.name, statement.value)
+        if (statement.kind === 'Export' && statement.declaration.kind === 'TypeDeclaration') aliases.set(statement.declaration.name, statement.declaration.value)
+        if (statement.kind === 'Import' && statement.importedTypes) for (const [name, value] of Object.entries(statement.importedTypes)) aliases.set(name, value)
+    }
+    for (const statement of statements) if (statement.kind === 'Import' && !statement.importedTypes) {
+        try {
+            const { readFileSync } = require('node:fs') as typeof import('node:fs')
+            const { resolve, dirname } = require('node:path') as typeof import('node:path')
+            if (statement.module.startsWith('.')) {
+                const base = resolve(process.cwd(), statement.module)
+                const file = /\.jn$/i.test(base) ? base : `${base}.jn`
+                const imported = new Parser(Lexer(readFileSync(file, 'utf8')).tokenize()).parse()
+                for (const item of imported) if (item.kind === 'Export' && item.declaration.kind === 'TypeDeclaration') aliases.set(item.declaration.name, item.declaration.value)
+            } else if (statement.module === 'juno' && statement.namedImports.includes('Error')) {
+                aliases.set('Error', { kind: 'ObjectType', members: [
+                    { name: 'name', type: { kind: 'NamedType', name: 'string' }, optional: false, readonly: false, constant: false },
+                    { name: 'message', type: { kind: 'NamedType', name: 'string' }, optional: false, readonly: false, constant: false },
+                    { name: 'stack', type: { kind: 'NamedType', name: 'string' }, optional: true, readonly: false, constant: false }
+                ] })
+            }
+        } catch { /* unresolved modules are reported by the interpreter */ }
     }
     for (const statement of statements) {
         switch (statement.kind) {
@@ -954,8 +1033,48 @@ function validateArithmeticTypes(statements: Statement[], variables = new Map<st
     }
 }
 
-export function parse(source: string, options: { validate?: boolean } = {}): Statement[] {
+export function parse(source: string, options: { validate?: boolean; filePath?: string } = {}): Statement[] {
         const statements = new Parser(Lexer(source).tokenize()).parse()
+    const types = new Map<string, TypeNode>()
+    const visit = (items: Statement[], seen = new Set<string>()): void => {
+        for (const item of items) {
+            if (item.kind === 'Export' && item.declaration.kind === 'TypeDeclaration') types.set(item.declaration.name, item.declaration.value)
+            if (item.kind === 'TypeDeclaration') types.set(item.name, item.value)
+            if (item.kind === 'Import' && item.module.startsWith('.')) {
+                try {
+                    const fs = require('node:fs') as typeof import('node:fs')
+                    const path = require('node:path') as typeof import('node:path')
+                    const base = path.resolve(options.filePath ? path.dirname(options.filePath) : process.cwd(), item.module)
+                    const candidates = /\.jn$/i.test(base) ? [base] : [`${base}.jn`, path.resolve(base, 'index.jn')]
+                    const file = candidates.find(candidate => fs.existsSync(candidate))
+                    if (!file || seen.has(file)) continue
+                    const nested = visitParsed(file, seen)
+                    for (const [name, value] of nested) if (item.namedImports.includes(name)) types.set(name, value)
+                } catch { /* module loading diagnostics are handled separately */ }
+            }
+            if (item.kind === 'Export' && item.declaration.kind === 'Import') visit([item.declaration], seen)
+        }
+    }
+    const visitParsed = (file: string, seen: Set<string>): Map<string, TypeNode> => {
+        seen.add(file)
+        const nested = new Map<string, TypeNode>()
+        const parsed = new Parser(Lexer((require('node:fs') as typeof import('node:fs')).readFileSync(file, 'utf8')).tokenize()).parse()
+        for (const item of parsed) {
+            if (item.kind === 'Export' && item.declaration.kind === 'TypeDeclaration') nested.set(item.declaration.name, item.declaration.value)
+            else if (item.kind === 'TypeDeclaration') nested.set(item.name, item.value)
+            else if (item.kind === 'Export' && item.declaration.kind === 'Import' && item.declaration.importedTypes) for (const [name, value] of Object.entries(item.declaration.importedTypes)) nested.set(name, value)
+        }
+        return nested
+    }
+    visit(statements)
+    for (const item of statements) if (item.kind === 'Import' && item.module === 'juno' && item.namedImports.includes('Error')) types.set('Error', { kind: 'ObjectType', members: [
+        { name: 'name', type: { kind: 'NamedType', name: 'string' }, optional: false, readonly: false, constant: false },
+        { name: 'message', type: { kind: 'NamedType', name: 'string' }, optional: false, readonly: false, constant: false },
+        { name: 'stack', type: { kind: 'NamedType', name: 'string' }, optional: true, readonly: false, constant: false }
+    ] })
+    for (const item of statements) if (item.kind === 'Import') {
+        item.importedTypes = Object.fromEntries([...types].filter(([name]) => item.namedImports.includes(name)))
+    }
     if (options.validate !== false) {
         validateDeclarations(statements)
         validateArithmeticTypes(statements)

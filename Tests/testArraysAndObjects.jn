@@ -69,4 +69,14 @@ console.log("as<T>() on an array =", [1, 2, 3].as<number[]>().toString())
 # values[1.5]
 # person[true]
 
+type Getter = {
+    get value(): string = 
+        return "Hello, world!"
+    set value(value: string) =
+        console.log("value set to", value)
+}
+
+let getter = Getter()
+console.log("getter.value =", getter.value)
+getter.value = "Hello, world!"
 console.log("=== Array and object index tests complete ===")

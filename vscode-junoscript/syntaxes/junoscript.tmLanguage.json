@@ -196,8 +196,12 @@
     "keywords": {
       "patterns": [
         {
+          "name": "storage.type.accessor.junoscript",
+          "match": "\\b(get|set)\\b(?=\\s+[A-Za-z_][A-Za-z0-9_]*)"
+        },
+        {
           "name": "keyword.control.junoscript",
-          "match": "\\b(if|else|for|of|while|return|in|as|from|import)\\b"
+          "match": "\\b(if|else|for|of|while|return|in|as|from|import|export|default)\\b"
         },
         {
           "name": "storage.modifier.junoscript",
@@ -273,11 +277,11 @@
         },
         {
           "name": "keyword.operator.assignment.junoscript",
-          "match": "="
+          "match": "\\+=|-=|\\*=|/=|%=|&=|\\|=|="
         },
         {
           "name": "keyword.operator.arithmetic.junoscript",
-          "match": "[+\\-*/%]"
+          "match": "\\+\\+|--|[+\\-*/%]"
         },
         {
           "name": "keyword.operator.optional.junoscript",

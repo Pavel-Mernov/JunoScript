@@ -11,9 +11,10 @@ class ReturnValue { constructor(readonly value: unknown) {} }
 
 export class Interpreter {
     private readonly globals: Environment = { bindings: new Map(), types: new Map() }
+    private currentDirectory = process.cwd()
     constructor() { this.globals.bindings.set('isType', { value: (value: unknown, type: unknown) => matchesType(value, type), mutable: false }) }
 
-    run(source: string): void { this.executeStatements(parse(source), this.globals) }
+    run(source: string, filePath?: string): void { this.executeStatements(parse(source, { filePath }), this.globals) }
 
     private executeStatements(statements: Statement[], env: Environment): unknown {
         for (const statement of statements) {
@@ -26,15 +27,29 @@ export class Interpreter {
     private execute(statement: Statement, env: Environment): void {
         switch (statement.kind) {
             case 'Import': {
-                const module = resolveModule(statement.module) as Record<string, unknown>
+                const module = ['juno', 'juno:node', 'types'].includes(statement.module)
+                    ? resolveModule(statement.module) as Record<string, unknown>
+                    : this.loadLocalModule(statement.module, env)
                 const adaptedModule = this.adaptModule(module, env)
                 if (statement.defaultImport) this.declare(env, statement.defaultImport, adaptedModule, false)
                 for (const name of statement.namedImports) {
-                    if (!(name in module)) throw new Error(`Module '${statement.module}' has no export '${name}'`)
-                    this.declare(env, name, name === 'console' ? this.adaptConsole(module[name] as Record<string, any>) : module[name], false)
+                    if (!(name in module) && !(module as any).__junoTypes?.[name]) throw new Error(`Module '${statement.module}' has no export '${name}'`)
+                    if (!(name in module) && (module as any).__junoTypes?.[name]) {
+                        const alias = (module as any).__junoTypes[name] as TypeAlias
+                        ;(statement.importedTypes ??= {})[name] = alias.value
+                        env.types.set(name, alias)
+                        this.declare(env, name, { __junoTypeConstructor: true, typeName: name, typeNode: alias.value, generics: alias.generics }, false)
+                        continue
+                    }
+                    const importedValue = name === 'console' ? this.adaptConsole(module[name] as Record<string, any>) : module[name]
+                    if (importedValue && typeof importedValue === 'object') this.installDefaultHas(importedValue)
+                    this.declare(env, name, importedValue, false)
+                    const exportedType = (module as any).__junoTypes?.[name] as TypeAlias | undefined
+                    if (exportedType) { env.types.set(name, exportedType); (statement.importedTypes ??= {})[name] = exportedType.value }
                 }
                 return
             }
+            case 'Export': this.execute(statement.declaration, env); return
             case 'Variable': {
                 let value = statement.initializer ? this.evaluate(statement.initializer, env) : null
                 if (statement.type && value && typeof value === 'object' && !Array.isArray(value)) value = this.applyTypeDefaults(value, statement.type, env)
@@ -60,6 +75,61 @@ export class Interpreter {
         }
     }
 
+    private loadLocalModule(specifier: string, env: Environment): Record<string, unknown> {
+        if (!specifier.startsWith('.') && !specifier.startsWith('/')) throw new Error(`Unsupported module '${specifier}'`)
+        const base = resolve(this.currentDirectory, specifier)
+        const candidates = /\.jn$/i.test(base) ? [base] : [`${base}.jn`, resolve(base, 'index.jn')]
+        let source: string | undefined
+        let file = candidates[0]
+        for (const candidate of candidates) {
+            try { source = readFileSync(candidate, 'utf8'); file = candidate; break } catch { /* try next candidate */ }
+        }
+        if (source === undefined) throw new Error(`Cannot find module '${specifier}'`)
+        const previousDirectory = this.currentDirectory
+        this.currentDirectory = resolve(base, '..')
+        const moduleEnv: Environment = { bindings: new Map(), types: new Map(), parent: env }
+        const importedModule = (specifier: string, importer: Environment): Record<string, unknown> => {
+            const moduleBase = resolve(this.currentDirectory, specifier)
+            const options = /\.jn$/i.test(moduleBase) ? [moduleBase] : [`${moduleBase}.jn`, resolve(moduleBase, 'index.jn')]
+            const target = options.find(candidate => { try { return readFileSync(candidate).length >= 0 } catch { return false } })
+            if (!target) throw new Error(`Cannot find module '${specifier}'`)
+            const saved = this.currentDirectory
+            this.currentDirectory = resolve(target, '..')
+            try { return this.loadLocalModule(target, importer) } finally { this.currentDirectory = saved }
+        }
+        const exported: Record<string, unknown> = {}
+        const statements = parse(source)
+        for (const statement of statements) {
+            if (statement.kind === 'Export') {
+                this.execute(statement.declaration, moduleEnv)
+                const declaration = statement.declaration
+                if (declaration.kind !== 'Variable' && declaration.kind !== 'FunctionDeclaration' && declaration.kind !== 'TypeDeclaration') continue
+                const binding = this.lookup(moduleEnv, declaration.name)
+                if (binding) exported[statement.default ? 'default' : declaration.name] = binding.value
+                if (declaration.kind === 'TypeDeclaration') {
+                    const alias = moduleEnv.types.get(declaration.name)
+                    if (alias) (exported as any).__types ??= {}, (exported as any).__types[declaration.name] = alias
+                }
+            } else if (statement.kind === 'Import') {
+                const dependency = ['juno', 'juno:node', 'types'].includes(statement.module)
+                    ? resolveModule(statement.module) as Record<string, unknown>
+                    : importedModule(statement.module, moduleEnv)
+                if (statement.defaultImport) this.declare(moduleEnv, statement.defaultImport, this.adaptModule(dependency, moduleEnv), false)
+                for (const name of statement.namedImports) {
+                    if (dependency[name] !== undefined) this.declare(moduleEnv, name, dependency[name], false)
+                    else if ((dependency as any).__junoTypes?.[name]) {
+                        const alias = (dependency as any).__junoTypes[name] as TypeAlias
+                        moduleEnv.types.set(name, alias)
+                        this.declare(moduleEnv, name, { __junoTypeConstructor: true, typeName: name, typeNode: alias.value, generics: alias.generics }, false)
+                    } else throw new Error(`Module '${statement.module}' has no export '${name}'`)
+                }
+            } else this.execute(statement, moduleEnv)
+        }
+        Object.defineProperty(exported, '__junoTypes', { value: (exported as any).__types ?? {}, enumerable: false })
+        this.currentDirectory = previousDirectory
+        return exported
+    }
+
     private evaluate(expression: Expression, env: Environment): any {
         switch (expression.kind) {
             case 'Literal': return expression.value
@@ -73,27 +143,65 @@ export class Interpreter {
                 const binding = this.lookup(env, expression.name)
                 if (!binding) throw new ReferenceError(`${expression.name} is not defined`)
                 if (!binding.mutable) throw new TypeError(`Cannot assign to constant '${expression.name}'`)
-                binding.value = this.evaluate(expression.value, env)
+                const right = this.evaluate(expression.value, env)
+                binding.value = expression.operator && expression.operator !== '='
+                    ? this.applyCompoundOperator(expression.operator, binding.value, right)
+                    : right
                 return binding.value
+            }
+            case 'MemberAssignment': {
+                const object = this.evaluate(expression.object, env)
+                if (object === null || object === undefined) throw new TypeError(`Cannot set property '${expression.property}' of null`)
+                const key = expression.index ? this.evaluate(expression.index, env) : expression.property!
+                const right = this.evaluate(expression.value, env)
+                const current = expression.operator && expression.operator !== '=' ? (object as any)[key as any] : undefined
+                const value = expression.operator && expression.operator !== '=' ? this.applyCompoundOperator(expression.operator, current, right) : right
+                ;(object as any)[key as any] = value
+                return value
             }
             case 'Array': {
                 const array = expression.elements.map(item => this.evaluate(item, env))
                 Object.defineProperty(array, 'toString', { enumerable: false, value: function(this: object) { return stringifyJunoObject(this) } })
+                this.installDefaultHas(array)
                 return array
             }
             case 'Object': {
                 const object: Record<string, any> = {}
+                const accessors = new Map<string, PropertyDescriptor>()
                 Object.defineProperty(object, 'keys', { enumerable: false, value: function(this: object) { return Object.keys(this) } })
                 object.toString = this.defaultToString()
+                this.installDefaultHas(object)
                 for (const property of expression.properties) {
+                    if (property.accessor && property.value.kind === 'Function') {
+                        const previous = accessors.get(property.key) ?? Object.getOwnPropertyDescriptor(object, property.key) ?? { enumerable: true, configurable: true }
+                        const fn = property.value
+                        const runtimeFn: RuntimeFunction = { __junoFunction: true, params: fn.params, body: fn.expressionBody ? [{ kind: 'Return', value: fn.expressionBody }] : fn.body, closure: env, thisValue: object }
+                        delete previous.value
+                        delete previous.writable
+                        if (property.accessor === 'get') previous.get = () => this.callFunction(runtimeFn, [], object)
+                        else previous.set = (value: unknown) => { this.callFunction(runtimeFn, [value], object) }
+                        previous.enumerable = true
+                        previous.configurable = true
+                        accessors.set(property.key, previous)
+                        continue
+                    }
                     if (property.value.kind === 'Function') {
                         const fn = property.value
                         object[property.key] = { __junoFunction: true, params: fn.params, body: fn.body, closure: env, thisValue: object } satisfies RuntimeFunction
                     } else object[property.key] = this.evaluate(property.value, env)
                 }
+                for (const [key, descriptor] of accessors) Object.defineProperty(object, key, descriptor)
                 return object
             }
             case 'Unary': {
+                if (expression.operator.endsWith('++') || expression.operator.endsWith('--')) {
+                    const oldValue = this.evaluate(expression.operand, env)
+                    const amount = typeof oldValue === 'bigint' ? 1n : typeof oldValue === 'number' ? 1 : null
+                    if (amount === null) throw new TypeError(`Cannot apply '${expression.operator}' to a value of type ${typeof oldValue}; expected number or BigInt`)
+                    const updated = expression.operator.endsWith('++') ? (oldValue as any) + (amount as any) : (oldValue as any) - (amount as any)
+                    this.writeTarget(expression.operand, updated, env)
+                    return expression.operator.startsWith('prefix') ? updated : oldValue
+                }
                 const value = this.evaluate(expression.operand, env)
                 if (expression.operator === 'postfix!') {
                     if (value == null) throw new TypeError('Non-null assertion failed: value is null')
@@ -248,9 +356,12 @@ export class Interpreter {
                 if (expression.typeArguments?.length) args.push(expression.typeArguments[0].kind === 'NamedType' ? expression.typeArguments[0].name : 'object')
                 if (typeof callee === 'function') return callee.apply(thisValue, args) ?? null
                 if (callee?.__junoTypeConstructor) {
-                    const input = args[0]
+                    const input = args[0] ?? {}
                     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new TypeError(`Constructor '${callee.typeName}' expects an object`)
-                    return this.applyTypeDefaults(input, { kind: 'NamedType', name: callee.typeName }, env)
+                    const targetType: TypeNode = expression.typeArguments?.length
+                        ? { kind: 'GenericType', name: callee.typeName, args: expression.typeArguments }
+                        : { kind: 'NamedType', name: callee.typeName }
+                    return this.applyTypeDefaults(input, targetType, env)
                 }
                 if (callee?.__junoFunction) return this.callFunction(callee, args, thisValue ?? callee.thisValue)
                 throw new TypeError('Value is not callable')
@@ -289,18 +400,21 @@ export class Interpreter {
     private childEnvironment(parent: Environment): Environment { return { bindings: new Map(), types: new Map(), parent } }
 
     private adaptModule(module: Record<string, any>, env: Environment): Record<string, any> {
-        if (!('console' in module)) return module
-        return { ...module, console: this.adaptConsole(module.console) }
+        const adapted = 'console' in module ? { ...module, console: this.adaptConsole(module.console) } : module
+        this.installDefaultHas(adapted)
+        return adapted
     }
 
     private adaptConsole(consoleObject: Record<string, any>): Record<string, any> {
         const convert = (args: unknown[]) => args.map(value => value !== null && (typeof value === 'object' || typeof value === 'function') ? this.toJunoString(value) : value)
-        return {
+        const adapted = {
             ...consoleObject,
             log: (...args: unknown[]) => consoleObject.log(...convert(args)),
             error: (...args: unknown[]) => consoleObject.error(...convert(args)),
             warn: (...args: unknown[]) => consoleObject.warn(...convert(args))
         }
+        this.installDefaultHas(adapted)
+        return adapted
     }
 
     private toJunoString(value: unknown): string {
@@ -317,6 +431,57 @@ export class Interpreter {
         const method = function(this: object) { return stringifyJunoObject(this) }
         Object.defineProperty(method, '__junoDefaultToString', { value: true })
         return method
+    }
+
+    private installDefaultHas(value: object): void {
+        if ('has' in value) return
+        Object.defineProperty(value, 'has', {
+            enumerable: false,
+            value: function(this: object, key: string) { return key in this }
+        })
+    }
+
+    private writeTarget(target: Expression, value: unknown, env: Environment): void {
+        if (target.kind === 'Identifier') {
+            const binding = this.lookup(env, target.name)
+            if (!binding) throw new ReferenceError(`${target.name} is not defined`)
+            if (!binding.mutable) throw new TypeError(`Cannot assign to constant '${target.name}'`)
+            binding.value = value
+            return
+        }
+        if (target.kind === 'Member') {
+            const object = this.evaluate(target.object, env)
+            if (object === null || object === undefined) throw new TypeError(`Cannot set property '${target.property}' of null`)
+            ;(object as any)[target.property] = value
+            return
+        }
+        if (target.kind === 'Index') {
+            const object = this.evaluate(target.object, env)
+            if (object === null || object === undefined) throw new TypeError('Cannot set an index on null')
+            const index = this.evaluate(target.index, env)
+            ;(object as any)[index as any] = value
+            return
+        }
+        throw new TypeError('Increment and decrement require an assignable target')
+    }
+
+    private applyCompoundOperator(operator: string, left: any, right: any): any {
+        const type = typeof left
+        const bothNumbers = type === 'number' && typeof right === 'number'
+        const bothBigInts = type === 'bigint' && typeof right === 'bigint'
+        if (operator === '+=') {
+            if (bothNumbers || bothBigInts || type === 'string' && typeof right === 'string') return left + right
+        } else if (operator === '-=') {
+            if (bothNumbers || bothBigInts) return left - (right as any)
+        } else if (operator === '*=') {
+            if (bothNumbers || bothBigInts) return left * (right as any)
+        } else if (operator === '/=') {
+            if (bothNumbers || bothBigInts) return left / (right as any)
+        } else if (operator === '%=') {
+            if (bothNumbers || bothBigInts) return left % (right as any)
+        } else if (operator === '&=') return Boolean(left) && Boolean(right)
+        else if (operator === '|=') return Boolean(left) || Boolean(right)
+        throw new TypeError(`Invalid operands for '${operator}': ${type} and ${typeof right}`)
     }
 
     private requireCondition(value: unknown): boolean {
@@ -358,9 +523,15 @@ export class Interpreter {
                 return { kind: 'ArrayType', element: flattened.length === 0 ? { kind: 'NamedType', name: 'any' } : flattened.length === 1 ? flattened[0] : { kind: 'UnionType', types: flattened } }
             }
             case 'Object':
-                return { kind: 'ObjectType', members: expression.properties.map(property => property.value.kind === 'Function'
-                    ? { name: property.key, type: this.inferValueType(property.value, env), optional: false, readonly: false, constant: false }
-                    : { name: property.key, type: this.inferValueType(property.value, env), optional: false, readonly: false, constant: false }) }
+                return { kind: 'ObjectType', members: expression.properties.flatMap(property => property.accessor === 'set' ? [] : [{
+                    name: property.key,
+                    type: property.accessor === 'get' && property.value.kind === 'Function'
+                        ? property.value.returnType ?? { kind: 'NamedType', name: 'any' }
+                        : this.inferValueType(property.value, env),
+                    optional: false,
+                    readonly: false,
+                    constant: false
+                }]) }
             case 'Function':
                 return {
                     kind: 'FunctionType',
@@ -368,8 +539,16 @@ export class Interpreter {
                     result: expression.returnType ?? { kind: 'NamedType', name: 'any' }
                 }
             case 'Index': return this.typeOf(expression, env) ?? { kind: 'NamedType', name: 'any' }
+            case 'Unary':
+                if (expression.operator.endsWith('++') || expression.operator.endsWith('--')) return this.inferValueType(expression.operand, env)
+                return expression.operator === '-' ? { kind: 'NamedType', name: 'number' } : { kind: 'NamedType', name: 'boolean' }
             case 'Call':
                 if (expression.callee.kind === 'Member' && expression.callee.property === 'as' && expression.typeArguments?.length) return expression.typeArguments[0]
+                if (expression.callee.kind === 'Identifier' && (this.lookup(env, expression.callee.name)?.value as any)?.__junoTypeConstructor) {
+                    return expression.typeArguments?.length
+                        ? { kind: 'GenericType', name: expression.callee.name, args: expression.typeArguments }
+                        : { kind: 'NamedType', name: expression.callee.name }
+                }
                 return { kind: 'NamedType', name: 'any' }
             default: return { kind: 'NamedType', name: 'any' }
         }
@@ -493,6 +672,8 @@ export class Interpreter {
             return type.members.every(member => {
                 if (!Object.prototype.hasOwnProperty.call(object, member.name)) return member.optional || member.defaultValue !== undefined
                 const memberValue = object[member.name]
+                if (member.accessor === 'set') return typeof Object.getOwnPropertyDescriptor(object, member.name)?.set === 'function'
+                if (member.accessor === 'get') return this.matchesTypeNode(memberValue, member.type, env, resolving)
                 if (member.method) return typeof memberValue === 'function' || Boolean(memberValue?.__junoFunction)
                 return this.matchesTypeNode(memberValue, member.type, env, resolving)
             })
@@ -501,6 +682,11 @@ export class Interpreter {
     }
 
     private applyTypeDefaults<T extends Record<string, any>>(value: T, type: TypeNode, env: Environment, resolving = new Set<string>()): T {
+        if (type.kind === 'GenericType') {
+            const resolved = this.resolveAliasType(type, env)
+            if (resolved !== type) return this.applyTypeDefaults(value, resolved, env, resolving)
+            return value
+        }
         if (type.kind === 'NamedType') {
             if (resolving.has(type.name)) return value
             for (let current: Environment | undefined = env; current; current = current.parent) {
@@ -522,10 +708,23 @@ export class Interpreter {
         }
         if (type.kind !== 'ObjectType') return value
         const runtimeValue = value as Record<string, any>
+        this.installDefaultHas(runtimeValue)
         if (typeof runtimeValue.toString !== 'function' && !(runtimeValue.toString as any)?.__junoFunction) {
             runtimeValue.toString = this.defaultToString()
         }
         for (const member of type.members) {
+            if (member.accessor && member.body) {
+                const previous = Object.getOwnPropertyDescriptor(runtimeValue, member.name) ?? { enumerable: true, configurable: true }
+                const runtimeFn: RuntimeFunction = { __junoFunction: true, params: member.params ?? [], body: member.body, closure: env, thisValue: value }
+                delete previous.value
+                delete previous.writable
+                if (member.accessor === 'get') previous.get = () => this.callFunction(runtimeFn, [], value)
+                else previous.set = (input: unknown) => { this.callFunction(runtimeFn, [input], value) }
+                previous.enumerable = true
+                previous.configurable = true
+                Object.defineProperty(runtimeValue, member.name, previous)
+                continue
+            }
             if (member.method) {
                 const isDefaultToString = member.name === 'toString' && runtimeValue[member.name]?.__junoDefaultToString
                 if (member.body && (isDefaultToString || (typeof runtimeValue[member.name] !== 'function' && !runtimeValue[member.name]?.__junoFunction))) {
@@ -566,13 +765,19 @@ export class Interpreter {
             for (const part of type.types) {
                 const member = this.findTypeMember(part, name, env, resolving)
                 if (!member) return null
-                commonMember ??= member
+                if (!commonMember) commonMember = member
+                else commonMember.optional ||= member.optional
             }
             return commonMember
         }
         if (type.kind === 'ObjectType') {
-            const member = type.members.find(item => item.name === name)
+            const member = type.members.find(item => item.name === name && item.accessor === 'get')
+                ?? type.members.find(item => item.name === name)
             if (member) return { type: member.type, optional: member.optional }
+            if (name === 'has') return { type: { kind: 'FunctionType', params: [{ kind: 'NamedType', name: 'string' }], result: { kind: 'NamedType', name: 'boolean' } }, optional: false }
+        }
+        if (name === 'has' && (type.kind === 'ArrayType' || type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) {
+            return { type: { kind: 'FunctionType', params: [{ kind: 'NamedType', name: 'string' }], result: { kind: 'NamedType', name: 'boolean' } }, optional: false }
         }
         if (name === 'toString' && !(type.kind === 'LiteralType' && type.value === null)) {
             return { type: { kind: 'NamedType', name: 'string' }, optional: false }
@@ -589,7 +794,10 @@ export class Interpreter {
         if (declaredType && !this.findTypeMember(declaredType, property, env)) {
             throw new TypeError(`Property '${property}' does not exist on declared type`)
         }
-        if (!(property in Object(object))) throw new TypeError(`Property '${property}' does not exist on value`)
+        if (!(property in Object(object))) {
+            if (optional || this.findTypeMember(declaredType ?? { kind: 'NamedType', name: 'any' }, property, env)?.optional) return null
+            throw new TypeError(`Property '${property}' does not exist on value`)
+        }
         const value = (object as any)[property]
         return value === undefined ? null : value
     }
@@ -640,5 +848,7 @@ function typeName(type: TypeNode): string {
 export function runFile(file: string): void {
     const path = resolve(file)
     const source = readFileSync(path, 'utf8')
-    new Interpreter().run(source)
+    const interpreter = new Interpreter()
+    ;(interpreter as any).currentDirectory = resolve(path, '..')
+    interpreter.run(source, path)
 }

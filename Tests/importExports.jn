@@ -1,0 +1,17 @@
+import { answer, greet, Greeting } from './exports'
+import { Error } from 'juno'
+import { console } from 'juno:node'
+
+const message: string = greet('Juno')
+const greeting: Greeting = { text: message }
+const known: Error = { name: 'Error', message }
+const checked: Error = known
+
+const text = message
+
+const greeting2 = Greeting({ text })
+
+console.log(answer)
+console.log(text)
+console.log(greeting)
+console.log(greeting2)

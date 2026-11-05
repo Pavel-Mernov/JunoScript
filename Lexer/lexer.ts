@@ -3,6 +3,8 @@ export type TokenType =
     | 'Newline' | 'Indent' | 'Dedent' | 'EOF'
     | 'Plus' | 'Minus' | 'Multiply' | 'Divide' | 'Percent'
     | 'Equal' | 'EqualEqual' | 'NotEqual'
+    | 'PlusEqual' | 'MinusEqual' | 'MultiplyEqual' | 'DivideEqual' | 'PercentEqual' | 'PipeEqual' | 'AmpersandEqual'
+    | 'Increment' | 'Decrement'
     | 'Less' | 'LessEqual' | 'Greater' | 'GreaterEqual' | 'Nullish'
     | 'Arrow' | 'FatArrow' | 'Colon' | 'Comma' | 'Dot' | 'Question'
     | 'Pipe' | 'Ampersand' | 'Bang'
@@ -23,7 +25,7 @@ export type Token =
 const keywords = new Set([
     'let', 'const', 'fun', 'type', 'return', 'if', 'else', 'for', 'of',
     'while', 'true', 'false', 'null', 'readonly', 'static', 'as', 'in',
-    'import', 'from'
+    'import', 'from', 'export', 'default'
 ])
 
 export type Lexer = {
@@ -207,6 +209,15 @@ export function Lexer(source: string): Lexer {
                 }
 
                 const pairs: Record<string, TokenType> = {
+                    '++': 'Increment',
+                    '--': 'Decrement',
+                    '+=': 'PlusEqual',
+                    '-=': 'MinusEqual',
+                    '*=': 'MultiplyEqual',
+                    '/=': 'DivideEqual',
+                    '%=': 'PercentEqual',
+                    '|=': 'PipeEqual',
+                    '&=': 'AmpersandEqual',
                     '==': 'EqualEqual',
                     '!=': 'NotEqual',
                     '<=': 'LessEqual',
