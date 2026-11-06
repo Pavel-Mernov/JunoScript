@@ -14,7 +14,7 @@ export type Iterable<T> = ({
                 result.push(next.value)
                 next = nextFunction()
         else
-            return this.toArray()
+            return []
         return result
 
     get length(): number =
@@ -63,15 +63,6 @@ export type Iterable<T> = ({
                 return item
         return null
 
-    findIndex(callback: (T) -> boolean): number =
-        let index = 0
-        let array = this.toArray()
-        for const item of array
-            if callback(item)
-                return index
-            index++
-        return -1
-
     findLast(callback: (T) -> boolean): T | null =
         let index = this.length - 1
         let array = this.toArray()
@@ -82,15 +73,6 @@ export type Iterable<T> = ({
                 return item
             index--
         return null
-
-    findLastIndex(callback: (T) -> boolean): number =
-        let index = this.length - 1
-        let array = this.toArray()
-        while index >= 0
-            if callback(array[index])
-                return index
-            index--
-        return -1
 
     flatMap(callback: (T) -> T[]): T[] =
         let result: T[] = []
@@ -131,7 +113,7 @@ export type Iterable<T> = ({
         for const item of this.toArray()
             if !first
                 result = result + separator
-            result = result + item
+            result = result + item.toString()
             first = false
         return result
 

@@ -557,7 +557,7 @@ var Parser = class _Parser {
           params = this.parameters();
           const returnType = this.match("Colon") ? this.type() : void 0;
           if (this.match("Equal")) {
-            body = this.block();
+            body = this.is("Newline") ? this.block() : [{ kind: "Return", value: this.expression() }];
             type = returnType ?? { kind: "NamedType", name: "any" };
           } else type = returnType ?? { kind: "NamedType", name: "void" };
         } else {
@@ -1540,7 +1540,7 @@ function instantiate(type, generics, args) {
     if (node.kind === "UnionType" || node.kind === "IntersectionType") return { ...node, types: node.types.map(replace) };
     if (node.kind === "ArrayType") return { ...node, element: replace(node.element) };
     if (node.kind === "FunctionType") return { ...node, params: node.params.map(replace), result: replace(node.result) };
-    if (node.kind === "ObjectType") return { ...node, members: node.members.map((member) => ({ ...member, type: replace(member.type) })) };
+    if (node.kind === "ObjectType") return { ...node, members: node.members.map((member) => ({ ...member, type: replace(member.type), params: member.params?.map((param) => ({ ...param, type: param.type ? replace(param.type) : void 0 })) })) };
     return node;
   };
   return replace(type);
@@ -1578,7 +1578,11 @@ function resolveType(type, env) {
     return type;
   }
   if (type.kind === "IntersectionType") {
-    const parts = type.types.map((part) => resolveType(part, env));
+    const flatten = (part) => {
+      const resolved = resolveType(part, env);
+      return resolved.kind === "IntersectionType" ? resolved.types.flatMap(flatten) : [resolved];
+    };
+    const parts = type.types.flatMap(flatten);
     if (parts.some((part) => part.kind === "UnionType")) return { kind: "IntersectionType", types: parts };
     const members = [];
     for (const part of parts) {
@@ -1588,7 +1592,7 @@ function resolveType(type, env) {
   }
   if (type.kind === "UnionType") return { ...type, types: type.types.map((part) => resolveType(part, env)) };
   if (type.kind === "ArrayType") return { ...type, element: resolveType(type.element, env) };
-  if (type.kind === "ObjectType") return { ...type, members: type.members.map((member) => ({ ...member, type: resolveType(member.type, env) })) };
+  if (type.kind === "ObjectType") return { ...type, members: type.members.map((member) => ({ ...member, type: resolveType(member.type, env), params: member.params?.map((param) => ({ ...param, type: param.type ? resolveType(param.type, env) : void 0 })) })) };
   if (type.kind === "FunctionType") return { ...type, params: type.params.map((param) => resolveType(param, env)), result: resolveType(type.result, env) };
   return type;
 }
@@ -1612,7 +1616,7 @@ function lookupMember(type, name, env) {
     if (member) {
       if (member.accessor === "get") return member.type;
       if (member.accessor === "set") return member.type;
-      if (member.method) return { kind: "fun", params: member.params ?? [], returnType: member.type };
+      if (member.method) return { kind: "fun", params: member.params ?? [], returnType: member.type, body: member.body, ownerType: resolved };
       return member.type;
     }
     if (name === "has") return { kind: "fun", params: [{ name: "key", type: named("string") }], returnType: named("boolean") };
@@ -1717,6 +1721,8 @@ function isAssignableTo(expected, actual, env) {
   const target = resolveType(expected, env);
   const value = resolveType(actual, env);
   if (isNamedType(target, "any") || isNamedType(value, "any")) return true;
+  if (target.kind === "IntersectionType") return target.types.every((part) => isAssignableTo(part, value, env));
+  if (value.kind === "IntersectionType") return value.types.some((part) => isAssignableTo(target, part, env));
   if (target.kind === "UnionType") {
     return value.kind === "UnionType" ? value.types.every((valuePart) => target.types.some((targetPart) => isAssignableTo(targetPart, valuePart, env))) : target.types.some((part) => isAssignableTo(part, value, env));
   }
@@ -1734,7 +1740,7 @@ function isAssignableTo(expected, actual, env) {
   }
   if (target.kind === "ArrayType" && value.kind === "ArrayType") return isAssignableTo(target.element, value.element, env);
   if (target.kind === "ObjectType" && value.kind === "ObjectType") {
-    return target.members.filter((member) => !member.optional && (!member.method || member.accessor === "get") && member.accessor !== "set" && !isNullable(member.type, env)).every((member) => {
+    return target.members.filter((member) => !member.optional && (!member.method || member.accessor === "get") && member.accessor !== "set" && !member.body && !isNullable(member.type, env)).every((member) => {
       const actualMember = value.members.find((item) => item.name === member.name);
       return Boolean(actualMember && isAssignableTo(member.type, actualMember.type, env));
     }) && target.members.filter((member) => !member.method || member.accessor === "get").every((member) => {
@@ -1799,6 +1805,14 @@ function iterableElementType(type, env) {
   if (resolved.kind === "ArrayType") return resolved.element;
   if (resolved.kind === "GenericType" && (resolved.name === "Array" || resolved.name === "ReadonlyArray")) {
     return resolved.args[0] ?? named("any");
+  }
+  if (resolved.kind === "ObjectType") {
+    const toArray = resolved.members.find((member) => member.name === "toArray" && member.method);
+    if (toArray) {
+      const result = resolveType(toArray.type, env);
+      if (result.kind === "ArrayType") return result.element;
+      if (result.kind === "GenericType" && (result.name === "Array" || result.name === "ReadonlyArray")) return result.args[0] ?? named("any");
+    }
   }
   if (resolved.kind === "UnionType") return unionOf(resolved.types.map((part) => iterableElementType(part, env)));
   if (isNamedType(resolved, "string")) return named("string");
@@ -1953,7 +1967,12 @@ function inferExpression(expression, env) {
       if (expression.callee.kind === "Member") {
         const objectType = inferExpression(expression.callee.object, env);
         const member = lookupMember(objectType, expression.callee.property, env);
-        if (isFunctionSymbol(member)) return member.returnType;
+        if (isFunctionSymbol(member)) {
+          if (!member.body) return member.returnType;
+          const local = bindInferredParameters(member.params, env);
+          local.set("this", { kind: "var", mutable: false, type: member.ownerType ?? objectType });
+          return inferFunctionReturnType2(member.body, local, member.params);
+        }
       }
       return named("any");
     }
@@ -1994,8 +2013,11 @@ var Analyzer = class {
   hovers = [];
   hints = [];
   diagnostics = [];
-  analyze(statements) {
+  analyze(statements, builtins = /* @__PURE__ */ new Map()) {
     const env = globals();
+    for (const [name, symbol] of builtins) if (symbol.kind === "type") {
+      env.set(name, { kind: "type", generics: symbol.generics, value: symbol.value });
+    }
     for (const statement of statements) if (statement.kind === "Import") {
       for (const [name, symbol] of Object.entries(statement.importedSymbols ?? {})) {
         if (symbol.kind === "type" && symbol.value) env.set(name, { kind: "type", generics: symbol.generics ?? [], value: symbol.value });
@@ -2463,7 +2485,11 @@ var Analyzer = class {
           if (hover) hover.code += `
 (infer) ${printType(inferExpression(expression, env))}`;
         }
-        expression.args.forEach((arg) => this.walkExpression(arg, env, thisType));
+        expression.args.forEach((arg, index) => {
+          const contextualType = calleeType.kind === "FunctionType" ? calleeType.params[index] : void 0;
+          if (arg.kind === "Function") this.walkFunction(arg, env, contextualType);
+          else this.walkExpression(arg, env, thisType);
+        });
         expression.typeArguments?.forEach((type) => this.walkType(type, env));
         if (expression.callee.kind === "Member" && expression.callee.property === "as" && expression.typeArguments?.length) {
           const target = expression.typeArguments[0];
@@ -2486,8 +2512,12 @@ var Analyzer = class {
         return;
     }
   }
-  walkFunction(expression, env) {
+  walkFunction(expression, env, contextualType) {
     const local = bindInferredParameters(expression.params, env);
+    const contextual = contextualType ? resolveType(contextualType, env) : void 0;
+    if (contextual?.kind === "FunctionType") expression.params.forEach((param, index) => {
+      if (!param.type && contextual.params[index]) local.set(param.name, { kind: "var", mutable: true, type: contextual.params[index] });
+    });
     for (const param of expression.params) {
       const type = local.get(param.name).type;
       if (!param.type && param.defaultValue !== void 0) {
@@ -2543,12 +2573,37 @@ function analyze(source, filePath) {
     const analyzer = new Analyzer();
     const statements = parse(source, { validate: false, filePath });
     const imported = importedDeclarations(statements, filePath);
+    if (statements.some((statement) => statement.kind === "TypeDeclaration" && JSON.stringify(statement.value).includes("Iterable"))) {
+      const fs = require("node:fs");
+      const path = require("node:path");
+      let directory = path.dirname(path.resolve(filePath ?? process.cwd()));
+      let iterablePath;
+      while (true) {
+        const candidate = path.join(directory, "iterable.jn");
+        if (fs.existsSync(candidate)) {
+          iterablePath = candidate;
+          break;
+        }
+        const parent = path.dirname(directory);
+        if (parent === directory) break;
+        directory = parent;
+      }
+      iterablePath ??= path.resolve(__dirname, "../../iterable.jn");
+      if (fs.existsSync(iterablePath)) {
+        const iterableStatements = parse(fs.readFileSync(iterablePath, "utf8"), { validate: false, filePath: iterablePath });
+        const iterable2 = importedDeclarations(iterableStatements).get("Iterable");
+        if (iterable2?.kind === "type") imported.set("Iterable", iterable2);
+      }
+    }
     for (const statement of statements) if (statement.kind === "Import") {
       const selected = [...imported].filter(([name]) => statement.namedImports.includes(name));
       statement.importedTypes = Object.fromEntries(selected.flatMap(([name, symbol]) => symbol.kind === "type" ? [[name, symbol.value]] : []));
       statement.importedSymbols = Object.fromEntries(selected);
     }
-    analyzer.analyze(statements);
+    const builtins = /* @__PURE__ */ new Map();
+    const iterable = imported.get("Iterable");
+    if (iterable?.kind === "type" && !statements.some((statement) => statement.kind === "TypeDeclaration" && statement.name === "Iterable")) builtins.set("Iterable", iterable);
+    analyzer.analyze(statements, builtins);
     return { hovers: analyzer.hovers, hints: analyzer.hints, diagnostics: analyzer.diagnostics };
   } catch (error) {
     return void 0;

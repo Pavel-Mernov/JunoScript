@@ -14,7 +14,19 @@ export class Interpreter {
     private currentDirectory = process.cwd()
     constructor() { this.globals.bindings.set('isType', { value: (value: unknown, type: unknown) => matchesType(value, type), mutable: false }) }
 
-    run(source: string, filePath?: string): void { this.executeStatements(parse(source, { filePath }), this.globals) }
+    run(source: string, filePath?: string): void {
+        const statements = parse(source, { filePath })
+        for (const statement of statements) {
+            if (statement.kind === 'TypeDeclaration') {
+                this.globals.types.set(statement.name, { value: statement.value, generics: statement.generics })
+                this.registerTypeDeclarations(statement.value, this.globals)
+            } else if (statement.kind === 'Export' && statement.declaration.kind === 'TypeDeclaration') {
+                this.globals.types.set(statement.declaration.name, { value: statement.declaration.value, generics: statement.declaration.generics })
+                this.registerTypeDeclarations(statement.declaration.value, this.globals)
+            }
+        }
+        this.executeStatements(statements, this.globals)
+    }
 
     private executeStatements(statements: Statement[], env: Environment): unknown {
         for (const statement of statements) {
@@ -51,6 +63,7 @@ export class Interpreter {
             }
             case 'Export': this.execute(statement.declaration, env); return
             case 'Variable': {
+                if (statement.type) this.registerTypeDeclarations(statement.type, env)
                 let value = statement.initializer ? this.evaluate(statement.initializer, env) : null
                 if (statement.type && value && typeof value === 'object' && !Array.isArray(value)) value = this.applyTypeDefaults(value, statement.type, env)
                 const declaredType = statement.type ?? (statement.initializer ? this.inferValueType(statement.initializer, env) : undefined)
@@ -59,6 +72,7 @@ export class Interpreter {
             }
             case 'TypeDeclaration': {
                 env.types.set(statement.name, { value: statement.value, generics: statement.generics })
+                this.registerTypeDeclarations(statement.value, env)
                 this.declare(env, statement.name, { __junoTypeConstructor: true, typeName: statement.name, typeNode: statement.value, generics: statement.generics }, false)
                 return
             }
@@ -68,11 +82,39 @@ export class Interpreter {
             case 'If': this.executeStatements(this.requireCondition(this.evaluate(statement.condition, env)) ? statement.consequent : (statement.alternate ?? []), this.childEnvironment(env)); return
             case 'While': while (this.requireCondition(this.evaluate(statement.condition, env))) this.executeStatements(statement.body, this.childEnvironment(env)); return
             case 'ForOf': {
-                const values = this.evaluate(statement.iterable, env) as any
+                const iterable = this.evaluate(statement.iterable, env) as any
+                const values = Array.isArray(iterable) || iterable?.[Symbol.iterator]
+                    ? iterable
+                    : iterable?.toArray?.__junoFunction
+                        ? this.callFunction(iterable.toArray, [], iterable)
+                        : iterable && typeof iterable.toArray === 'function'
+                            ? iterable.toArray()
+                            : iterable
                 for (const value of values) { const local = this.childEnvironment(env); this.declare(local, statement.binding, value, statement.mutable); this.executeStatements(statement.body, local) }
                 return
             }
         }
+    }
+
+    private registerTypeDeclarations(type: TypeNode, env: Environment, seen = new Set<TypeNode>()): void {
+        if (seen.has(type)) return
+        seen.add(type)
+        if (type.kind === 'NamedType') {
+            if (type.name === 'Iterable') {
+                const declarations = parse(readFileSync(resolve(__dirname, '../../iterable.jn'), 'utf8'))
+                for (const declaration of declarations) if (declaration.kind === 'Export' && declaration.declaration.kind === 'TypeDeclaration') {
+                    env.types.set(declaration.declaration.name, { value: declaration.declaration.value, generics: declaration.declaration.generics })
+                }
+            }
+            return
+        }
+        if (type.kind === 'GenericType') {
+            if (type.name === 'Iterable') this.registerTypeDeclarations({ kind: 'NamedType', name: 'Iterable' }, env, seen)
+            type.args.forEach(argument => this.registerTypeDeclarations(argument, env, seen))
+        }
+        else if (type.kind === 'UnionType' || type.kind === 'IntersectionType') type.types.forEach(part => this.registerTypeDeclarations(part, env, seen))
+        else if (type.kind === 'ObjectType') type.members.forEach(member => this.registerTypeDeclarations(member.type, env, seen))
+        else if (type.kind === 'ArrayType') this.registerTypeDeclarations(type.element, env, seen)
     }
 
     private loadLocalModule(specifier: string, env: Environment): Record<string, unknown> {
@@ -386,7 +428,7 @@ export class Interpreter {
             } else {
                 const value = argumentIndex < args.length ? args[argumentIndex] : param.defaultValue ? this.evaluate(param.defaultValue, local) : null
                 argumentIndex++
-                this.declare(local, param.name, value, true)
+                this.declare(local, param.name, value, true, param.type)
             }
         }
         return this.executeStatements(fn.body, local) ?? null
@@ -571,7 +613,11 @@ export class Interpreter {
             const utility = this.instantiateUtilityType(type, env)
             return utility ?? type
         }
-        if (type.kind === 'UnionType' || type.kind === 'IntersectionType') return { ...type, types: type.types.map(part => this.resolveAliasType(part, env, resolving)) }
+        if (type.kind === 'UnionType' || type.kind === 'IntersectionType') {
+            const parts = type.types.map(part => this.resolveAliasType(part, env, resolving))
+            if (type.kind === 'IntersectionType' && parts.every(part => part.kind === 'ObjectType')) return { kind: 'ObjectType', members: parts.reverse().flatMap(part => part.kind === 'ObjectType' ? part.members : []) }
+            return { ...type, types: parts }
+        }
         if (type.kind === 'ArrayType') return { ...type, element: this.resolveAliasType(type.element, env, resolving) }
         if (type.kind === 'ObjectType') return { ...type, members: type.members.map(member => ({ ...member, type: this.resolveAliasType(member.type, env, resolving) })) }
         if (type.kind === 'FunctionType') return { ...type, params: type.params.map(param => this.resolveAliasType(param, env, resolving)), result: this.resolveAliasType(type.result, env, resolving) }
@@ -696,7 +742,7 @@ export class Interpreter {
             return value
         }
         if (type.kind === 'IntersectionType') {
-            for (const part of type.types) this.applyTypeDefaults(value, part, env, resolving)
+            for (const part of [...type.types].reverse()) this.applyTypeDefaults(value, part, env, resolving)
             return value
         }
         if (type.kind === 'UnionType') {
@@ -708,6 +754,8 @@ export class Interpreter {
         }
         if (type.kind !== 'ObjectType') return value
         const runtimeValue = value as Record<string, any>
+        const resolvedType = this.resolveAliasType(type, env)
+        if (resolvedType.kind === 'ObjectType') type = resolvedType
         this.installDefaultHas(runtimeValue)
         if (typeof runtimeValue.toString !== 'function' && !(runtimeValue.toString as any)?.__junoFunction) {
             runtimeValue.toString = this.defaultToString()
@@ -770,6 +818,12 @@ export class Interpreter {
             }
             return commonMember
         }
+        if (type.kind === 'GenericType') {
+            for (let current: Environment | undefined = env; current; current = current.parent) {
+                const alias = current.types.get(type.name)
+                if (alias) return this.findTypeMember(this.instantiateAlias(alias, type.args), name, env, resolving)
+            }
+        }
         if (type.kind === 'ObjectType') {
             const member = type.members.find(item => item.name === name && item.accessor === 'get')
                 ?? type.members.find(item => item.name === name)
@@ -778,6 +832,10 @@ export class Interpreter {
         }
         if (name === 'has' && (type.kind === 'ArrayType' || type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) {
             return { type: { kind: 'FunctionType', params: [{ kind: 'NamedType', name: 'string' }], result: { kind: 'NamedType', name: 'boolean' } }, optional: false }
+        }
+        if (name === 'push' && (type.kind === 'ArrayType' || type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) {
+            const element = type.kind === 'ArrayType' ? type.element : type.args[0] ?? { kind: 'NamedType', name: 'any' }
+            return { type: { kind: 'FunctionType', params: [element], result: { kind: 'NamedType', name: 'number' } }, optional: false }
         }
         if (name === 'toString' && !(type.kind === 'LiteralType' && type.value === null)) {
             return { type: { kind: 'NamedType', name: 'string' }, optional: false }

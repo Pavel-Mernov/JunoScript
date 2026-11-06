@@ -1,0 +1,27 @@
+import { console } from "juno"
+
+type IterableArray = Iterable<string | number> & {
+    data: (string | number)[]
+    toArray(): (string | number)[] = this.data
+}
+
+const array: IterableArray = {
+    data: ['0', 1, 2, 3, 'four'],
+}
+
+for const item of array
+    console.log(item)
+
+console.log(array.toArray())
+
+console.log("map:", array.map((item) => item.toString()))
+console.log("filter:", array.filter((item) => item != 2))
+console.log("flatMap:", array.flatMap((item) => [item]))
+console.log("join:", array.join(" | "))
+console.log("slice:", array.slice(1, 4))
+console.log("toReversed:", array.toReversed())
+console.log("concat:", array.concat(['five']))
+console.log("every:", array.every((item) => item != null))
+# No element matches this predicate, so some() should return false.
+console.log("some:", array.some((item) => item == 99))
+array.forEach((item) => console.log("forEach:", item))

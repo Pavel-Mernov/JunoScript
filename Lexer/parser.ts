@@ -266,7 +266,7 @@ export class Parser {
                     params = this.parameters()
                     const returnType = this.match('Colon') ? this.type() : undefined
                     if (this.match('Equal')) {
-                        body = this.block()
+                        body = this.is('Newline') ? this.block() : [{ kind: 'Return', value: this.expression() }]
                         type = returnType ?? { kind: 'NamedType', name: 'any' }
                     } else type = returnType ?? { kind: 'NamedType', name: 'void' }
                 }
