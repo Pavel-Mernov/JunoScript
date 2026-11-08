@@ -12,7 +12,14 @@ class ReturnValue { constructor(readonly value: unknown) {} }
 export class Interpreter {
     private readonly globals: Environment = { bindings: new Map(), types: new Map() }
     private currentDirectory = process.cwd()
-    constructor() { this.globals.bindings.set('isType', { value: (value: unknown, type: unknown) => matchesType(value, type), mutable: false }) }
+    constructor() {
+        this.globals.bindings.set('isType', { value: (value: unknown, type: unknown) => matchesType(value, type), mutable: false })
+        this.globals.bindings.set('RegEx', {
+            value: (pattern: string | RegExp, flags?: string) => new RegExp(pattern, flags),
+            mutable: false,
+            declaredType: { kind: 'FunctionType', params: [{ kind: 'NamedType', name: 'string' }, { kind: 'NamedType', name: 'string' }], result: { kind: 'NamedType', name: 'RegEx' } }
+        })
+    }
 
     run(source: string, filePath?: string): void {
         const statements = parse(source, { filePath })
@@ -175,6 +182,7 @@ export class Interpreter {
     private evaluate(expression: Expression, env: Environment): any {
         switch (expression.kind) {
             case 'Literal': return expression.value
+            case 'RegEx': return new RegExp(expression.source, expression.flags)
             case 'Template': return expression.parts.map(part => typeof part === 'string' ? part : this.toJunoString(this.evaluate(part, env))).join('')
             case 'Identifier':
                 if (expression.name === 'this') return this.lookup(env, 'this')?.value ?? null
@@ -555,6 +563,7 @@ export class Interpreter {
 
     private inferValueType(expression: Expression, env: Environment): TypeNode {
         switch (expression.kind) {
+            case 'RegEx': return { kind: 'NamedType', name: 'RegEx' }
             case 'Literal':
                 return { kind: 'NamedType', name: expression.value === null ? 'null' : typeof expression.value === 'bigint' ? 'BigInt' : typeof expression.value }
             case 'Template': return { kind: 'NamedType', name: 'string' }
@@ -694,6 +703,7 @@ export class Interpreter {
                 case 'number': return typeof value === 'number'
                 case 'boolean': return typeof value === 'boolean'
                 case 'BigInt': return typeof value === 'bigint'
+                case 'RegEx': return value instanceof RegExp
                 case 'object': return value !== null && typeof value === 'object'
                 case 'Function': return typeof value === 'function' || Boolean((value as any)?.__junoFunction)
                 default: return false
@@ -798,6 +808,35 @@ export class Interpreter {
                 const alias = current.types.get(type.name)
                 if (alias && alias.generics.length === 0) return this.findTypeMember(alias.value, name, env, new Set([...resolving, type.name]))
             }
+            if (type.name === 'string') {
+                const string = { kind: 'NamedType', name: 'string' } as TypeNode
+                const number = { kind: 'NamedType', name: 'number' } as TypeNode
+                const boolean = { kind: 'NamedType', name: 'boolean' } as TypeNode
+                const regex = { kind: 'NamedType', name: 'RegEx' } as TypeNode
+                const matcher: TypeNode = { kind: 'UnionType', types: [string, regex] }
+                const callable = (params: TypeNode[], result: TypeNode) => ({ type: { kind: 'FunctionType', params, result } as TypeNode, optional: false })
+                if (name === 'length') return { type: number, optional: false }
+                if (['find', 'findLast'].includes(name)) return callable([matcher], { kind: 'UnionType', types: [string, { kind: 'NamedType', name: 'null' }] })
+                if (['findIndex', 'findLastIndex', 'indexOf', 'lastIndexOf', 'search', 'charCodeAt', 'codePointAt', 'localeCompare'].includes(name)) return callable([matcher], number)
+                if (['includes', 'startsWith', 'endsWith', 'test'].includes(name)) return callable([matcher], boolean)
+                if (name === 'exec') return callable([matcher], { kind: 'UnionType', types: [{ kind: 'ArrayType', element: string }, { kind: 'NamedType', name: 'null' }] })
+                if (name === 'join') return callable([string], string)
+                if (['split', 'match', 'matchAll', 'toArray'].includes(name)) return callable(name === 'toArray' ? [] : [matcher], { kind: 'ArrayType', element: string })
+                if (name === 'iterator') return callable([], { kind: 'FunctionType', params: [], result: { kind: 'NamedType', name: 'any' } })
+                if (['at', 'charAt', 'concat', 'normalize', 'padEnd', 'padStart', 'repeat', 'replace', 'replaceAll', 'slice', 'substring', 'substr', 'toLocaleLowerCase', 'toLocaleUpperCase', 'toLowerCase', 'toUpperCase', 'trim', 'trimEnd', 'trimStart', 'valueOf'].includes(name)) return callable([], string)
+            }
+            if (type.name === 'RegEx') {
+                const string = { kind: 'NamedType', name: 'string' } as TypeNode
+                const boolean = { kind: 'NamedType', name: 'boolean' } as TypeNode
+                const number = { kind: 'NamedType', name: 'number' } as TypeNode
+                if (['source', 'flags'].includes(name)) return { type: string, optional: false }
+                if (['global', 'ignoreCase', 'multiline', 'dotAll', 'sticky', 'unicode', 'hasIndices', 'unicodeSets'].includes(name)) return { type: boolean, optional: false }
+                if (name === 'lastIndex') return { type: number, optional: false }
+                const input: TypeNode = { kind: 'UnionType', types: [string, { kind: 'NamedType', name: 'RegEx' }] }
+                if (name === 'test') return { type: { kind: 'FunctionType', params: [input], result: boolean }, optional: false }
+                if (name === 'exec') return { type: { kind: 'FunctionType', params: [input], result: { kind: 'UnionType', types: [{ kind: 'ArrayType', element: string }, { kind: 'NamedType', name: 'null' }] } }, optional: false }
+                if (name === 'compile') return { type: { kind: 'FunctionType', params: [input, string], result: { kind: 'NamedType', name: 'RegEx' } }, optional: false }
+            }
             if (name === 'toString' && type.name !== 'null') return { type: { kind: 'NamedType', name: 'string' }, optional: false }
             return null
         }
@@ -848,6 +887,39 @@ export class Interpreter {
             if (optional) return null
             throw new TypeError(`Cannot read property '${property}' of null`)
         }
+        if (typeof object === 'string') {
+            const findMatch = (search: string | RegExp, last: boolean): { value: string; index: number } | null => {
+                if (typeof search === 'string') {
+                    const index = last ? object.lastIndexOf(search) : object.indexOf(search)
+                    return index < 0 ? null : { value: search, index }
+                }
+                const flags = search.flags.includes('g') ? search.flags : `${search.flags}g`
+                const regexp = new RegExp(search.source, flags)
+                let found: RegExpExecArray | null = null
+                for (let match = regexp.exec(object); match; match = regexp.exec(object)) {
+                    found = match
+                    if (!last) break
+                    if (match[0] === '') regexp.lastIndex++
+                }
+                return found ? { value: found[0], index: found.index } : null
+            }
+            if (property === 'find') return (search: string | RegExp) => findMatch(search, false)?.value ?? null
+            if (property === 'findLast') return (search: string | RegExp) => findMatch(search, true)?.value ?? null
+            if (property === 'findIndex') return (search: string | RegExp) => findMatch(search, false)?.index ?? -1
+            if (property === 'findLastIndex') return (search: string | RegExp) => findMatch(search, true)?.index ?? -1
+            if (property === 'includes') return (search: string | RegExp, position = 0) => typeof search === 'string' ? object.includes(search, position) : findMatch(search, false) !== null
+            if (property === 'test') return (pattern: string | RegExp) => new RegExp(pattern).test(object)
+            if (property === 'exec') return (pattern: string | RegExp) => new RegExp(pattern).exec(object)
+            if (property === 'join') return (separator = ',') => object.split('').join(separator)
+            if (property === 'toArray') return () => object.split('')
+            if (property === 'iterator') return () => {
+                const iterator = object[Symbol.iterator]()
+                return () => {
+                    const next = iterator.next()
+                    return next.done ? null : { value: next.value }
+                }
+            }
+        }
         const declaredType = this.typeOf(owner, env)
         if (declaredType && !this.findTypeMember(declaredType, property, env)) {
             throw new TypeError(`Property '${property}' does not exist on declared type`)
@@ -883,6 +955,7 @@ function matchesType(value: unknown, type: unknown): boolean {
         case 'string': return typeof value === 'string'
         case 'number': return typeof value === 'number'
         case 'boolean': return typeof value === 'boolean'
+        case 'RegEx': return value instanceof RegExp
         case 'null': return value === null
         case 'Array': return Array.isArray(value)
         case 'object': return value !== null && typeof value === 'object'

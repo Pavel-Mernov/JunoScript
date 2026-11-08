@@ -83,6 +83,8 @@ function Lexer(source) {
           tokens.push({ type, value, line: l, column: c });
         } else if (type === "String") {
           tokens.push({ type, value, line: l, column: c });
+        } else if (type === "RegEx") {
+          tokens.push({ type, value, line: l, column: c });
         } else if (type === "Identifier" || type === "Keyword") {
           tokens.push({ type, value: String(value), line: l, column: c });
         } else {
@@ -196,6 +198,40 @@ function Lexer(source) {
           }
           push("String", value, tokenLine, tokenColumn);
           continue;
+        }
+        if (character === "/") {
+          const previous = tokens[tokens.length - 1];
+          const endsExpression = previous && (["Number", "BigInt", "String", "RegEx", "Identifier", "RightParen", "RightBracket", "RightBrace", "Increment", "Decrement"].includes(previous.type) || previous.type === "Keyword" && ["true", "false", "null"].includes(previous.value));
+          if (!endsExpression && source[this.pos + 1] !== "=" && source[this.pos + 1] !== "/") {
+            advance();
+            let pattern = "";
+            let escaped = false;
+            let inClass = false;
+            let closed = false;
+            while (!this.isAtEnd) {
+              const current = advance();
+              if (current === "\n" || current === "\r") throw new SyntaxError(`Unterminated regular expression at ${tokenLine}:${tokenColumn}`);
+              if (!escaped && current === "[") inClass = true;
+              else if (!escaped && current === "]") inClass = false;
+              else if (!escaped && current === "/" && !inClass) {
+                closed = true;
+                break;
+              }
+              pattern += current;
+              escaped = !escaped && current === "\\";
+              if (current !== "\\") escaped = false;
+            }
+            if (!closed) throw new SyntaxError(`Unterminated regular expression at ${tokenLine}:${tokenColumn}`);
+            let flags = "";
+            while (/[A-Za-z]/.test(this.current)) flags += advance();
+            try {
+              new RegExp(pattern, flags);
+            } catch (error) {
+              throw new SyntaxError(`Invalid regular expression at ${tokenLine}:${tokenColumn}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            push("RegEx", { source: pattern, flags }, tokenLine, tokenColumn);
+            continue;
+          }
         }
         const pairs = {
           "++": "Increment",
@@ -737,6 +773,8 @@ var Parser = class _Parser {
           case "Template":
             for (const part of node.parts) if (typeof part !== "string") shiftExpression(part);
             break;
+          case "RegEx":
+            break;
           case "Array":
             node.elements.forEach(shiftExpression);
             break;
@@ -851,6 +889,10 @@ var Parser = class _Parser {
       const token = this.tokens[this.pos - 1];
       const value = this.value(token);
       return value.includes("${") ? this.templateExpression(value, this.loc(token)) : { kind: "Literal", value: value.replace(/\uE000/g, "$"), loc: this.loc(token) };
+    }
+    if (this.match("RegEx")) {
+      const token = this.tokens[this.pos - 1];
+      return { kind: "RegEx", source: token.value.source, flags: token.value.flags, loc: this.loc(token) };
     }
     if (this.match("Keyword", "true")) return { kind: "Literal", value: true, loc: this.loc(this.tokens[this.pos - 1]) };
     if (this.match("Keyword", "false")) return { kind: "Literal", value: false, loc: this.loc(this.tokens[this.pos - 1]) };
@@ -971,6 +1013,8 @@ function primitive(name) {
 }
 function inferredTypeNode(expression) {
   switch (expression.kind) {
+    case "RegEx":
+      return { kind: "NamedType", name: "RegEx" };
     case "Literal":
       return { kind: "NamedType", name: typeof expression.value === "bigint" ? "BigInt" : expression.value === null ? "null" : typeof expression.value };
     case "Template":
@@ -993,6 +1037,8 @@ function inferredTypeNode(expression) {
 }
 function inferExpressionType(expression, variables) {
   switch (expression.kind) {
+    case "RegEx":
+      return primitive("RegEx");
     case "Literal":
       if (typeof expression.value === "bigint") return primitive("BigInt");
       if (typeof expression.value === "number" || typeof expression.value === "string" || typeof expression.value === "boolean") return { kind: "literal", value: expression.value };
@@ -1461,6 +1507,12 @@ function globals() {
     returnType: named("boolean"),
     docs: "Returns true if `value` matches the type argument, for example `isType<number>(answer)`."
   });
+  env.set("RegEx", {
+    kind: "fun",
+    params: [{ name: "pattern", type: named("string") }, { name: "flags", type: named("string"), defaultValue: { kind: "Literal", value: "" } }],
+    returnType: named("RegEx"),
+    docs: "Creates a regular expression without the `new` keyword."
+  });
   return env;
 }
 function printType(type) {
@@ -1601,6 +1653,108 @@ function isFunctionSymbol(value) {
 }
 function lookupMember(type, name, env) {
   const resolved = resolveType(type, env);
+  if (isNamedType(resolved, "string")) {
+    const fn = (params, returnType) => ({ kind: "fun", params, returnType });
+    const p = (paramName, paramType, optional = false) => ({ name: paramName, type: paramType, ...optional ? { defaultValue: { kind: "Literal", value: null } } : {} });
+    const string = named("string"), number = named("number"), boolean = named("boolean");
+    const matcher = unionOf([string, named("RegEx")]);
+    switch (name) {
+      case "length":
+        return number;
+      case "at":
+      case "charAt":
+        return fn([p("index", number)], string);
+      case "charCodeAt":
+      case "codePointAt":
+        return fn([p("index", number)], number);
+      case "concat":
+        return fn([{ name: "strings", type: arrayOf(string), rest: true }], string);
+      case "endsWith":
+      case "startsWith":
+        return fn([p("search", string), p("position", number, true)], boolean);
+      case "includes":
+        return fn([p("search", matcher), p("position", number, true)], boolean);
+      case "test":
+        return fn([p("pattern", matcher)], boolean);
+      case "exec":
+        return fn([p("pattern", matcher)], unionOf([arrayOf(string), named("null")]));
+      case "find":
+      case "findLast":
+        return fn([p("search", matcher)], unionOf([string, named("null")]));
+      case "findIndex":
+      case "findLastIndex":
+        return fn([p("search", matcher)], number);
+      case "join":
+        return fn([p("separator", string, true)], string);
+      case "indexOf":
+      case "lastIndexOf":
+        return fn([p("search", string), p("position", number, true)], number);
+      case "localeCompare":
+        return fn([p("other", string)], number);
+      case "match":
+      case "matchAll":
+        return fn([p("regexp", matcher)], unionOf([arrayOf(string), named("null")]));
+      case "normalize":
+        return fn([p("form", string, true)], string);
+      case "padEnd":
+      case "padStart":
+        return fn([p("length", number), p("fill", string, true)], string);
+      case "repeat":
+        return fn([p("count", number)], string);
+      case "replace":
+      case "replaceAll":
+        return fn([p("search", matcher), p("replacement", string)], string);
+      case "search":
+        return fn([p("regexp", matcher)], number);
+      case "slice":
+      case "substring":
+      case "substr":
+        return fn([p("start", number, true), p("end", number, true)], string);
+      case "split":
+        return fn([p("separator", matcher, true), p("limit", number, true)], arrayOf(string));
+      case "toLocaleLowerCase":
+      case "toLocaleUpperCase":
+      case "toLowerCase":
+      case "toUpperCase":
+      case "toString":
+      case "trim":
+      case "trimEnd":
+      case "trimStart":
+      case "valueOf":
+        return fn([], string);
+      case "toArray":
+        return fn([], arrayOf(string));
+      case "iterator":
+        return fn([], { kind: "FunctionType", params: [], result: unionOf([{ kind: "ObjectType", members: [field("value", string)] }, named("null")]) });
+    }
+  }
+  if (isNamedType(resolved, "RegEx")) {
+    const fn = (params, returnType) => ({ kind: "fun", params, returnType });
+    const string = named("string"), boolean = named("boolean"), number = named("number"), any = named("any");
+    const input = unionOf([string, named("RegEx")]);
+    switch (name) {
+      case "source":
+      case "flags":
+        return string;
+      case "global":
+      case "ignoreCase":
+      case "multiline":
+      case "dotAll":
+      case "sticky":
+      case "unicode":
+      case "hasIndices":
+      case "unicodeSets":
+        return boolean;
+      case "lastIndex":
+        return number;
+      case "test":
+        return fn([{ name: "value", type: input }], boolean);
+      case "exec":
+        return fn([{ name: "value", type: input }], unionOf([arrayOf(string), named("null")]));
+      case "compile":
+        return fn([{ name: "pattern", type: input }, { name: "flags", type: string, defaultValue: { kind: "Literal", value: "" } }], named("RegEx"));
+    }
+  }
   if (resolved.kind === "IntersectionType") {
     for (const part of resolved.types) {
       const member = lookupMember(part, name, env);
@@ -1855,6 +2009,8 @@ function binaryErrorMessage(operator, left, right) {
 }
 function inferExpression(expression, env) {
   switch (expression.kind) {
+    case "RegEx":
+      return named("RegEx");
     case "Template":
       return named("string");
     case "Literal":
@@ -1960,6 +2116,14 @@ function inferExpression(expression, env) {
       if (expression.callee.kind === "Identifier" && env.get(expression.callee.name)?.kind === "type") return named(expression.callee.name);
       const callee = inferExpression(expression.callee, env);
       if (callee.kind === "FunctionType") return callee.result;
+      if (callee.kind === "UnionType") {
+        const results = callee.types.flatMap((part) => {
+          const resolved = resolveType(part, env);
+          if (resolved.kind === "FunctionType") return [resolved.result];
+          return isNamedType(resolved, "null") && expression.callee.kind === "Member" && expression.callee.optional ? [named("null")] : [];
+        });
+        if (results.length) return unionOf(results);
+      }
       if (expression.callee.kind === "Identifier") {
         const symbol = env.get(expression.callee.name);
         if (symbol?.kind === "fun") return symbol.returnType;
@@ -2001,7 +2165,8 @@ function inferFunctionReturnType2(statements, outer, params = []) {
   return returns.length ? unionOf(returns) : named("null");
 }
 function unionOf(types) {
-  const flattened = types.flatMap((type) => type.kind === "UnionType" ? type.types : [type]);
+  const flatten = (type) => type.kind === "UnionType" ? type.types.flatMap(flatten) : [type];
+  const flattened = types.flatMap(flatten);
   if (!flattened.length) return named("any");
   const unique = flattened.filter((type, index) => flattened.findIndex((item) => printType(item) === printType(type)) === index);
   return unique.length === 1 ? unique[0] : { kind: "UnionType", types: unique };
@@ -2332,6 +2497,9 @@ var Analyzer = class {
   walkExpression(expression, env, thisType) {
     if (!expression) return;
     switch (expression.kind) {
+      case "RegEx":
+        this.addHover(`/${expression.source}/${expression.flags}`, expression.loc, `(RegEx) /${expression.source}/${expression.flags}`);
+        return;
       case "Literal":
         this.addHover(literalLabel(expression.value), expression.loc, `(${printType(inferLiteral(expression.value))}) ${literalPreview(expression.value)}`);
         return;
@@ -2456,8 +2624,10 @@ var Analyzer = class {
           this.addDiagnostic(expressionStart(expression.callee), "Cannot call a nullable value; use ! or ?? to handle null.");
         }
         if (calleeType.kind === "UnionType") {
+          const optionalCall = expression.callee.kind === "Member" && expression.callee.optional;
           const nonCallable = calleeType.types.find((part) => {
             const resolved = resolveType(part, env);
+            if (optionalCall && isNamedType(resolved, "null")) return false;
             return !isNamedType(resolved, "any") && resolved.kind !== "FunctionType";
           });
           if (nonCallable) {
@@ -2544,6 +2714,7 @@ function literalPreview(value) {
 }
 function expressionStart(expression) {
   switch (expression.kind) {
+    case "RegEx":
     case "Literal":
     case "Identifier":
     case "Array":

@@ -1,5 +1,5 @@
 export type TokenType =
-    | 'Number' | 'BigInt' | 'String' | 'Identifier' | 'Keyword'
+    | 'Number' | 'BigInt' | 'String' | 'RegEx' | 'Identifier' | 'Keyword'
     | 'Newline' | 'Indent' | 'Dedent' | 'EOF'
     | 'Plus' | 'Minus' | 'Multiply' | 'Divide' | 'Percent'
     | 'Equal' | 'EqualEqual' | 'NotEqual'
@@ -15,9 +15,10 @@ export type Token =
     | { type: 'Number'; value: number; line: number; column: number }
     | { type: 'BigInt'; value: bigint; line: number; column: number }
     | { type: 'String'; value: string; line: number; column: number }
+    | { type: 'RegEx'; value: { source: string; flags: string }; line: number; column: number }
     | { type: 'Identifier' | 'Keyword'; value: string; line: number; column: number }
     | {
-        type: Exclude<TokenType, 'Number' | 'BigInt' | 'String' | 'Identifier' | 'Keyword'>
+        type: Exclude<TokenType, 'Number' | 'BigInt' | 'String' | 'RegEx' | 'Identifier' | 'Keyword'>
         line: number
         column: number
     }
@@ -56,13 +57,15 @@ export function Lexer(source: string): Lexer {
             let column = 1
             let lineStart = true
 
-            const push = (type: TokenType, value?: string | number | bigint, l = line, c = column) => {
+            const push = (type: TokenType, value?: string | number | bigint | { source: string; flags: string }, l = line, c = column) => {
                 if (type === 'Number') {
                     tokens.push({ type, value: value as number, line: l, column: c })
                 } else if (type === 'BigInt') {
                     tokens.push({ type, value: value as bigint, line: l, column: c })
                 } else if (type === 'String') {
                     tokens.push({ type, value: value as string, line: l, column: c })
+                } else if (type === 'RegEx') {
+                    tokens.push({ type, value: value as { source: string; flags: string }, line: l, column: c })
                 } else if (type === 'Identifier' || type === 'Keyword') {
                     tokens.push({ type, value: String(value), line: l, column: c })
                 } else {
@@ -206,6 +209,41 @@ export function Lexer(source: string): Lexer {
 
                     push('String', value, tokenLine, tokenColumn)
                     continue
+                }
+
+                // A slash starts a regular-expression literal only where an
+                // expression can begin; after a value it remains division.
+                if (character === '/') {
+                    const previous = tokens[tokens.length - 1]
+                    const endsExpression = previous && (
+                        ['Number', 'BigInt', 'String', 'RegEx', 'Identifier', 'RightParen', 'RightBracket', 'RightBrace', 'Increment', 'Decrement'].includes(previous.type) ||
+                        previous.type === 'Keyword' && ['true', 'false', 'null'].includes(previous.value)
+                    )
+                    if (!endsExpression && source[this.pos + 1] !== '=' && source[this.pos + 1] !== '/') {
+                        advance()
+                        let pattern = ''
+                        let escaped = false
+                        let inClass = false
+                        let closed = false
+                        while (!this.isAtEnd) {
+                            const current = advance()
+                            if (current === '\n' || current === '\r') throw new SyntaxError(`Unterminated regular expression at ${tokenLine}:${tokenColumn}`)
+                            if (!escaped && current === '[') inClass = true
+                            else if (!escaped && current === ']') inClass = false
+                            else if (!escaped && current === '/' && !inClass) { closed = true; break }
+                            pattern += current
+                            escaped = !escaped && current === '\\'
+                            if (current !== '\\') escaped = false
+                        }
+                        if (!closed) throw new SyntaxError(`Unterminated regular expression at ${tokenLine}:${tokenColumn}`)
+                        let flags = ''
+                        while (/[A-Za-z]/.test(this.current)) flags += advance()
+                        try { new RegExp(pattern, flags) } catch (error) {
+                            throw new SyntaxError(`Invalid regular expression at ${tokenLine}:${tokenColumn}: ${error instanceof Error ? error.message : String(error)}`)
+                        }
+                        push('RegEx', { source: pattern, flags }, tokenLine, tokenColumn)
+                        continue
+                    }
                 }
 
                 const pairs: Record<string, TokenType> = {

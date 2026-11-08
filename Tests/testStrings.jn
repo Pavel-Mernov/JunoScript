@@ -23,3 +23,30 @@ const str = 'My test string'
 
 for const char of str
     console.log(char)
+
+# Strings are iterable and expose the TypeScript string API.
+console.log(str.toArray().join("|"))
+console.log(str.join("|"))
+console.log(str.includes("test"))
+console.log(str.includes(/TEST/i))
+console.log(str.find("test"))
+console.log(str.find(/t.st/))
+console.log(str.findLast(/st/))
+console.log(str.findIndex("string"))
+console.log(str.findIndex(/t.st/))
+console.log(str.findLastIndex(/st/))
+console.log(str.startsWith("My"))
+console.log(str.endsWith("string"))
+console.log(str.toUpperCase())
+console.log("  padded  ".trim().padStart(10, "."))
+console.log("a,b,c".split(",").join("-"))
+console.log("hello".replace(/l/g, "L"))
+console.log("prefix <Juno> suffix".test(/<([a-z]+)>/i))
+console.log("prefix <Juno> suffix".test("<Juno>"))
+console.log("prefix <Juno> suffix".match(/<([a-z]+)>/i)?.at(0) ?? "not found")
+console.log("prefix <Juno> suffix".exec(/<([a-z]+)>/i)?.at(1) ?? "not found")
+
+const regexpLiteral: RegEx = /<([a-z]+)>/i
+const regexpConstructed: RegEx = RegEx("<([a-z]+)>", "i")
+console.log(regexpLiteral.test("<Juno>"))
+console.log(regexpConstructed.exec("prefix <Script> suffix")?.at(0) ?? "not found")

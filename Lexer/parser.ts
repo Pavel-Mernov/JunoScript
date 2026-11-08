@@ -6,6 +6,7 @@ export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: bo
 export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression; rest?: boolean }
 export type Expression =
     | { kind: 'Literal'; value: string | number | bigint | boolean | null; loc?: Loc }
+    | { kind: 'RegEx'; source: string; flags: string; loc?: Loc }
     | { kind: 'Template'; parts: (string | Expression)[]; loc?: Loc }
     | { kind: 'Identifier'; name: string; loc?: Loc } | { kind: 'Array'; elements: Expression[]; loc?: Loc }
       | { kind: 'Object'; properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set' }[]; loc?: Loc }
@@ -411,6 +412,7 @@ export class Parser {
                     case 'Template':
                         for (const part of node.parts) if (typeof part !== 'string') shiftExpression(part)
                         break
+                    case 'RegEx': break
                     case 'Array': node.elements.forEach(shiftExpression); break
                     case 'Object':
                         for (const property of node.properties) {
@@ -484,6 +486,10 @@ export class Parser {
             const token = this.tokens[this.pos - 1]
             const value = this.value(token) as string
             return value.includes('${') ? this.templateExpression(value, this.loc(token)) : { kind: 'Literal', value: value.replace(/\uE000/g, '$'), loc: this.loc(token) }
+        }
+        if (this.match('RegEx')) {
+            const token = this.tokens[this.pos - 1] as Extract<Token, { type: 'RegEx' }>
+            return { kind: 'RegEx', source: token.value.source, flags: token.value.flags, loc: this.loc(token) }
         }
         if (this.match('Keyword', 'true')) return { kind: 'Literal', value: true, loc: this.loc(this.tokens[this.pos - 1]) }
         if (this.match('Keyword', 'false')) return { kind: 'Literal', value: false, loc: this.loc(this.tokens[this.pos - 1]) }
@@ -594,6 +600,7 @@ function primitive(name: string): InferredType { return { kind: 'primitive', nam
 
 function inferredTypeNode(expression: Expression): TypeNode {
     switch (expression.kind) {
+        case 'RegEx': return { kind: 'NamedType', name: 'RegEx' }
         case 'Literal': return { kind: 'NamedType', name: typeof expression.value === 'bigint' ? 'BigInt' : expression.value === null ? 'null' : typeof expression.value }
         case 'Template': return { kind: 'NamedType', name: 'string' }
         case 'Array': return { kind: 'ArrayType', element: expression.elements[0] ? inferredTypeNode(expression.elements[0]) : { kind: 'NamedType', name: 'any' } }
@@ -614,6 +621,7 @@ function inferExpressionType(
     variables: Map<string, InferredType>
 ): InferredType {
     switch (expression.kind) {
+        case 'RegEx': return primitive('RegEx')
         case 'Literal':
             if (typeof expression.value === 'bigint') return primitive('BigInt')
             if (typeof expression.value === 'number' || typeof expression.value === 'string' || typeof expression.value === 'boolean') return { kind: 'literal', value: expression.value }

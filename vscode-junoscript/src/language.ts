@@ -97,6 +97,12 @@ function globals(): Env {
         returnType: named('boolean'),
         docs: 'Returns true if `value` matches the type argument, for example `isType<number>(answer)`.'
     })
+    env.set('RegEx', {
+        kind: 'fun',
+        params: [{ name: 'pattern', type: named('string') }, { name: 'flags', type: named('string'), defaultValue: { kind: 'Literal', value: '' } }],
+        returnType: named('RegEx'),
+        docs: 'Creates a regular expression without the `new` keyword.'
+    })
     return env
 }
 
@@ -246,6 +252,78 @@ function isFunctionSymbol(value: TypeNode | FunctionSymbol | undefined): value i
 
 function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | FunctionSymbol | undefined {
     const resolved = resolveType(type, env)
+    if (isNamedType(resolved, 'string')) {
+        const fn = (params: Parameter[], returnType: TypeNode): FunctionSymbol => ({ kind: 'fun', params, returnType })
+        const p = (paramName: string, paramType: TypeNode, optional = false): Parameter => ({ name: paramName, type: paramType, ...(optional ? { defaultValue: { kind: 'Literal', value: null } as Expression } : {}) })
+        const string = named('string'), number = named('number'), boolean = named('boolean')
+        const matcher = unionOf([string, named('RegEx')])
+        switch (name) {
+            case 'length': return number
+            case 'at':
+            case 'charAt': return fn([p('index', number)], string)
+            case 'charCodeAt':
+            case 'codePointAt': return fn([p('index', number)], number)
+            case 'concat': return fn([{ name: 'strings', type: arrayOf(string), rest: true }], string)
+            case 'endsWith':
+            case 'startsWith': return fn([p('search', string), p('position', number, true)], boolean)
+            case 'includes': return fn([p('search', matcher), p('position', number, true)], boolean)
+            case 'test': return fn([p('pattern', matcher)], boolean)
+            case 'exec': return fn([p('pattern', matcher)], unionOf([arrayOf(string), named('null')]))
+            case 'find':
+            case 'findLast': return fn([p('search', matcher)], unionOf([string, named('null')]))
+            case 'findIndex':
+            case 'findLastIndex': return fn([p('search', matcher)], number)
+            case 'join': return fn([p('separator', string, true)], string)
+            case 'indexOf':
+            case 'lastIndexOf': return fn([p('search', string), p('position', number, true)], number)
+            case 'localeCompare': return fn([p('other', string)], number)
+            case 'match':
+            case 'matchAll': return fn([p('regexp', matcher)], unionOf([arrayOf(string), named('null')]))
+            case 'normalize': return fn([p('form', string, true)], string)
+            case 'padEnd':
+            case 'padStart': return fn([p('length', number), p('fill', string, true)], string)
+            case 'repeat': return fn([p('count', number)], string)
+            case 'replace':
+            case 'replaceAll': return fn([p('search', matcher), p('replacement', string)], string)
+            case 'search': return fn([p('regexp', matcher)], number)
+            case 'slice':
+            case 'substring':
+            case 'substr': return fn([p('start', number, true), p('end', number, true)], string)
+            case 'split': return fn([p('separator', matcher, true), p('limit', number, true)], arrayOf(string))
+            case 'toLocaleLowerCase':
+            case 'toLocaleUpperCase':
+            case 'toLowerCase':
+            case 'toUpperCase':
+            case 'toString':
+            case 'trim':
+            case 'trimEnd':
+            case 'trimStart':
+            case 'valueOf': return fn([], string)
+            case 'toArray': return fn([], arrayOf(string))
+            case 'iterator': return fn([], { kind: 'FunctionType', params: [], result: unionOf([{ kind: 'ObjectType', members: [field('value', string)] }, named('null')]) })
+        }
+    }
+    if (isNamedType(resolved, 'RegEx')) {
+        const fn = (params: Parameter[], returnType: TypeNode): FunctionSymbol => ({ kind: 'fun', params, returnType })
+        const string = named('string'), boolean = named('boolean'), number = named('number'), any = named('any')
+        const input = unionOf([string, named('RegEx')])
+        switch (name) {
+            case 'source':
+            case 'flags': return string
+            case 'global':
+            case 'ignoreCase':
+            case 'multiline':
+            case 'dotAll':
+            case 'sticky':
+            case 'unicode':
+            case 'hasIndices':
+            case 'unicodeSets': return boolean
+            case 'lastIndex': return number
+            case 'test': return fn([{ name: 'value', type: input }], boolean)
+            case 'exec': return fn([{ name: 'value', type: input }], unionOf([arrayOf(string), named('null')]))
+            case 'compile': return fn([{ name: 'pattern', type: input }, { name: 'flags', type: string, defaultValue: { kind: 'Literal', value: '' } }], named('RegEx'))
+        }
+    }
     if (resolved.kind === 'IntersectionType') {
         for (const part of resolved.types) {
             const member = lookupMember(part, name, env)
@@ -503,6 +581,7 @@ function binaryErrorMessage(operator: string, left: TypeNode, right: TypeNode): 
 
 function inferExpression(expression: Expression, env: Env): TypeNode {
     switch (expression.kind) {
+        case 'RegEx': return named('RegEx')
         case 'Template': return named('string')
         case 'Literal': return inferLiteral(expression.value)
         case 'Assignment': return inferExpression(expression.value, env)
@@ -609,6 +688,14 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             if (expression.callee.kind === 'Identifier' && env.get(expression.callee.name)?.kind === 'type') return named(expression.callee.name)
             const callee = inferExpression(expression.callee, env)
             if (callee.kind === 'FunctionType') return callee.result
+            if (callee.kind === 'UnionType') {
+                const results = callee.types.flatMap(part => {
+                    const resolved = resolveType(part, env)
+                    if (resolved.kind === 'FunctionType') return [resolved.result]
+                    return isNamedType(resolved, 'null') && expression.callee.kind === 'Member' && expression.callee.optional ? [named('null')] : []
+                })
+                if (results.length) return unionOf(results)
+            }
             if (expression.callee.kind === 'Identifier') {
                 const symbol = env.get(expression.callee.name)
                 if (symbol?.kind === 'fun') return symbol.returnType
@@ -651,7 +738,8 @@ function inferFunctionReturnType(statements: Statement[], outer: Env, params: Pa
 }
 
 function unionOf(types: TypeNode[]): TypeNode {
-    const flattened = types.flatMap(type => type.kind === 'UnionType' ? type.types : [type])
+    const flatten = (type: TypeNode): TypeNode[] => type.kind === 'UnionType' ? type.types.flatMap(flatten) : [type]
+    const flattened = types.flatMap(flatten)
     if (!flattened.length) return named('any')
     const unique = flattened.filter((type, index) => flattened.findIndex(item => printType(item) === printType(type)) === index)
     return unique.length === 1 ? unique[0] : { kind: 'UnionType', types: unique }
@@ -1031,6 +1119,9 @@ class Analyzer {
     private walkExpression(expression: Expression | undefined, env: Env, thisType?: TypeNode): void {
         if (!expression) return
         switch (expression.kind) {
+            case 'RegEx':
+                this.addHover(`/${expression.source}/${expression.flags}`, expression.loc, `(RegEx) /${expression.source}/${expression.flags}`)
+                return
             case 'Literal':
                 this.addHover(literalLabel(expression.value), expression.loc, `(${printType(inferLiteral(expression.value))}) ${literalPreview(expression.value)}`)
                 return
@@ -1157,8 +1248,10 @@ class Analyzer {
                     this.addDiagnostic(expressionStart(expression.callee), 'Cannot call a nullable value; use ! or ?? to handle null.')
                 }
                 if (calleeType.kind === 'UnionType') {
+                    const optionalCall = expression.callee.kind === 'Member' && expression.callee.optional
                     const nonCallable = calleeType.types.find(part => {
                         const resolved = resolveType(part, env)
+                        if (optionalCall && isNamedType(resolved, 'null')) return false
                         return !isNamedType(resolved, 'any') && resolved.kind !== 'FunctionType'
                     })
                     if (nonCallable) {
@@ -1245,6 +1338,7 @@ function literalPreview(value: string | number | bigint | boolean | null): strin
 
 function expressionStart(expression: Expression): Loc | undefined {
     switch (expression.kind) {
+        case 'RegEx':
         case 'Literal':
         case 'Identifier':
         case 'Array':

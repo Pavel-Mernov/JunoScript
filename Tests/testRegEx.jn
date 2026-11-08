@@ -1,0 +1,10 @@
+import { console } from 'juno'
+
+const literal: RegEx = /<...>/
+const constructed: RegEx = RegEx('<...>')
+const flagged: RegEx = /hello/gi
+
+console.log(literal.test('<abc>'))
+console.log(constructed.test('<xyz>'))
+console.log(flagged.test('Hello'))
+console.log(12 / 3)
