@@ -6,7 +6,7 @@ export type TokenType =
     | 'PlusEqual' | 'MinusEqual' | 'MultiplyEqual' | 'DivideEqual' | 'PercentEqual' | 'PipeEqual' | 'AmpersandEqual'
     | 'Increment' | 'Decrement'
     | 'Less' | 'LessEqual' | 'Greater' | 'GreaterEqual' | 'Nullish'
-    | 'Arrow' | 'FatArrow' | 'Colon' | 'Comma' | 'Dot' | 'Question'
+    | 'Arrow' | 'FatArrow' | 'Colon' | 'Comma' | 'Dot' | 'Ellipsis' | 'Question'
     | 'Pipe' | 'Ampersand' | 'Bang'
     | 'LeftParen' | 'RightParen' | 'LeftBracket' | 'RightBracket'
     | 'LeftBrace' | 'RightBrace'
@@ -26,7 +26,7 @@ export type Token =
 const keywords = new Set([
     'let', 'const', 'fun', 'type', 'return', 'if', 'else', 'for', 'of',
     'while', 'true', 'false', 'null', 'readonly', 'static', 'as', 'in',
-    'import', 'from', 'export', 'default'
+    'import', 'from', 'export', 'default', 'constructor'
 ])
 
 export type Lexer = {
@@ -128,6 +128,12 @@ export function Lexer(source: string): Lexer {
                 const character = this.current
                 const tokenLine = line
                 const tokenColumn = column
+
+                if (source.slice(this.pos, this.pos + 3) === '...') {
+                    advance(); advance(); advance()
+                    push('Ellipsis', undefined, tokenLine, tokenColumn)
+                    continue
+                }
 
                 if (character === ' ' || character === '\t' || character === '\r') {
                     advance()

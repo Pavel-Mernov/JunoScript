@@ -7,6 +7,7 @@ type Binding = { value: unknown; mutable: boolean; declaredType?: TypeNode }
 type TypeAlias = { value: TypeNode; generics: string[] }
 type Environment = { bindings: Map<string, Binding>; types: Map<string, TypeAlias>; parent?: Environment }
 type RuntimeFunction = { __junoFunction: true; params: Parameter[]; body: Statement[]; closure: Environment; thisValue?: unknown }
+type RuntimeConstructor = { __junoConstructor: true; inheritedType: TypeNode; overloads: RuntimeFunction[] }
 class ReturnValue { constructor(readonly value: unknown) {} }
 
 export class Interpreter {
@@ -36,10 +37,7 @@ export class Interpreter {
     }
 
     private executeStatements(statements: Statement[], env: Environment): unknown {
-        for (const statement of statements) {
-            try { this.execute(statement, env) }
-            catch (error) { if (error instanceof ReturnValue) return error.value; throw error }
-        }
+        for (const statement of statements) this.execute(statement, env)
         return null
     }
 
@@ -77,6 +75,12 @@ export class Interpreter {
                 this.declare(env, statement.name, value, statement.mutable, declaredType)
                 return
             }
+            case 'Destructure': {
+                const value = this.evaluate(statement.initializer, env)
+                if (value === null || typeof value !== 'object') throw new TypeError('Object destructuring requires an object')
+                for (const binding of statement.bindings) this.declare(env, binding.name, (value as any)[binding.name], statement.mutable)
+                return
+            }
             case 'TypeDeclaration': {
                 env.types.set(statement.name, { value: statement.value, generics: statement.generics })
                 this.registerTypeDeclarations(statement.value, env)
@@ -84,6 +88,12 @@ export class Interpreter {
                 return
             }
             case 'FunctionDeclaration': this.declare(env, statement.name, { __junoFunction: true, params: statement.params, body: statement.body, closure: env } satisfies RuntimeFunction, false); return
+            case 'ConstructorDeclaration': {
+                this.registerTypeDeclarations(statement.inheritedType, env)
+                const overloads = statement.overloads.map(overload => ({ __junoFunction: true as const, params: overload.params, body: overload.body, closure: env }))
+                this.declare(env, statement.name, { __junoConstructor: true, inheritedType: statement.inheritedType, overloads } satisfies RuntimeConstructor, false)
+                return
+            }
             case 'Return': throw new ReturnValue(statement.value ? this.evaluate(statement.value, env) : null)
             case 'ExpressionStatement': this.evaluate(statement.expression, env); return
             case 'If': this.executeStatements(this.requireCondition(this.evaluate(statement.condition, env)) ? statement.consequent : (statement.alternate ?? []), this.childEnvironment(env)); return
@@ -110,7 +120,11 @@ export class Interpreter {
             if (type.name === 'Iterable') {
                 const declarations = parse(readFileSync(resolve(__dirname, '../../iterable.jn'), 'utf8'))
                 for (const declaration of declarations) if (declaration.kind === 'Export' && declaration.declaration.kind === 'TypeDeclaration') {
-                    env.types.set(declaration.declaration.name, { value: declaration.declaration.value, generics: declaration.declaration.generics })
+                    const alias = { value: declaration.declaration.value, generics: declaration.declaration.generics }
+                    env.types.set(declaration.declaration.name, alias)
+                    if (!env.bindings.has(declaration.declaration.name)) {
+                        this.declare(env, declaration.declaration.name, { __junoTypeConstructor: true, typeName: declaration.declaration.name, typeNode: alias.value, generics: alias.generics }, false)
+                    }
                 }
             }
             return
@@ -218,10 +232,18 @@ export class Interpreter {
             case 'Object': {
                 const object: Record<string, any> = {}
                 const accessors = new Map<string, PropertyDescriptor>()
+                const readonly = new Set<string>()
                 Object.defineProperty(object, 'keys', { enumerable: false, value: function(this: object) { return Object.keys(this) } })
                 object.toString = this.defaultToString()
                 this.installDefaultHas(object)
                 for (const property of expression.properties) {
+                    if (property.spread) {
+                        let source = this.evaluate(property.value, env)
+                        if (source?.__junoTypeConstructor) source = this.applyTypeDefaults({}, { kind: 'NamedType', name: source.typeName }, env)
+                        if (!source || typeof source !== 'object') throw new TypeError('Object spread requires an object')
+                        for (const key of Object.keys(source)) object[key] = source[key]
+                        continue
+                    }
                     if (property.accessor && property.value.kind === 'Function') {
                         const previous = accessors.get(property.key) ?? Object.getOwnPropertyDescriptor(object, property.key) ?? { enumerable: true, configurable: true }
                         const fn = property.value
@@ -239,8 +261,10 @@ export class Interpreter {
                         const fn = property.value
                         object[property.key] = { __junoFunction: true, params: fn.params, body: fn.body, closure: env, thisValue: object } satisfies RuntimeFunction
                     } else object[property.key] = this.evaluate(property.value, env)
+                    if (property.readonly) readonly.add(property.key)
                 }
                 for (const [key, descriptor] of accessors) Object.defineProperty(object, key, descriptor)
+                for (const key of readonly) Object.defineProperty(object, key, { ...Object.getOwnPropertyDescriptor(object, key), writable: false, enumerable: true, configurable: false })
                 return object
             }
             case 'Unary': {
@@ -383,6 +407,9 @@ export class Interpreter {
                     const nonCallable = staticCalleeType.types.find(part => !this.isCallableType(part))
                     if (nonCallable) throw new TypeError(`This expression is not callable. Type '${typeName(nonCallable)}' has no call signatures.`)
                 }
+                if (expression.callee.kind === 'Member' && expression.callee.property === 'isType' && expression.typeArguments?.length) {
+                    return this.matchesTypeNode(this.evaluate(expression.callee.object, env), expression.typeArguments[0], env)
+                }
                 if (expression.callee.kind === 'Identifier' && expression.callee.name === 'isType' && expression.typeArguments?.length) {
                     const value = expression.args[0] ? this.evaluate(expression.args[0], env) : null
                     return this.matchesTypeNode(value, expression.typeArguments[0], env)
@@ -405,6 +432,22 @@ export class Interpreter {
                 const args = expression.args.map(arg => this.evaluate(arg, env))
                 if (expression.typeArguments?.length) args.push(expression.typeArguments[0].kind === 'NamedType' ? expression.typeArguments[0].name : 'object')
                 if (typeof callee === 'function') return callee.apply(thisValue, args) ?? null
+                if (callee?.__junoConstructor) {
+                    const constructor = callee as RuntimeConstructor
+                    const overload = constructor.overloads.find(candidate => {
+                        const nullable = (type: TypeNode | undefined): boolean => Boolean(type && (
+                            type.kind === 'NamedType' && type.name === 'null' ||
+                            type.kind === 'UnionType' && type.types.some(part => nullable(part))
+                        ))
+                        const required = candidate.params.filter(param => !param.rest && param.defaultValue === undefined && !nullable(param.type)).length
+                        const maximum = candidate.params.some(param => param.rest) ? Number.POSITIVE_INFINITY : candidate.params.length
+                        return args.length >= required && args.length <= maximum
+                    })
+                    if (!overload) throw new TypeError(`No constructor overload accepts ${args.length} argument(s)`)
+                    const value = this.callFunction(overload, args)
+                    if (!value || typeof value !== 'object') throw new TypeError('A constructor must return an object')
+                    return this.applyTypeDefaults(value, constructor.inheritedType, env)
+                }
                 if (callee?.__junoTypeConstructor) {
                     const input = args[0] ?? {}
                     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new TypeError(`Constructor '${callee.typeName}' expects an object`)
@@ -439,7 +482,13 @@ export class Interpreter {
                 this.declare(local, param.name, value, true, param.type)
             }
         }
-        return this.executeStatements(fn.body, local) ?? null
+        try {
+            this.executeStatements(fn.body, local)
+            return null
+        } catch (error) {
+            if (error instanceof ReturnValue) return error.value
+            throw error
+        }
     }
 
     private declare(env: Environment, name: string, value: unknown, mutable: boolean, declaredType?: TypeNode): void {
@@ -595,6 +644,9 @@ export class Interpreter {
                 return expression.operator === '-' ? { kind: 'NamedType', name: 'number' } : { kind: 'NamedType', name: 'boolean' }
             case 'Call':
                 if (expression.callee.kind === 'Member' && expression.callee.property === 'as' && expression.typeArguments?.length) return expression.typeArguments[0]
+                if (expression.callee.kind === 'Identifier' && (this.lookup(env, expression.callee.name)?.value as any)?.__junoConstructor) {
+                    return { kind: 'NamedType', name: 'any' }
+                }
                 if (expression.callee.kind === 'Identifier' && (this.lookup(env, expression.callee.name)?.value as any)?.__junoTypeConstructor) {
                     return expression.typeArguments?.length
                         ? { kind: 'GenericType', name: expression.callee.name, args: expression.typeArguments }
@@ -921,7 +973,7 @@ export class Interpreter {
             }
         }
         const declaredType = this.typeOf(owner, env)
-        if (declaredType && !this.findTypeMember(declaredType, property, env)) {
+        if (declaredType && !(declaredType.kind === 'NamedType' && declaredType.name === 'any') && !this.findTypeMember(declaredType, property, env)) {
             throw new TypeError(`Property '${property}' does not exist on declared type`)
         }
         if (!(property in Object(object))) {

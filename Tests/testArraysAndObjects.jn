@@ -62,6 +62,13 @@ console.log("as<T>() on a number =", 42.as<number>())
 console.log("as<T>() on a string =", "Juno".as<string>())
 console.log("as<T>() on an array =", [1, 2, 3].as<number[]>().toString())
 
+const extendedInfo = {
+    ...typedPerson,
+    surname : 'Sullivan'
+}
+
+console.log('ExtendedInfo:', extendedInfo)
+
 # Each invalid-index case should stop execution with TypeError.
 # Uncomment one case at a time to inspect the error.
 # values[-1]
@@ -79,4 +86,38 @@ type Getter = {
 let getter = Getter()
 console.log("getter.value =", getter.value)
 getter.value = "Hello, world!"
+
+
+constructor Range : Iterable<number> {
+    fun (start : number, end : number?, step : number = 1) =
+        if !end.isType<number>()
+            end = start
+            start = 0
+
+        return {
+            ...Iterable,
+            readonly start,
+            readonly end,
+            readonly step,
+            fun iterator() =
+                let cur = this.start
+
+                const { end, start, step } = this
+
+                return () =>
+                    const value = cur
+
+                    if (step > 0 & value >= end) | (step < 0 & value <= end)
+                        return null
+
+                    cur += step
+
+                    return { value }
+        }
+}
+
+const range = Range(5)
+console.log("Range fields =", range.start, range.end, range.step)
+console.log("Range values =", range.toArray())
+
 console.log("=== Array and object index tests complete ===")

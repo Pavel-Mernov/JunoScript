@@ -58,7 +58,8 @@ var keywords = /* @__PURE__ */ new Set([
   "import",
   "from",
   "export",
-  "default"
+  "default",
+  "constructor"
 ]);
 function Lexer(source) {
   return {
@@ -136,6 +137,13 @@ function Lexer(source) {
         const character = this.current;
         const tokenLine = line;
         const tokenColumn = column;
+        if (source.slice(this.pos, this.pos + 3) === "...") {
+          advance();
+          advance();
+          advance();
+          push("Ellipsis", void 0, tokenLine, tokenColumn);
+          continue;
+        }
         if (character === " " || character === "	" || character === "\r") {
           advance();
           continue;
@@ -390,7 +398,25 @@ var Parser = class _Parser {
       return { kind: "Export", declaration, default: isDefault };
     }
     if (this.match("Keyword", "let") || this.match("Keyword", "const")) {
-      const mutable = this.value(this.tokens[this.pos - 1]) === "let", { name, loc } = this.identifier();
+      const mutable = this.value(this.tokens[this.pos - 1]) === "let";
+      if (this.match("LeftBrace")) {
+        const bindings = [];
+        const patternSeparators = () => {
+          while (this.match("Newline") || this.match("Indent") || this.match("Dedent")) {
+          }
+        };
+        patternSeparators();
+        while (!this.is("RightBrace")) {
+          bindings.push(this.identifier());
+          patternSeparators();
+          if (this.match("Comma")) patternSeparators();
+          else if (!this.is("RightBrace")) this.fail("Expected ',' or '}' in object destructuring");
+        }
+        this.take("RightBrace");
+        this.take("Equal", "Expected '=' after object destructuring");
+        return { kind: "Destructure", bindings, mutable, initializer: this.expression() };
+      }
+      const { name, loc } = this.identifier();
       const type = this.match("Colon") ? this.type() : void 0;
       let initializer;
       if (this.match("Equal")) {
@@ -425,6 +451,26 @@ var Parser = class _Parser {
       }
       return { kind: "TypeDeclaration", name, loc, generics, genericLocs, value };
     }
+    if (this.match("Keyword", "constructor")) {
+      const { name, loc } = this.identifier();
+      this.take("Colon", "Expected ':' before inherited constructor type");
+      const inheritedType = this.type();
+      this.take("LeftBrace", "Expected '{' before constructor overloads");
+      const overloads = [];
+      this.objectSeparators();
+      while (!this.is("RightBrace") && !this.is("EOF")) {
+        this.take("Keyword", "Expected anonymous 'fun' constructor overload");
+        if (this.value(this.tokens[this.pos - 1]) !== "fun") this.fail("Expected anonymous 'fun' constructor overload");
+        const params = this.parameters();
+        const returnType = this.match("Colon") ? this.type() : void 0;
+        this.take("Equal", "Expected '=' before constructor body");
+        overloads.push({ kind: "Function", params, returnType, body: this.block() });
+        this.objectSeparators();
+      }
+      this.take("RightBrace");
+      if (!overloads.length) this.fail("A constructor needs at least one anonymous function");
+      return { kind: "ConstructorDeclaration", name, loc, inheritedType, overloads };
+    }
     if (this.match("Keyword", "return")) return { kind: "Return", value: this.is("Newline") || this.is("Dedent") || this.is("EOF") ? void 0 : this.expression() };
     if (this.is("Identifier") && assignmentOperators[this.tokens[this.pos + 1]?.type]) {
       const { name, loc } = this.identifier(), operatorToken = this.current, operator = assignmentOperators[operatorToken.type];
@@ -449,7 +495,7 @@ var Parser = class _Parser {
     if (assignmentOperator) {
       const operatorToken = this.current;
       this.pos++;
-      if (expression.kind === "Member") return { kind: "ExpressionStatement", expression: { kind: "MemberAssignment", object: expression.object, property: expression.property, loc: this.loc(operatorToken), operator: assignmentOperator, value: this.expression() } };
+      if (expression.kind === "Member") return { kind: "ExpressionStatement", expression: { kind: "MemberAssignment", object: expression.object, property: expression.property, propertyLoc: expression.loc, loc: this.loc(operatorToken), operator: assignmentOperator, value: this.expression() } };
       if (expression.kind === "Index") return { kind: "ExpressionStatement", expression: { kind: "MemberAssignment", object: expression.object, index: expression.index, loc: this.loc(operatorToken), operator: assignmentOperator, value: this.expression() } };
       this.fail("Only variables and object properties can be assigned here");
     }
@@ -791,6 +837,7 @@ var Parser = class _Parser {
             shiftExpression(node.value);
             break;
           case "MemberAssignment":
+            node.propertyLoc = shiftLoc(node.propertyLoc);
             shiftExpression(node.object);
             if (node.index) shiftExpression(node.index);
             shiftExpression(node.value);
@@ -975,6 +1022,15 @@ var Parser = class _Parser {
       const properties = [];
       this.objectSeparators();
       while (!this.is("RightBrace") && !this.is("EOF")) {
+        if (this.match("Ellipsis")) {
+          const value2 = this.expression();
+          properties.push({ key: "", keyLoc: "loc" in value2 ? value2.loc : void 0, value: value2, spread: true });
+          this.objectSeparators();
+          if (this.match("Comma")) this.objectSeparators();
+          continue;
+        }
+        const readonly = this.match("Keyword", "readonly");
+        const explicitFunction = this.match("Keyword", "fun");
         const accessor = this.is("Identifier") && ["get", "set"].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === "Identifier" ? String(this.value(this.tokens[this.pos++])) : void 0;
         const property = this.propertyName();
         let value;
@@ -991,8 +1047,9 @@ var Parser = class _Parser {
           const params = this.parameters();
           this.take("Equal", "Expected '=' for method body");
           value = { kind: "Function", params, body: this.block() };
-        } else value = { kind: "Identifier", name: property.name, loc: property.loc };
-        properties.push({ key: property.name, keyLoc: property.loc, value, accessor });
+        } else if (explicitFunction) this.fail("Expected '(' after object function name");
+        else value = { kind: "Identifier", name: property.name, loc: property.loc };
+        properties.push({ key: property.name, keyLoc: property.loc, value, accessor, readonly });
         this.objectSeparators();
         if (this.match("Comma")) this.objectSeparators();
       }
@@ -1582,6 +1639,9 @@ function printSymbol(name, symbol) {
     }
     case "module":
       return { code: `import ${name} from '${symbol.module}'`, docs: symbol.docs };
+    case "constructor":
+      return { code: `constructor ${name}: ${printType(symbol.inheritedType)}
+${symbol.overloads.map((item) => `  (${item.params.map(printParam).join(", ")}): ${printType(item.returnType)}`).join("\n")}`, docs: symbol.docs };
   }
 }
 function instantiate(type, generics, args) {
@@ -1653,6 +1713,7 @@ function isFunctionSymbol(value) {
 }
 function lookupMember(type, name, env) {
   const resolved = resolveType(type, env);
+  if (name === "isType") return { kind: "fun", params: [], returnType: named("boolean") };
   if (isNamedType(resolved, "string")) {
     const fn = (params, returnType) => ({ kind: "fun", params, returnType });
     const p = (paramName, paramType, optional = false) => ({ name: paramName, type: paramType, ...optional ? { defaultValue: { kind: "Literal", value: null } } : {} });
@@ -1849,6 +1910,17 @@ function lookupMember(type, name, env) {
   }
   return void 0;
 }
+function lookupAccessor(type, name, accessor, env) {
+  const resolved = resolveType(type, env);
+  if (resolved.kind === "ObjectType") return resolved.members.find((member) => member.name === name && member.accessor === accessor);
+  if (resolved.kind === "IntersectionType" || resolved.kind === "UnionType") {
+    for (const part of resolved.types) {
+      const member = lookupAccessor(part, name, accessor, env);
+      if (member) return member;
+    }
+  }
+  return void 0;
+}
 function narrowHasProperty(type, name, env) {
   const resolved = resolveType(type, env);
   if (resolved.kind === "IntersectionType") {
@@ -2029,6 +2101,7 @@ function inferExpression(expression, env) {
       if (symbol.kind === "var") return symbol.type;
       if (symbol.kind === "fun") return { kind: "FunctionType", params: symbol.params.map(parameterType), result: symbol.returnType };
       if (symbol.kind === "module") return moduleType(symbol.module);
+      if (symbol.kind === "constructor") return { kind: "FunctionType", params: symbol.overloads[0]?.params.map(parameterType) ?? [], result: unionOf(symbol.overloads.map((item) => item.returnType)) };
       return named(expression.name);
     }
     case "Array": {
@@ -2050,6 +2123,16 @@ function inferExpression(expression, env) {
     }
     case "Object": {
       const members = expression.properties.flatMap((property) => {
+        if (property.spread) {
+          const spread = resolveType(inferExpression(property.value, env), env);
+          const members2 = (type) => {
+            const resolved = resolveType(type, env);
+            if (resolved.kind === "ObjectType") return resolved.members;
+            if (resolved.kind === "IntersectionType" || resolved.kind === "UnionType") return resolved.types.flatMap(members2);
+            return [];
+          };
+          return members2(spread);
+        }
         if (property.accessor === "get" && property.value.kind === "Function") {
           const result = property.value.returnType ?? inferFunctionReturnType2(property.value.body, env, property.value.params);
           return [{ ...field(property.key, result), accessor: "get" }];
@@ -2061,19 +2144,23 @@ function inferExpression(expression, env) {
         if (property.value.kind === "Function") {
           return [method(property.key, property.value.params, property.value.returnType ?? named("any"))];
         }
-        return [field(property.key, inferExpression(property.value, env))];
+        return [field(property.key, inferExpression(property.value, env), property.readonly)];
       });
       const objectType = { kind: "ObjectType", members };
       const methodEnv = new Map(env);
       methodEnv.set("this", { kind: "var", mutable: false, type: objectType });
       for (const property of expression.properties) {
         if (property.accessor === "set" || property.value.kind !== "Function" || property.value.returnType) continue;
-        const index = members.findIndex((member) => member.name === property.key);
+        const index = members.findLastIndex((member) => member.name === property.key);
         if (index >= 0) {
           const inferred = inferFunctionReturnType2(property.value.body, methodEnv, property.value.params);
           members[index] = property.accessor === "get" ? { ...field(property.key, inferred), accessor: "get" } : method(property.key, property.value.params, inferred);
         }
       }
+      objectType.members = members.filter((member, index) => {
+        const key = `${member.name}:${member.accessor ?? ""}`;
+        return members.findLastIndex((item) => `${item.name}:${item.accessor ?? ""}` === key) === index;
+      });
       return objectType;
     }
     case "Unary":
@@ -2111,9 +2198,30 @@ function inferExpression(expression, env) {
       return indexType(objectType);
     }
     case "Call": {
+      if (expression.callee.kind === "Member" && expression.callee.property === "isType") return named("boolean");
       if (expression.callee.kind === "Identifier" && expression.callee.name === "isType") return named("boolean");
       if (expression.callee.kind === "Member" && expression.callee.property === "as" && expression.typeArguments?.length) return expression.typeArguments[0];
       if (expression.callee.kind === "Identifier" && env.get(expression.callee.name)?.kind === "type") return named(expression.callee.name);
+      if (expression.callee.kind === "Identifier") {
+        const symbol = env.get(expression.callee.name);
+        if (symbol?.kind === "constructor") return unionOf(symbol.overloads.map((item) => item.returnType));
+      }
+      if (expression.callee.kind === "Member" && expression.callee.property === "map" && expression.args[0]?.kind === "Function") {
+        const objectType = inferExpression(expression.callee.object, env);
+        const member = lookupMember(objectType, expression.callee.property, env);
+        const callback = expression.args[0];
+        if (isFunctionSymbol(member)) {
+          const expected = member.params[0] ? resolveType(parameterType(member.params[0]), env) : void 0;
+          const local = bindInferredParameters(callback.params, env);
+          if (expected?.kind === "FunctionType") callback.params.forEach((param, index) => {
+            if (!param.type && expected.params[index]) {
+              local.set(param.name, { kind: "var", mutable: true, type: expected.params[index] });
+            }
+          });
+          const result = callback.returnType ?? (callback.expressionBody ? inferExpression(callback.expressionBody, local) : inferFunctionReturnType2(callback.body, local, callback.params));
+          return arrayOf(result);
+        }
+      }
       const callee = inferExpression(expression.callee, env);
       if (callee.kind === "FunctionType") return callee.result;
       if (callee.kind === "UnionType") {
@@ -2153,16 +2261,33 @@ function inferFunctionReturnType2(statements, outer, params = []) {
       } else if (statement.kind === "If") {
         collect(statement.consequent, new Map(env));
         if (statement.alternate) collect(statement.alternate, new Map(env));
+        const guard = negatedMemberTypeGuard(statement.condition);
+        if (!statement.alternate && guard && statement.consequent.some((item) => item.kind === "ExpressionStatement" && item.expression.kind === "Assignment" && item.expression.name === guard.name)) {
+          const symbol = env.get(guard.name);
+          if (symbol?.kind === "var") env.set(guard.name, { ...symbol, type: guard.type });
+        }
       } else if (statement.kind === "While" || statement.kind === "ForOf") {
         collect(statement.body, new Map(env));
       } else if (statement.kind === "Variable") {
         env.set(statement.name, { kind: "var", mutable: statement.mutable, type: statement.type ?? (statement.initializer ? inferExpression(statement.initializer, env) : named("any")) });
+      } else if (statement.kind === "Destructure") {
+        const source = inferExpression(statement.initializer, env);
+        for (const binding of statement.bindings) {
+          const member = lookupMember(source, binding.name, env);
+          env.set(binding.name, { kind: "var", mutable: statement.mutable, type: member && !isFunctionSymbol(member) ? member : named("any") });
+        }
       }
     }
   };
   const local = bindInferredParameters(params, outer);
   collect(statements, local);
   return returns.length ? unionOf(returns) : named("null");
+}
+function negatedMemberTypeGuard(condition) {
+  if (condition.kind !== "Unary" || condition.operator !== "!" || condition.operand.kind !== "Call") return void 0;
+  const call = condition.operand;
+  if (call.callee.kind !== "Member" || call.callee.property !== "isType" || call.callee.object.kind !== "Identifier" || !call.typeArguments?.[0]) return void 0;
+  return { name: call.callee.object.name, type: call.typeArguments[0] };
 }
 function unionOf(types) {
   const flatten = (type) => type.kind === "UnionType" ? type.types.flatMap(flatten) : [type];
@@ -2220,6 +2345,7 @@ var Analyzer = class {
     if (callee.kind === "Identifier") {
       const symbol = env.get(callee.name);
       if (symbol?.kind === "fun") params = symbol.params;
+      else if (symbol?.kind === "constructor") params = symbol.overloads[0]?.params;
     } else if (callee.kind === "Member") {
       const member = lookupMember(inferExpression(callee.object, env), callee.property, env);
       if (isFunctionSymbol(member)) params = member.params;
@@ -2270,7 +2396,7 @@ var Analyzer = class {
     const declaredHere = /* @__PURE__ */ new Set();
     for (const statement of statements) {
       const candidate = statement.kind === "Export" ? statement.declaration : statement;
-      const declarationName = candidate.kind === "Variable" || candidate.kind === "FunctionDeclaration" || candidate.kind === "TypeDeclaration" ? candidate.name : void 0;
+      const declarationName = candidate.kind === "Variable" || candidate.kind === "FunctionDeclaration" || candidate.kind === "TypeDeclaration" || candidate.kind === "ConstructorDeclaration" ? candidate.name : void 0;
       if (declarationName && declaredHere.has(declarationName)) {
         const loc = candidate.loc;
         if (loc) this.diagnostics.push({
@@ -2335,6 +2461,7 @@ var Analyzer = class {
             const actual = inferExpression(statement.initializer, env);
             const actualMembers = actual.kind === "ObjectType" ? actual.members : [];
             for (const property of properties) {
+              if (property.spread) continue;
               const member = expected.members.find((item) => item.name === property.key);
               if (!member) continue;
               const propertyType = inferExpression(property.value, env);
@@ -2367,6 +2494,20 @@ var Analyzer = class {
         if (statement.type) this.walkType(statement.type, env);
         return;
       }
+      case "Destructure": {
+        this.walkExpression(statement.initializer, env);
+        const source = inferExpression(statement.initializer, env);
+        for (const binding of statement.bindings) {
+          const member = lookupMember(source, binding.name, env);
+          const type = member && !isFunctionSymbol(member) ? member : named("any");
+          const symbol = { kind: "var", mutable: statement.mutable, type };
+          this.bind(env, binding.name, symbol);
+          this.addHover(binding.name, binding.loc, printSymbol(binding.name, symbol).code);
+          this.addTypeHint(binding.loc, binding.name, false, type);
+          if (!member) this.addDiagnostic(binding.loc, `Property '${binding.name}' does not exist on type '${printType(source)}'.`);
+        }
+        return;
+      }
       case "FunctionDeclaration": {
         const inferenceEnv = bindInferredParameters(statement.params, env);
         const returnType = statement.returnType ?? inferFunctionReturnType2(statement.body, inferenceEnv, statement.params);
@@ -2390,6 +2531,40 @@ var Analyzer = class {
         this.statements(statement.body, local);
         return;
       }
+      case "ConstructorDeclaration": {
+        this.walkType(statement.inheritedType, env);
+        const constructorEnv = (params) => {
+          const local = bindInferredParameters(params, env);
+          if (statement.inheritedType.kind === "GenericType") {
+            local.set(statement.inheritedType.name, { kind: "type", generics: [], value: resolveType(statement.inheritedType, env) });
+          }
+          return local;
+        };
+        const overloads = statement.overloads.map((overload) => {
+          const local = constructorEnv(overload.params);
+          const returnType = overload.returnType ?? inferFunctionReturnType2(overload.body, local, overload.params);
+          return { params: overload.params, returnType };
+        });
+        const symbol = { kind: "constructor", inheritedType: statement.inheritedType, overloads };
+        this.bind(env, statement.name, symbol);
+        this.addHover(statement.name, statement.loc, printSymbol(statement.name, symbol).code);
+        statement.overloads.forEach((overload, index) => {
+          const local = constructorEnv(overload.params);
+          for (const param of overload.params) {
+            const type = local.get(param.name).type;
+            this.addHover(param.name, param.loc, parameterHover(param, type));
+            this.addTypeHint(param.loc, param.name, Boolean(param.type), type);
+            if (param.type) this.walkType(param.type, env);
+            if (param.defaultValue) this.walkExpression(param.defaultValue, local);
+          }
+          this.statements(overload.body, local);
+          const actual = overloads[index].returnType;
+          if (!isAssignableTo(statement.inheritedType, actual, env)) {
+            this.addDiagnostic(statement.loc, `Constructor overload returns '${printType(actual)}', which is not assignable to inherited type '${printType(statement.inheritedType)}'.`);
+          }
+        });
+        return;
+      }
       case "Return":
         this.walkExpression(statement.value, env);
         return;
@@ -2408,6 +2583,11 @@ var Analyzer = class {
         if (isNullable(inferExpression(statement.condition, env), env)) this.addDiagnostic(expressionStart(statement.condition), "Nullable value cannot be used as a condition; use ! or ?? to handle null.");
         this.statements(statement.consequent, this.narrowedConditionEnv(statement.condition, env, true));
         if (statement.alternate) this.statements(statement.alternate, this.narrowedConditionEnv(statement.condition, env, false));
+        const guard = negatedMemberTypeGuard(statement.condition);
+        if (!statement.alternate && guard && statement.consequent.some((item) => item.kind === "ExpressionStatement" && item.expression.kind === "Assignment" && item.expression.name === guard.name)) {
+          const symbol = env.get(guard.name);
+          if (symbol?.kind === "var") env.set(guard.name, { ...symbol, type: guard.type });
+        }
         return;
       }
       case "While":
@@ -2524,6 +2704,13 @@ var Analyzer = class {
         return;
       case "MemberAssignment":
         this.walkExpression(expression.object, env, thisType);
+        if (expression.property) {
+          const objectType = inferExpression(expression.object, env);
+          const setter = lookupAccessor(objectType, expression.property, "set", env);
+          const member = setter ?? lookupMember(objectType, expression.property, env);
+          const code = setter ? `(setter) ${setter.name}(${(setter.params ?? []).map(printParam).join(", ")})` : isFunctionSymbol(member) ? `(method) ${expression.property}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}` : `(property) ${expression.property}: ${printType(member && !isFunctionSymbol(member) ? member : named("any"))}`;
+          this.addHover(expression.property, expression.propertyLoc, code);
+        }
         this.walkExpression(expression.value, env, thisType);
         return;
       case "Object": {
@@ -2531,6 +2718,10 @@ var Analyzer = class {
         const methodEnv = new Map(env);
         this.bind(methodEnv, "this", { kind: "var", mutable: false, type: objectType });
         for (const property of expression.properties) {
+          if (property.spread) {
+            this.walkExpression(property.value, env, thisType);
+            continue;
+          }
           const member = lookupMember(objectType, property.key, env);
           const code = isFunctionSymbol(member) ? `(method) ${property.key}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}` : `(property) ${property.key}: ${printType(member && !isFunctionSymbol(member) ? member : named("any"))}`;
           this.addHover(property.key, property.keyLoc, code);
@@ -2583,7 +2774,7 @@ var Analyzer = class {
         const nonNullObjectType = removeNull(resolveType(objectType, env));
         const resolvedObjectType = resolveType(nonNullObjectType, env);
         const member = lookupMember(nonNullObjectType, expression.property, env);
-        if (nullableObject && !expression.optional) this.diagnostics.push({ line: expression.loc?.line ?? 1, column: expression.loc?.column ?? 1, length: expression.property.length, message: `Cannot access '${expression.property}' on a nullable value; use ! or ?., or ?? to handle null.` });
+        if (nullableObject && !expression.optional && expression.property !== "isType") this.diagnostics.push({ line: expression.loc?.line ?? 1, column: expression.loc?.column ?? 1, length: expression.property.length, message: `Cannot access '${expression.property}' on a nullable value; use ! or ?., or ?? to handle null.` });
         if (isFunctionSymbol(member)) {
           const signature = expression.property === "as" ? "(method) as<T>(): T" : `(method) ${expression.property}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}`;
           this.addHover(expression.property, expression.loc, signature);
@@ -2700,7 +2891,8 @@ var Analyzer = class {
       if (param.defaultValue) this.walkExpression(param.defaultValue, local);
     }
     if (expression.returnType) this.walkType(expression.returnType, env);
-    this.statements(expression.body, local);
+    if (expression.expressionBody) this.walkExpression(expression.expressionBody, local);
+    else this.statements(expression.body, local);
   }
 };
 function literalLabel(value) {
@@ -2744,7 +2936,7 @@ function analyze(source, filePath) {
     const analyzer = new Analyzer();
     const statements = parse(source, { validate: false, filePath });
     const imported = importedDeclarations(statements, filePath);
-    if (statements.some((statement) => statement.kind === "TypeDeclaration" && JSON.stringify(statement.value).includes("Iterable"))) {
+    if (JSON.stringify(statements).includes("Iterable")) {
       const fs = require("node:fs");
       const path = require("node:path");
       let directory = path.dirname(path.resolve(filePath ?? process.cwd()));

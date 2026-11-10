@@ -15,6 +15,8 @@ for const item of array
 console.log(array.toArray())
 
 console.log("map:", array.map((item) => item.toString()))
+const mappedObjects = array.map((item) => { value: item.toString() })
+console.log("map to objects:", mappedObjects)
 console.log("filter:", array.filter((item) => item != 2))
 console.log("flatMap:", array.flatMap((item) => [item]))
 console.log("join:", array.join(" | "))

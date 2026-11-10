@@ -117,8 +117,8 @@ export type Iterable<T> = ({
             first = false
         return result
 
-    map(callback: (T) -> T): T[] =
-        let result: T[] = []
+    map(callback: (T) -> any): any[] =
+        let result: any[] = []
         for const item of this.toArray()
             result.push(callback(item))
         return result

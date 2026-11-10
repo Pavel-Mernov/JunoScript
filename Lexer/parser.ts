@@ -9,10 +9,10 @@ export type Expression =
     | { kind: 'RegEx'; source: string; flags: string; loc?: Loc }
     | { kind: 'Template'; parts: (string | Expression)[]; loc?: Loc }
     | { kind: 'Identifier'; name: string; loc?: Loc } | { kind: 'Array'; elements: Expression[]; loc?: Loc }
-      | { kind: 'Object'; properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set' }[]; loc?: Loc }
+      | { kind: 'Object'; properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set'; spread?: boolean; readonly?: boolean }[]; loc?: Loc }
     | { kind: 'Unary'; operator: string; operand: Expression; loc?: Loc }
     | { kind: 'Assignment'; name: string; loc?: Loc; operatorLoc?: Loc; operator?: string; value: Expression }
-    | { kind: 'MemberAssignment'; object: Expression; property?: string; index?: Expression; loc?: Loc; operator?: string; value: Expression }
+    | { kind: 'MemberAssignment'; object: Expression; property?: string; propertyLoc?: Loc; index?: Expression; loc?: Loc; operator?: string; value: Expression }
     | { kind: 'Binary'; operator: string; left: Expression; right: Expression; loc?: Loc }
     | { kind: 'Conditional'; condition: Expression; consequent: Expression; alternate: Expression; loc?: Loc }
     | { kind: 'Member'; object: Expression; property: string; optional: boolean; loc?: Loc }
@@ -21,10 +21,12 @@ export type Expression =
     | { kind: 'Function'; params: Parameter[]; returnType?: TypeNode; body: Statement[]; expressionBody?: Expression }
 export type Statement =
     | { kind: 'Variable'; name: string; loc?: Loc; mutable: boolean; type?: TypeNode; initializer?: Expression }
+    | { kind: 'Destructure'; bindings: { name: string; loc?: Loc }[]; mutable: boolean; initializer: Expression }
     | { kind: 'Import'; module: string; defaultImport?: string; defaultImportLoc?: Loc; namedImports: string[]; namedImportLocs?: Loc[]; importedTypes?: Record<string, TypeNode>; importedSymbols?: Record<string, { kind: string; value?: TypeNode; generics?: string[]; params?: Parameter[]; returnType?: TypeNode; type?: TypeNode }> }
     | { kind: 'Export'; declaration: Statement; default?: boolean }
     | { kind: 'FunctionDeclaration'; name: string; loc?: Loc; params: Parameter[]; returnType?: TypeNode; body: Statement[] }
     | { kind: 'TypeDeclaration'; name: string; loc?: Loc; generics: string[]; genericLocs?: Loc[]; value: TypeNode }
+    | { kind: 'ConstructorDeclaration'; name: string; loc?: Loc; inheritedType: TypeNode; overloads: Extract<Expression, { kind: 'Function' }>[] }
     | { kind: 'Return'; value?: Expression } | { kind: 'ExpressionStatement'; expression: Expression }
     | { kind: 'If'; condition: Expression; consequent: Statement[]; alternate?: Statement[] }
     | { kind: 'ForOf'; binding: string; loc?: Loc; mutable: boolean; iterable: Expression; body: Statement[] }
@@ -84,7 +86,22 @@ export class Parser {
             return { kind: 'Export', declaration, default: isDefault }
         }
         if (this.match('Keyword', 'let') || this.match('Keyword', 'const')) {
-            const mutable = this.value(this.tokens[this.pos - 1]) === 'let', { name, loc } = this.identifier()
+            const mutable = this.value(this.tokens[this.pos - 1]) === 'let'
+            if (this.match('LeftBrace')) {
+                const bindings: { name: string; loc?: Loc }[] = []
+                const patternSeparators = () => { while (this.match('Newline') || this.match('Indent') || this.match('Dedent')) {} }
+                patternSeparators()
+                while (!this.is('RightBrace')) {
+                    bindings.push(this.identifier())
+                    patternSeparators()
+                    if (this.match('Comma')) patternSeparators()
+                    else if (!this.is('RightBrace')) this.fail("Expected ',' or '}' in object destructuring")
+                }
+                this.take('RightBrace')
+                this.take('Equal', "Expected '=' after object destructuring")
+                return { kind: 'Destructure', bindings, mutable, initializer: this.expression() }
+            }
+            const { name, loc } = this.identifier()
             const type = this.match('Colon') ? this.type() : undefined
             let initializer: Expression | undefined
             if (this.match('Equal')) {
@@ -116,6 +133,26 @@ export class Parser {
             if (indented) { this.separators(); if (this.is('Dedent')) this.take('Dedent') }
             return { kind: 'TypeDeclaration', name, loc, generics, genericLocs, value }
         }
+        if (this.match('Keyword', 'constructor')) {
+            const { name, loc } = this.identifier()
+            this.take('Colon', "Expected ':' before inherited constructor type")
+            const inheritedType = this.type()
+            this.take('LeftBrace', "Expected '{' before constructor overloads")
+            const overloads: Extract<Expression, { kind: 'Function' }>[] = []
+            this.objectSeparators()
+            while (!this.is('RightBrace') && !this.is('EOF')) {
+                this.take('Keyword', "Expected anonymous 'fun' constructor overload")
+                if (this.value(this.tokens[this.pos - 1]) !== 'fun') this.fail("Expected anonymous 'fun' constructor overload")
+                const params = this.parameters()
+                const returnType = this.match('Colon') ? this.type() : undefined
+                this.take('Equal', "Expected '=' before constructor body")
+                overloads.push({ kind: 'Function', params, returnType, body: this.block() })
+                this.objectSeparators()
+            }
+            this.take('RightBrace')
+            if (!overloads.length) this.fail('A constructor needs at least one anonymous function')
+            return { kind: 'ConstructorDeclaration', name, loc, inheritedType, overloads }
+        }
         if (this.match('Keyword', 'return')) return { kind: 'Return', value: this.is('Newline') || this.is('Dedent') || this.is('EOF') ? undefined : this.expression() }
         if (this.is('Identifier') && assignmentOperators[this.tokens[this.pos + 1]?.type]) {
             const { name, loc } = this.identifier(), operatorToken = this.current, operator = assignmentOperators[operatorToken.type]!
@@ -138,7 +175,7 @@ export class Parser {
         if (assignmentOperator) {
             const operatorToken = this.current
             this.pos++
-            if (expression.kind === 'Member') return { kind: 'ExpressionStatement', expression: { kind: 'MemberAssignment', object: expression.object, property: expression.property, loc: this.loc(operatorToken), operator: assignmentOperator, value: this.expression() } }
+            if (expression.kind === 'Member') return { kind: 'ExpressionStatement', expression: { kind: 'MemberAssignment', object: expression.object, property: expression.property, propertyLoc: expression.loc, loc: this.loc(operatorToken), operator: assignmentOperator, value: this.expression() } }
             if (expression.kind === 'Index') return { kind: 'ExpressionStatement', expression: { kind: 'MemberAssignment', object: expression.object, index: expression.index, loc: this.loc(operatorToken), operator: assignmentOperator, value: this.expression() } }
             this.fail('Only variables and object properties can be assigned here')
         }
@@ -422,7 +459,7 @@ export class Parser {
                         break
                     case 'Unary': shiftExpression(node.operand); break
                     case 'Assignment': shiftExpression(node.value); break
-                    case 'MemberAssignment': shiftExpression(node.object); if (node.index) shiftExpression(node.index); shiftExpression(node.value); break
+                    case 'MemberAssignment': node.propertyLoc = shiftLoc(node.propertyLoc); shiftExpression(node.object); if (node.index) shiftExpression(node.index); shiftExpression(node.value); break
                     case 'Binary': shiftExpression(node.left); shiftExpression(node.right); break
                     case 'Conditional': shiftExpression(node.condition); shiftExpression(node.consequent); shiftExpression(node.alternate); break
                     case 'Member': shiftExpression(node.object); break
@@ -557,8 +594,17 @@ export class Parser {
         }
         if (this.match('LeftBrace')) {
             const token = this.tokens[this.pos - 1]
-            const properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set' }[] = []; this.objectSeparators()
+            const properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set'; spread?: boolean; readonly?: boolean }[] = []; this.objectSeparators()
             while (!this.is('RightBrace') && !this.is('EOF')) {
+                if (this.match('Ellipsis')) {
+                    const value = this.expression()
+                    properties.push({ key: '', keyLoc: 'loc' in value ? value.loc : undefined, value, spread: true })
+                    this.objectSeparators()
+                    if (this.match('Comma')) this.objectSeparators()
+                    continue
+                }
+                const readonly = this.match('Keyword', 'readonly')
+                const explicitFunction = this.match('Keyword', 'fun')
                 const accessor = this.is('Identifier') && ['get', 'set'].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === 'Identifier'
                     ? String(this.value(this.tokens[this.pos++])) as 'get' | 'set'
                     : undefined
@@ -574,8 +620,9 @@ export class Parser {
                 }
                 else if (this.match('Colon')) value = this.expression()
                 else if (this.match('LeftParen')) { this.pos--; const params = this.parameters(); this.take('Equal', "Expected '=' for method body"); value = { kind: 'Function', params, body: this.block() } }
+                else if (explicitFunction) this.fail("Expected '(' after object function name")
                 else value = { kind: 'Identifier', name: property.name, loc: property.loc }
-                properties.push({ key: property.name, keyLoc: property.loc, value, accessor })
+                properties.push({ key: property.name, keyLoc: property.loc, value, accessor, readonly })
                 this.objectSeparators()
                 if (this.match('Comma')) this.objectSeparators()
             }
