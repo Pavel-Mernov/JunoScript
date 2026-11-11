@@ -470,10 +470,16 @@ var Parser = class _Parser {
         if (this.value(this.tokens[this.pos - 1]) !== "fun") this.fail("Expected anonymous 'fun' constructor overload");
         if (!this.is("LeftParen")) {
           const method2 = this.propertyName();
+          let methodGenerics = [], methodGenericLocs = [];
+          if (this.match("Less")) {
+            const names = this.genericNames();
+            methodGenerics = names.map((item) => item.name);
+            methodGenericLocs = names.map((item) => item.loc);
+          }
           const params2 = this.parameters();
           const returnType2 = this.match("Colon") ? this.type() : void 0;
           this.take("Equal", "Expected '=' before constructor method body");
-          methods.push({ kind: "FunctionDeclaration", name: method2.name, loc: method2.loc, params: params2, returnType: returnType2, body: this.block() });
+          methods.push({ kind: "FunctionDeclaration", name: method2.name, loc: method2.loc, generics: methodGenerics, genericLocs: methodGenericLocs, params: params2, returnType: returnType2, body: this.block() });
           this.objectSeparators();
           continue;
         }
@@ -1660,7 +1666,7 @@ function printSymbol(name, symbol) {
     case "constructor": {
       const generics = symbol.generics.length ? `<${symbol.generics.join(", ")}>` : "";
       const overloads = symbol.overloads.map((item) => `constructor ${name}${generics}(${item.params.map(printParam).join(", ")}): ${name}${generics}`);
-      const methods = symbol.methods.map((method2) => `${name}.${method2.name}(${method2.params.map(printParam).join(", ")}): ${printType(method2.returnType)}`);
+      const methods = symbol.methods.map((method2) => `${name}.${method2.name}${method2.generics.length ? `<${method2.generics.join(", ")}>` : ""}(${method2.params.map(printParam).join(", ")}): ${printType(method2.returnType)}`);
       return { code: [...overloads, ...methods].join("\n"), docs: symbol.docs };
     }
   }
@@ -1889,6 +1895,9 @@ function lookupMember(type, name, env) {
     }
     if (name === "has") return { kind: "fun", params: [{ name: "key", type: named("string") }], returnType: named("boolean") };
   }
+  if (resolved.kind === "FunctionType" && name === "call") {
+    return { kind: "fun", params: [{ name: "thisArg", type: named("any") }, { name: "args", type: arrayOf(named("any")), rest: true }], returnType: resolved.result };
+  }
   if (name === "has" && (resolved.kind === "ArrayType" || resolved.kind === "GenericType" && (resolved.name === "Array" || resolved.name === "ReadonlyArray"))) {
     return { kind: "fun", params: [{ name: "key", type: named("string") }], returnType: named("boolean") };
   }
@@ -1903,6 +1912,9 @@ function lookupMember(type, name, env) {
         return number;
       case "indices":
         return named("Range");
+      case "copy":
+      case "toArray":
+        return fn([], arrayOf(element));
       case "at":
         return fn([p("index", number)], unionOf([element, named("null")]));
       case "concat":
@@ -2094,7 +2106,7 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
       generics: declaration.generics,
       inheritedType: declaration.inheritedType,
       overloads: declaration.overloads.map((overload) => ({ params: overload.params, returnType: overload.returnType ?? inferFunctionReturnType2(overload.body, globals(), overload.params) })),
-      methods: declaration.methods.map((method2) => ({ name: method2.name, params: method2.params, returnType: method2.returnType ?? inferFunctionReturnType2(method2.body, globals(), method2.params) }))
+      methods: declaration.methods.map((method2) => ({ name: method2.name, generics: method2.generics ?? [], params: method2.params, returnType: method2.returnType ?? inferFunctionReturnType2(method2.body, globals(), method2.params) }))
     });
     else if (declaration.kind === "Variable" && exported) result.set(declaration.name, { kind: "var", type: declaration.type ?? (declaration.initializer ? inferExpression(declaration.initializer, globals()) : named("any")) });
   }
@@ -2188,6 +2200,18 @@ function inferGenericArguments(generics, params, args, env) {
     if (pattern.kind === "GenericType") {
       const resolved = resolveType(actual, env);
       if (resolved.kind === "GenericType" && resolved.name === pattern.name) pattern.args.forEach((part, index) => collect(part, resolved.args[index] ?? named("any")));
+      else if (pattern.name === "Iterable") {
+        const element = resolved.kind === "ArrayType" ? resolved.element : resolved.kind === "GenericType" && resolved.name === "Array" ? resolved.args[0] : iterableElementType(resolved, env);
+        if (element) collect(pattern.args[0], element);
+      }
+      return;
+    }
+    if (pattern.kind === "FunctionType") {
+      const resolved = removeNull(resolveType(actual, env));
+      if (resolved.kind === "FunctionType") {
+        pattern.params.forEach((part, index) => collect(part, resolved.params[index] ?? named("any")));
+        collect(pattern.result, resolved.result);
+      }
       return;
     }
     if (pattern.kind === "ObjectType") {
@@ -2213,10 +2237,16 @@ function constructorMethodForCall(callee, args, env) {
   if (constructor?.kind !== "constructor") return void 0;
   const method2 = constructor.methods.find((item) => item.name === callee.property);
   if (!method2) return void 0;
-  const inferred = inferGenericArguments(constructor.generics, method2.params, args, env);
+  const generics = [...constructor.generics, ...method2.generics];
+  const inferred = inferGenericArguments(generics, method2.params, args, env);
+  if (callee.object.name === "Array" && method2.name === "from" && constructor.generics[0] && method2.generics[0]) {
+    const targetIndex = generics.indexOf(constructor.generics[0]);
+    const sourceIndex = generics.indexOf(method2.generics[0]);
+    if (!args[1] || isNamedType(inferred[targetIndex], "any")) inferred[targetIndex] = inferred[sourceIndex];
+  }
   return {
-    params: method2.params.map((param) => ({ ...param, type: param.type ? instantiate(param.type, constructor.generics, inferred) : void 0 })),
-    returnType: instantiate(method2.returnType, constructor.generics, inferred)
+    params: method2.params.map((param) => ({ ...param, type: param.type ? instantiate(param.type, generics, inferred) : void 0 })),
+    returnType: instantiate(method2.returnType, generics, inferred)
   };
 }
 var errorType = () => named("<Error-Type>");
@@ -2694,7 +2724,7 @@ var Analyzer = class {
           const importedAlias = statement.importedTypes?.[name];
           const importedSymbol = statement.importedSymbols?.[name];
           const type = importedAlias ? resolveType(importedAlias, env) : importedSymbol?.kind === "var" ? importedSymbol.type ?? named("any") : name === "console" ? consoleType() : name === "Math" && statement.module === "juno" ? mathType() : name === "types" && statement.module === "juno" ? typeUtilitiesType() : statement.module === "types" && ["Partial", "Required", "Readonly", "Pick", "Omit"].includes(name) ? typeUtilitiesType().kind === "ObjectType" ? typeUtilitiesType().members.find((member) => member.name === name)?.type ?? named("any") : named("any") : named("any");
-          const symbol = importedSymbol?.kind === "fun" ? { kind: "fun", params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named("any"), docs: imported } : importedSymbol?.kind === "constructor" && importedSymbol.inheritedType && importedSymbol.overloads ? { kind: "constructor", generics: importedSymbol.generics ?? [], inheritedType: importedSymbol.inheritedType, overloads: importedSymbol.overloads, methods: importedSymbol.methods ?? [], docs: imported } : {
+          const symbol = importedSymbol?.kind === "fun" ? { kind: "fun", params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named("any"), docs: imported } : importedSymbol?.kind === "constructor" && importedSymbol.inheritedType && importedSymbol.overloads ? { kind: "constructor", generics: importedSymbol.generics ?? [], inheritedType: importedSymbol.inheritedType, overloads: importedSymbol.overloads, methods: (importedSymbol.methods ?? []).map((method2) => ({ ...method2, generics: method2.generics ?? [] })), docs: imported } : {
             kind: importedAlias || importedSymbol?.kind === "type" ? "type" : "var",
             mutable: false,
             ...importedAlias || importedSymbol?.kind === "type" ? { generics: importedSymbol?.generics ?? [], value: importedAlias ?? importedSymbol?.value ?? named("any") } : { type },
@@ -2815,7 +2845,7 @@ var Analyzer = class {
           const returnType = overload.returnType ?? inferFunctionReturnType2(overload.body, local, overload.params);
           return { params: overload.params, returnType };
         });
-        const methods = statement.methods.map((method2) => ({ name: method2.name, params: method2.params, returnType: method2.returnType ?? inferFunctionReturnType2(method2.body, env, method2.params) }));
+        const methods = statement.methods.map((method2) => ({ name: method2.name, generics: method2.generics ?? [], params: method2.params, returnType: method2.returnType ?? inferFunctionReturnType2(method2.body, env, method2.params) }));
         const symbol = { kind: "constructor", generics: statement.generics, inheritedType: statement.inheritedType, overloads, methods };
         this.bind(env, statement.name, symbol);
         this.addHover(statement.name, statement.loc, printSymbol(statement.name, symbol).code, void 0, symbolTypeDescription(statement.name, symbol, env));
@@ -2836,7 +2866,8 @@ var Analyzer = class {
         });
         statement.methods.forEach((method2, index) => {
           const methodInfo = methods[index];
-          this.addHover(method2.name, method2.loc, `(method) ${statement.name}.${method2.name}(${method2.params.map(printParam).join(", ")}): ${printType(methodInfo.returnType)}`, arrayMethodDescriptions[method2.name]);
+          const generics = methodInfo.generics.length ? `<${methodInfo.generics.join(", ")}>` : "";
+          this.addHover(method2.name, method2.loc, `(method) ${statement.name}.${method2.name}${generics}(${method2.params.map(printParam).join(", ")}): ${printType(methodInfo.returnType)}`, arrayMethodDescriptions[method2.name]);
           const local = bindInferredParameters(method2.params, env);
           method2.params.forEach((param) => {
             const type = local.get(param.name)?.type ?? parameterType(param);
@@ -3072,7 +3103,8 @@ var Analyzer = class {
           const constructor = env.get(expression.object.name);
           const method2 = constructor?.kind === "constructor" ? constructor.methods.find((item) => item.name === expression.property) : void 0;
           if (method2) {
-            this.addHover(expression.property, expression.loc, `(method) ${expression.object.name}.${method2.name}(${method2.params.map(printParam).join(", ")}): ${printType(method2.returnType)}`, arrayMethodDescriptions[method2.name]);
+            const generics = method2.generics.length ? `<${method2.generics.join(", ")}>` : "";
+            this.addHover(expression.property, expression.loc, `(method) ${expression.object.name}.${method2.name}${generics}(${method2.params.map(printParam).join(", ")}): ${printType(method2.returnType)}`, arrayMethodDescriptions[method2.name]);
             return;
           }
         }

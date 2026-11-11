@@ -24,8 +24,8 @@ export constructor Array<T> : Iterable<T> & T[] {
             fun toArray(): T[] =
                 return this.copy()
 
-            fun enumerate(): any[][] =
-                let entries: any[][] = []
+            fun enumerate(): (number | T)[][] =
+                let entries: (number | T)[][] = []
                 this.indices.forEach((index) => entries.push([index, this[index]]))
                 return entries
 
@@ -163,7 +163,7 @@ export constructor Array<T> : Iterable<T> & T[] {
         const source = items.toArray()
         const fill = (_, index: number): T =>
             if mapFn == null
-                return source[index].as<T>()
+                return source[index]
             return mapFn!.call(thisArg, source[index], index)
         return Array<T>(source.length, { fill })
 }
