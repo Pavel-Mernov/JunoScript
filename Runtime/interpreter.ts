@@ -51,6 +51,11 @@ export class Interpreter {
                 if (statement.defaultImport) this.declare(env, statement.defaultImport, adaptedModule, false)
                 for (const name of statement.namedImports) {
                     if (!(name in module) && !(module as any).__junoTypes?.[name]) throw new Error(`Module '${statement.module}' has no export '${name}'`)
+                    if (statement.module === 'juno' && name === 'Range') {
+                        const rangeModule = this.loadLocalModule('juno/types/range', env)
+                        this.declare(env, name, rangeModule.Range, false)
+                        continue
+                    }
                     if (!(name in module) && (module as any).__junoTypes?.[name]) {
                         const alias = (module as any).__junoTypes[name] as TypeAlias
                         ;(statement.importedTypes ??= {})[name] = alias.value
@@ -89,6 +94,7 @@ export class Interpreter {
             }
             case 'FunctionDeclaration': this.declare(env, statement.name, { __junoFunction: true, params: statement.params, body: statement.body, closure: env } satisfies RuntimeFunction, false); return
             case 'ConstructorDeclaration': {
+                if (!statement.overloads.length) throw new TypeError(`Constructor '${statement.name}' needs at least one anonymous function`)
                 this.registerTypeDeclarations(statement.inheritedType, env)
                 const overloads = statement.overloads.map(overload => ({ __junoFunction: true as const, params: overload.params, body: overload.body, closure: env }))
                 this.declare(env, statement.name, { __junoConstructor: true, inheritedType: statement.inheritedType, overloads } satisfies RuntimeConstructor, false)
@@ -118,7 +124,7 @@ export class Interpreter {
         seen.add(type)
         if (type.kind === 'NamedType') {
             if (type.name === 'Iterable') {
-                const declarations = parse(readFileSync(resolve(__dirname, '../../iterable.jn'), 'utf8'))
+                const declarations = parse(readFileSync(resolve(__dirname, '../../types/iterable.jn'), 'utf8'))
                 for (const declaration of declarations) if (declaration.kind === 'Export' && declaration.declaration.kind === 'TypeDeclaration') {
                     const alias = { value: declaration.declaration.value, generics: declaration.declaration.generics }
                     env.types.set(declaration.declaration.name, alias)
@@ -139,8 +145,11 @@ export class Interpreter {
     }
 
     private loadLocalModule(specifier: string, env: Environment): Record<string, unknown> {
-        if (!specifier.startsWith('.') && !specifier.startsWith('/')) throw new Error(`Unsupported module '${specifier}'`)
-        const base = resolve(this.currentDirectory, specifier)
+        const junoTypeModule = /^juno\/types\/(.+)$/.exec(specifier)
+        if (!junoTypeModule && !specifier.startsWith('.') && !specifier.startsWith('/')) throw new Error(`Unsupported module '${specifier}'`)
+        const base = junoTypeModule
+            ? resolve(__dirname, '../../types', junoTypeModule[1])
+            : resolve(this.currentDirectory, specifier)
         const candidates = /\.jn$/i.test(base) ? [base] : [`${base}.jn`, resolve(base, 'index.jn')]
         let source: string | undefined
         let file = candidates[0]
@@ -152,6 +161,7 @@ export class Interpreter {
         this.currentDirectory = resolve(base, '..')
         const moduleEnv: Environment = { bindings: new Map(), types: new Map(), parent: env }
         const importedModule = (specifier: string, importer: Environment): Record<string, unknown> => {
+            if (specifier.startsWith('juno/types/')) return this.loadLocalModule(specifier, importer)
             const moduleBase = resolve(this.currentDirectory, specifier)
             const options = /\.jn$/i.test(moduleBase) ? [moduleBase] : [`${moduleBase}.jn`, resolve(moduleBase, 'index.jn')]
             const target = options.find(candidate => { try { return readFileSync(candidate).length >= 0 } catch { return false } })
@@ -166,7 +176,7 @@ export class Interpreter {
             if (statement.kind === 'Export') {
                 this.execute(statement.declaration, moduleEnv)
                 const declaration = statement.declaration
-                if (declaration.kind !== 'Variable' && declaration.kind !== 'FunctionDeclaration' && declaration.kind !== 'TypeDeclaration') continue
+                if (declaration.kind !== 'Variable' && declaration.kind !== 'FunctionDeclaration' && declaration.kind !== 'TypeDeclaration' && declaration.kind !== 'ConstructorDeclaration') continue
                 const binding = this.lookup(moduleEnv, declaration.name)
                 if (binding) exported[statement.default ? 'default' : declaration.name] = binding.value
                 if (declaration.kind === 'TypeDeclaration') {
@@ -434,6 +444,7 @@ export class Interpreter {
                 if (typeof callee === 'function') return callee.apply(thisValue, args) ?? null
                 if (callee?.__junoConstructor) {
                     const constructor = callee as RuntimeConstructor
+                    if (!constructor.overloads.length) throw new TypeError('A constructor needs at least one anonymous function')
                     const overload = constructor.overloads.find(candidate => {
                         const nullable = (type: TypeNode | undefined): boolean => Boolean(type && (
                             type.kind === 'NamedType' && type.name === 'null' ||
@@ -446,7 +457,7 @@ export class Interpreter {
                     if (!overload) throw new TypeError(`No constructor overload accepts ${args.length} argument(s)`)
                     const value = this.callFunction(overload, args)
                     if (!value || typeof value !== 'object') throw new TypeError('A constructor must return an object')
-                    return this.applyTypeDefaults(value, constructor.inheritedType, env)
+                    return this.applyTypeDefaults(value, constructor.inheritedType, overload.closure)
                 }
                 if (callee?.__junoTypeConstructor) {
                     const input = args[0] ?? {}

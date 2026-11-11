@@ -196,6 +196,10 @@
     "keywords": {
       "patterns": [
         {
+          "name": "entity.name.type.constructor.junoscript",
+          "match": "\\bconstructor\\b"
+        },
+        {
           "name": "storage.type.accessor.junoscript",
           "match": "\\b(get|set)\\b(?=\\s+[A-Za-z_][A-Za-z0-9_]*)"
         },

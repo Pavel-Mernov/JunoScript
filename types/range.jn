@@ -1,0 +1,27 @@
+export constructor Range : Iterable<number> {
+    fun (start : number, end : number?, step : number = 1) =
+        if !end.isType<number>()
+            end = start
+            start = 0
+
+        return {
+            ...Iterable,
+            readonly start,
+            readonly end,
+            readonly step,
+            fun iterator() =
+                let cur = this.start
+
+                const { end, start, step } = this
+
+                return () =>
+                    const value = cur
+
+                    if (step > 0 & value >= end) | (step < 0 & value <= end)
+                        return null
+
+                    cur += step
+
+                    return { value }
+        }
+}

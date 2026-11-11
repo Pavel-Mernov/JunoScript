@@ -1,4 +1,5 @@
 import { console } from 'juno:node'
+import { Range } from 'juno'
 
 console.log("=== Array and object index tests ===")
 
@@ -86,35 +87,6 @@ type Getter = {
 let getter = Getter()
 console.log("getter.value =", getter.value)
 getter.value = "Hello, world!"
-
-
-constructor Range : Iterable<number> {
-    fun (start : number, end : number?, step : number = 1) =
-        if !end.isType<number>()
-            end = start
-            start = 0
-
-        return {
-            ...Iterable,
-            readonly start,
-            readonly end,
-            readonly step,
-            fun iterator() =
-                let cur = this.start
-
-                const { end, start, step } = this
-
-                return () =>
-                    const value = cur
-
-                    if (step > 0 & value >= end) | (step < 0 & value <= end)
-                        return null
-
-                    cur += step
-
-                    return { value }
-        }
-}
 
 const range = Range(5)
 console.log("Range fields =", range.start, range.end, range.step)

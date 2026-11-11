@@ -394,7 +394,7 @@ var Parser = class _Parser {
     if (this.match("Keyword", "export")) {
       const isDefault = this.match("Keyword", "default");
       const declaration = this.statement();
-      if (!["Variable", "FunctionDeclaration", "TypeDeclaration"].includes(declaration.kind)) this.fail("export must precede a declaration");
+      if (!["Variable", "FunctionDeclaration", "TypeDeclaration", "ConstructorDeclaration"].includes(declaration.kind)) this.fail("export must precede a declaration");
       return { kind: "Export", declaration, default: isDefault };
     }
     if (this.match("Keyword", "let") || this.match("Keyword", "const")) {
@@ -1635,13 +1635,12 @@ function printSymbol(name, symbol) {
       return { code: printFunction(name, symbol.params, symbol.returnType), docs: symbol.docs };
     case "type": {
       const generics = symbol.generics.length ? `<${symbol.generics.join(", ")}>` : "";
-      return { code: `type ${name}${generics} = ${printType(symbol.value)}`, docs: symbol.docs };
+      return { code: `type ${name}${generics}`, docs: symbol.docs };
     }
     case "module":
       return { code: `import ${name} from '${symbol.module}'`, docs: symbol.docs };
     case "constructor":
-      return { code: `constructor ${name}: ${printType(symbol.inheritedType)}
-${symbol.overloads.map((item) => `  (${item.params.map(printParam).join(", ")}): ${printType(item.returnType)}`).join("\n")}`, docs: symbol.docs };
+      return { code: symbol.overloads.map((item) => `constructor ${name}(${item.params.map(printParam).join(", ")}): ${name}`).join("\n"), docs: symbol.docs };
   }
 }
 function instantiate(type, generics, args) {
@@ -1712,6 +1711,17 @@ function isFunctionSymbol(value) {
   return Boolean(value && typeof value === "object" && "kind" in value && value.kind === "fun" && "returnType" in value);
 }
 function lookupMember(type, name, env) {
+  if (type.kind === "NamedType") {
+    const constructor = env.get(type.name);
+    if (constructor?.kind === "constructor") {
+      for (const overload of constructor.overloads) {
+        if (overload.returnType.kind === "NamedType" && overload.returnType.name === type.name) continue;
+        const member = lookupMember(overload.returnType, name, env);
+        if (member) return member;
+      }
+      return lookupMember(constructor.inheritedType, name, env);
+    }
+  }
   const resolved = resolveType(type, env);
   if (name === "isType") return { kind: "fun", params: [], returnType: named("boolean") };
   if (isNamedType(resolved, "string")) {
@@ -1989,12 +1999,33 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
     const exported = statement.kind === "Export";
     if (declaration.kind === "TypeDeclaration" && exported) result.set(declaration.name, { kind: "type", value: declaration.value, generics: declaration.generics });
     else if (declaration.kind === "FunctionDeclaration" && exported) result.set(declaration.name, { kind: "fun", params: declaration.params, returnType: declaration.returnType ?? inferFunctionReturnType2(declaration.body, globals(), declaration.params) });
+    else if (declaration.kind === "ConstructorDeclaration" && exported) result.set(declaration.name, {
+      kind: "constructor",
+      inheritedType: declaration.inheritedType,
+      overloads: declaration.overloads.map((overload) => ({ params: overload.params, returnType: overload.returnType ?? inferFunctionReturnType2(overload.body, globals(), overload.params) }))
+    });
     else if (declaration.kind === "Variable" && exported) result.set(declaration.name, { kind: "var", type: declaration.type ?? (declaration.initializer ? inferExpression(declaration.initializer, globals()) : named("any")) });
   }
   if (!filePath) return result;
   for (const statement of statements) {
-    if (statement.kind !== "Import" || !statement.module.startsWith(".")) continue;
-    const base = path.resolve(path.dirname(filePath), statement.module);
+    if (statement.kind !== "Import" || !statement.module.startsWith(".") && !statement.module.startsWith("juno/types/")) continue;
+    let base;
+    if (statement.module.startsWith("juno/types/")) {
+      const relativeModule = statement.module.slice("juno/types/".length);
+      let directory = path.dirname(path.resolve(filePath));
+      let found;
+      while (true) {
+        const candidate = path.join(directory, "types", relativeModule);
+        if (fs.existsSync(`${candidate}.jn`) || fs.existsSync(path.resolve(candidate, "index.jn"))) {
+          found = candidate;
+          break;
+        }
+        const parent = path.dirname(directory);
+        if (parent === directory) break;
+        directory = parent;
+      }
+      base = found ?? path.resolve(__dirname, "../../types", relativeModule);
+    } else base = path.resolve(path.dirname(filePath), statement.module);
     const candidates = /\.jn$/i.test(base) ? [base] : [`${base}.jn`, path.resolve(base, "index.jn")];
     const importedFile = candidates.find((candidate) => fs.existsSync(candidate));
     if (!importedFile || seen.has(importedFile)) continue;
@@ -2008,6 +2039,35 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
   }
   if (statements.some((item) => item.kind === "Import" && item.module === "juno" && item.namedImports.includes("Error"))) {
     result.set("Error", { kind: "type", generics: [], value: { kind: "ObjectType", members: [field("name", named("string")), field("message", named("string")), { ...field("stack", named("string")), optional: true }] } });
+  }
+  if (statements.some((item) => item.kind === "Import" && item.module === "juno" && item.namedImports.includes("Range"))) {
+    let directory = path.dirname(path.resolve(filePath));
+    let rangeFile;
+    while (true) {
+      const candidate = path.join(directory, "types", "range.jn");
+      if (fs.existsSync(candidate)) {
+        rangeFile = candidate;
+        break;
+      }
+      const parent = path.dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+    rangeFile ??= path.resolve(__dirname, "../../types/range.jn");
+    if (fs.existsSync(rangeFile)) {
+      try {
+        const declarations = importedDeclarations(parse(fs.readFileSync(rangeFile, "utf8"), { validate: false, filePath: rangeFile }), rangeFile, seen);
+        const range = declarations.get("Range");
+        if (range) result.set("Range", range);
+        const iterableFile = path.join(path.dirname(rangeFile), "iterable.jn");
+        if (fs.existsSync(iterableFile)) {
+          const iterableDeclarations = importedDeclarations(parse(fs.readFileSync(iterableFile, "utf8"), { validate: false, filePath: iterableFile }), iterableFile, seen);
+          const iterable = iterableDeclarations.get("Iterable");
+          if (iterable) result.set("Iterable", iterable);
+        }
+      } catch {
+      }
+    }
   }
   return result;
 }
@@ -2101,7 +2161,7 @@ function inferExpression(expression, env) {
       if (symbol.kind === "var") return symbol.type;
       if (symbol.kind === "fun") return { kind: "FunctionType", params: symbol.params.map(parameterType), result: symbol.returnType };
       if (symbol.kind === "module") return moduleType(symbol.module);
-      if (symbol.kind === "constructor") return { kind: "FunctionType", params: symbol.overloads[0]?.params.map(parameterType) ?? [], result: unionOf(symbol.overloads.map((item) => item.returnType)) };
+      if (symbol.kind === "constructor") return { kind: "FunctionType", params: symbol.overloads[0]?.params.map(parameterType) ?? [], result: named(expression.name) };
       return named(expression.name);
     }
     case "Array": {
@@ -2204,7 +2264,7 @@ function inferExpression(expression, env) {
       if (expression.callee.kind === "Identifier" && env.get(expression.callee.name)?.kind === "type") return named(expression.callee.name);
       if (expression.callee.kind === "Identifier") {
         const symbol = env.get(expression.callee.name);
-        if (symbol?.kind === "constructor") return unionOf(symbol.overloads.map((item) => item.returnType));
+        if (symbol?.kind === "constructor") return named(expression.callee.name);
       }
       if (expression.callee.kind === "Member" && expression.callee.property === "map" && expression.args[0]?.kind === "Function") {
         const objectType = inferExpression(expression.callee.object, env);
@@ -2296,6 +2356,64 @@ function unionOf(types) {
   const unique = flattened.filter((type, index) => flattened.findIndex((item) => printType(item) === printType(type)) === index);
   return unique.length === 1 ? unique[0] : { kind: "UnionType", types: unique };
 }
+function functionType(params, returnType) {
+  return { kind: "FunctionType", params: params.map(parameterType), result: returnType ?? named("any") };
+}
+function expandedHoverType(type, env) {
+  if (type.kind === "NamedType") {
+    const symbol = env.get(type.name);
+    if (symbol?.kind === "constructor") {
+      const results = symbol.overloads.map((overload) => overload.returnType);
+      return resolveType({ kind: "IntersectionType", types: [symbol.inheritedType, ...results.length ? results : [symbol.inheritedType]] }, env);
+    }
+  }
+  return resolveType(type, env);
+}
+function compactType(type, depth = 0) {
+  const indent = "  ".repeat(depth);
+  const childIndent = "  ".repeat(depth + 1);
+  switch (type.kind) {
+    case "NamedType":
+      return type.name;
+    case "LiteralType":
+      return typeof type.value === "string" ? JSON.stringify(type.value) : String(type.value);
+    case "GenericType":
+      return `${type.name}<${type.args.map((argument) => compactType(argument, depth)).join(", ")}>`;
+    case "ArrayType":
+      return `${compactType(type.element, depth)}[]`;
+    case "UnionType":
+      return type.types.map((part) => compactType(part, depth)).join(" | ");
+    case "IntersectionType":
+      return type.types.map((part) => compactType(part, depth)).join(" & ");
+    case "FunctionType":
+      return `(${type.params.map((parameter, index) => `arg${index}: ${compactType(parameter, depth)}`).join(", ")}) => ${compactType(type.result, depth)}`;
+    case "ObjectType": {
+      if (!type.members.length) return "{}";
+      const members = type.members.map((member) => {
+        const modifier = `${member.readonly ? "readonly " : ""}${member.constant ? "const " : ""}`;
+        const optional = member.optional ? "?" : "";
+        const params = (member.params ?? []).map((param) => `${param.rest ? "..." : ""}${param.name}${param.defaultValue !== void 0 ? "?" : ""}: ${compactType(parameterType(param), depth + 1)}`).join(", ");
+        if (member.accessor === "get") return `${childIndent}get ${member.name}(): ${compactType(member.type, depth + 1)};`;
+        if (member.accessor === "set") return `${childIndent}set ${member.name}(${params}): void;`;
+        if (member.method) return `${childIndent}${modifier}${member.name}${optional}(${params}): ${compactType(member.type, depth + 1)};`;
+        return `${childIndent}${modifier}${member.name}${optional}: ${compactType(member.type, depth + 1)};`;
+      });
+      return `{
+${members.join("\n")}
+${indent}}`;
+    }
+  }
+}
+function typeDescription(type, env) {
+  return compactType(expandedHoverType(type, env));
+}
+function symbolTypeDescription(name, symbol, env) {
+  if (symbol.kind === "constructor") return typeDescription(named(name), env);
+  if (symbol.kind === "var") return typeDescription(symbol.type, env);
+  if (symbol.kind === "type") return typeDescription(symbol.value, env);
+  if (symbol.kind === "fun") return typeDescription(functionType(symbol.params, symbol.returnType), env);
+  return void 0;
+}
 function lengthOf(name, loc) {
   return name.length;
 }
@@ -2321,9 +2439,9 @@ var Analyzer = class {
     for (const statement of statements) if (statement.kind === "Import") this.statement(statement, env);
     this.statements(statements, env);
   }
-  addHover(name, loc, code, docs) {
+  addHover(name, loc, code, docs, typeDescription2) {
     if (!loc) return;
-    this.hovers.push({ line: loc.line, column: loc.column, length: lengthOf(name, loc), code, docs });
+    this.hovers.push({ line: loc.line, column: loc.column, length: lengthOf(name, loc), code, docs, typeDescription: typeDescription2 });
   }
   addTypeHint(loc, name, hasType, type) {
     if (!loc || hasType) return;
@@ -2424,7 +2542,7 @@ var Analyzer = class {
           const importedAlias = statement.importedTypes?.[name];
           const importedSymbol = statement.importedSymbols?.[name];
           const type = importedAlias ? resolveType(importedAlias, env) : importedSymbol?.kind === "var" ? importedSymbol.type ?? named("any") : name === "console" ? consoleType() : name === "Math" && statement.module === "juno" ? mathType() : name === "types" && statement.module === "juno" ? typeUtilitiesType() : statement.module === "types" && ["Partial", "Required", "Readonly", "Pick", "Omit"].includes(name) ? typeUtilitiesType().kind === "ObjectType" ? typeUtilitiesType().members.find((member) => member.name === name)?.type ?? named("any") : named("any") : named("any");
-          const symbol = importedSymbol?.kind === "fun" ? { kind: "fun", params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named("any"), docs: imported } : {
+          const symbol = importedSymbol?.kind === "fun" ? { kind: "fun", params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named("any"), docs: imported } : importedSymbol?.kind === "constructor" && importedSymbol.inheritedType && importedSymbol.overloads ? { kind: "constructor", inheritedType: importedSymbol.inheritedType, overloads: importedSymbol.overloads, docs: imported } : {
             kind: importedAlias || importedSymbol?.kind === "type" ? "type" : "var",
             mutable: false,
             ...importedAlias || importedSymbol?.kind === "type" ? { generics: importedSymbol?.generics ?? [], value: importedAlias ?? importedSymbol?.value ?? named("any") } : { type },
@@ -2432,7 +2550,7 @@ var Analyzer = class {
           };
           this.bind(env, name, symbol);
           const printed = printSymbol(name, symbol);
-          this.addHover(name, statement.namedImportLocs?.[index], printed.code, printed.docs);
+          this.addHover(name, statement.namedImportLocs?.[index], printed.code, printed.docs, symbolTypeDescription(name, symbol, env));
         });
         return;
       }
@@ -2445,9 +2563,9 @@ var Analyzer = class {
         this.walkType(statement.value, env);
         const resolved = resolveType(statement.value, env);
         const printed = {
-          code: `type ${statement.name}${statement.generics.length ? `<${statement.generics.join(", ")}>` : ""} = ${printType(resolved)}`
+          code: `type ${statement.name}${statement.generics.length ? `<${statement.generics.join(", ")}>` : ""}`
         };
-        this.addHover(statement.name, statement.loc, printed.code);
+        this.addHover(statement.name, statement.loc, printed.code, void 0, typeDescription(resolved, env));
         statement.generics.forEach((name, index) => this.addHover(name, statement.genericLocs?.[index], `(type parameter) ${name}`));
         return;
       }
@@ -2486,10 +2604,10 @@ var Analyzer = class {
         } else if (statement.type && statement.initializer && !isAssignableTo(statement.type, inferExpression(statement.initializer, env), env)) {
           this.addDiagnostic(statement.initializer.loc, `Type '${printType(inferExpression(statement.initializer, env))}' is not assignable to type '${printType(statement.type)}'.`);
         }
-        const symbol = { kind: "var", mutable: statement.mutable, type };
+        const symbol = { kind: "var", mutable: statement.mutable, type: statement.type ?? type };
         this.bind(env, statement.name, symbol);
         const printed = printSymbol(statement.name, symbol);
-        this.addHover(statement.name, statement.loc, printed.code);
+        this.addHover(statement.name, statement.loc, printed.code, void 0, symbolTypeDescription(statement.name, symbol, env));
         this.addTypeHint(statement.loc, statement.name, Boolean(statement.type), type);
         if (statement.type) this.walkType(statement.type, env);
         return;
@@ -2547,7 +2665,7 @@ var Analyzer = class {
         });
         const symbol = { kind: "constructor", inheritedType: statement.inheritedType, overloads };
         this.bind(env, statement.name, symbol);
-        this.addHover(statement.name, statement.loc, printSymbol(statement.name, symbol).code);
+        this.addHover(statement.name, statement.loc, printSymbol(statement.name, symbol).code, void 0, symbolTypeDescription(statement.name, symbol, env));
         statement.overloads.forEach((overload, index) => {
           const local = constructorEnv(overload.params);
           for (const param of overload.params) {
@@ -2614,7 +2732,7 @@ var Analyzer = class {
         const symbol = env.get(type.name);
         if (symbol) {
           const printed = printSymbol(type.name, symbol);
-          this.addHover(type.name, type.loc, printed.code, printed.docs);
+          this.addHover(type.name, type.loc, printed.code, printed.docs, symbolTypeDescription(type.name, symbol, env));
         } else this.addHover(type.name, type.loc, `(type) ${type.name}`);
         return;
       }
@@ -2627,10 +2745,11 @@ var Analyzer = class {
           this.addHover(type.name, type.loc, `type ${type.name}${parameters}`);
         } else if (symbol && symbol.kind !== "type") {
           const printed = printSymbol(type.name, symbol);
-          this.addHover(type.name, type.loc, printed.code, printed.docs);
+          this.addHover(type.name, type.loc, printed.code, printed.docs, symbolTypeDescription(type.name, symbol, env));
         } else {
           const resolved = resolveType(type, env);
-          this.addHover(type.name, type.loc, `(type) ${printType(resolved)}`);
+          const short = `(type) ${printType(type)}`;
+          this.addHover(type.name, type.loc, short, void 0, typeDescription(resolved, env));
         }
         type.args.forEach((arg) => this.walkType(arg, env));
         return;
@@ -2695,7 +2814,7 @@ var Analyzer = class {
         const symbol = env.get(expression.name);
         if (symbol) {
           const printed = printSymbol(expression.name, symbol);
-          this.addHover(expression.name, expression.loc, printed.code, printed.docs);
+          this.addHover(expression.name, expression.loc, printed.code, printed.docs, symbolTypeDescription(expression.name, symbol, env));
         }
         return;
       }
@@ -2942,7 +3061,7 @@ function analyze(source, filePath) {
       let directory = path.dirname(path.resolve(filePath ?? process.cwd()));
       let iterablePath;
       while (true) {
-        const candidate = path.join(directory, "iterable.jn");
+        const candidate = path.join(directory, "types", "iterable.jn");
         if (fs.existsSync(candidate)) {
           iterablePath = candidate;
           break;
@@ -2951,7 +3070,7 @@ function analyze(source, filePath) {
         if (parent === directory) break;
         directory = parent;
       }
-      iterablePath ??= path.resolve(__dirname, "../../iterable.jn");
+      iterablePath ??= path.resolve(__dirname, "../../types/iterable.jn");
       if (fs.existsSync(iterablePath)) {
         const iterableStatements = parse(fs.readFileSync(iterablePath, "utf8"), { validate: false, filePath: iterablePath });
         const iterable2 = importedDeclarations(iterableStatements).get("Iterable");
@@ -3022,6 +3141,10 @@ function activate(context) {
         markdown.appendCodeblock(info.code, "junoscript");
         if (info.docs) markdown.appendMarkdown(`
 ${info.docs}`);
+        if (info.typeDescription) {
+          markdown.appendMarkdown("\n\nType description:");
+          markdown.appendCodeblock(info.typeDescription, "typescript");
+        }
         const range = new vscode.Range(info.line - 1, info.column - 1, info.line - 1, info.column - 1 + info.length);
         return new vscode.Hover(markdown, range);
       }

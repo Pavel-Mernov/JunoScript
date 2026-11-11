@@ -22,7 +22,7 @@ export type Expression =
 export type Statement =
     | { kind: 'Variable'; name: string; loc?: Loc; mutable: boolean; type?: TypeNode; initializer?: Expression }
     | { kind: 'Destructure'; bindings: { name: string; loc?: Loc }[]; mutable: boolean; initializer: Expression }
-    | { kind: 'Import'; module: string; defaultImport?: string; defaultImportLoc?: Loc; namedImports: string[]; namedImportLocs?: Loc[]; importedTypes?: Record<string, TypeNode>; importedSymbols?: Record<string, { kind: string; value?: TypeNode; generics?: string[]; params?: Parameter[]; returnType?: TypeNode; type?: TypeNode }> }
+    | { kind: 'Import'; module: string; defaultImport?: string; defaultImportLoc?: Loc; namedImports: string[]; namedImportLocs?: Loc[]; importedTypes?: Record<string, TypeNode>; importedSymbols?: Record<string, { kind: string; value?: TypeNode; generics?: string[]; params?: Parameter[]; returnType?: TypeNode; type?: TypeNode; inheritedType?: TypeNode; overloads?: { params: Parameter[]; returnType: TypeNode }[] }> }
     | { kind: 'Export'; declaration: Statement; default?: boolean }
     | { kind: 'FunctionDeclaration'; name: string; loc?: Loc; params: Parameter[]; returnType?: TypeNode; body: Statement[] }
     | { kind: 'TypeDeclaration'; name: string; loc?: Loc; generics: string[]; genericLocs?: Loc[]; value: TypeNode }
@@ -82,7 +82,7 @@ export class Parser {
         if (this.match('Keyword', 'export')) {
             const isDefault = this.match('Keyword', 'default')
             const declaration = this.statement()
-            if (!['Variable', 'FunctionDeclaration', 'TypeDeclaration'].includes(declaration.kind)) this.fail('export must precede a declaration')
+            if (!['Variable', 'FunctionDeclaration', 'TypeDeclaration', 'ConstructorDeclaration'].includes(declaration.kind)) this.fail('export must precede a declaration')
             return { kind: 'Export', declaration, default: isDefault }
         }
         if (this.match('Keyword', 'let') || this.match('Keyword', 'const')) {

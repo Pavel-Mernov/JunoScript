@@ -4,13 +4,13 @@ import { Lexer } from '../Lexer/lexer'
 import { Parser, TypeNode } from '../Lexer/parser'
 
 const root = resolve(__dirname, '../..')
-const source = readFileSync(resolve(root, 'iterable.jn'), 'utf8')
+const source = readFileSync(resolve(root, 'types/iterable.jn'), 'utf8')
 const declaration = new Parser(Lexer(source).tokenize()).parse().find(statement =>
     statement.kind === 'Export' && statement.declaration.kind === 'TypeDeclaration' && statement.declaration.name === 'Iterable'
 )
 
 if (!declaration || declaration.kind !== 'Export' || declaration.declaration.kind !== 'TypeDeclaration') {
-    throw new Error("iterable.jn must export type 'Iterable'")
+    throw new Error("types/iterable.jn must export type 'Iterable'")
 }
 
 function printType(type: TypeNode, generics: Set<string>): string {
@@ -42,5 +42,5 @@ function printType(type: TypeNode, generics: Set<string>): string {
 const genericNames = declaration.declaration.generics
 const genericText = genericNames.length ? `<${genericNames.join(', ')}>` : ''
 const typeText = printType(declaration.declaration.value, new Set(genericNames))
-const output = `/** Generated from iterable.jn. Edit the JunoScript source instead. */\nexport type Iterable${genericText} = ${typeText}\n`
+const output = `/** Generated from types/iterable.jn. Edit the JunoScript source instead. */\nexport type Iterable${genericText} = ${typeText}\n`
 writeFileSync(resolve(root, 'Modules/juno-types.ts'), output)

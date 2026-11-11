@@ -21,6 +21,7 @@ export type {
     ThisParameterType,
     ThisType
 } from './types'
+export { Range } from './juno'
 export type { Error } from './juno'
 export type { Iterable } from './juno-types'
 

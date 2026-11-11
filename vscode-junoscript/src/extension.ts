@@ -42,6 +42,10 @@ export function activate(context: vscode.ExtensionContext): void {
                 const markdown = new vscode.MarkdownString()
                 markdown.appendCodeblock(info.code, 'junoscript')
                 if (info.docs) markdown.appendMarkdown(`\n${info.docs}`)
+                if (info.typeDescription) {
+                    markdown.appendMarkdown('\n\nType description:')
+                    markdown.appendCodeblock(info.typeDescription, 'typescript')
+                }
                 const range = new vscode.Range(info.line - 1, info.column - 1, info.line - 1, info.column - 1 + info.length)
                 return new vscode.Hover(markdown, range)
             }

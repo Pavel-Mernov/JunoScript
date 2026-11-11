@@ -5,10 +5,41 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { Lexer } from '../Lexer/lexer'
 import { Parser } from '../Lexer/parser'
+import type { Iterable } from './juno-types'
 
 export const console = globalThis.console
 export { types }
 export type { Iterable } from './juno-types'
+
+export type Range = Iterable<number> & {
+    readonly start: number
+    readonly end: number
+    readonly step: number
+}
+
+/** TypeScript entry point matching the JunoScript Range constructor. */
+export function Range(start: number, end?: number, step = 1): Range {
+    if (end === undefined) [start, end] = [0, start]
+    const first = start
+    const last = end
+    const values = (): number[] => {
+        const result: number[] = []
+        if (step > 0) for (let value = first; value < last; value += step) result.push(value)
+        else if (step < 0) for (let value = first; value > last; value += step) result.push(value)
+        return result
+    }
+    return {
+        start: first,
+        end: last,
+        step,
+        iterator: () => {
+            const items = values()
+            let index = 0
+            return () => index < items.length ? { value: items[index++] } : null
+        },
+        toArray: values
+    } as Range
+}
 
 /** TypeScript-compatible error shape for values thrown or returned by Juno code. */
 export type Error = {
@@ -21,16 +52,17 @@ const juno: Record<string, any> = {
     console,
     Math,
     types,
-    Error
+    Error,
+    Range
 }
 
 // Parse the JunoScript declaration so runtime JN imports use the same type AST.
-const iterableSource = readFileSync(resolve(__dirname, '../../iterable.jn'), 'utf8')
+const iterableSource = readFileSync(resolve(__dirname, '../../types/iterable.jn'), 'utf8')
 const iterableDeclaration = new Parser(Lexer(iterableSource).tokenize()).parse().find(statement =>
     statement.kind === 'Export' && statement.declaration.kind === 'TypeDeclaration' && statement.declaration.name === 'Iterable'
 )
 if (!iterableDeclaration || iterableDeclaration.kind !== 'Export' || iterableDeclaration.declaration.kind !== 'TypeDeclaration') {
-    throw new Error("iterable.jn must export type 'Iterable'")
+    throw new Error("types/iterable.jn must export type 'Iterable'")
 }
 const iterableType: TypeNode = iterableDeclaration.declaration.value
 const junoTypes: Record<string, { value: TypeNode; generics: string[] }> = {
