@@ -22,11 +22,11 @@ export type Expression =
 export type Statement =
     | { kind: 'Variable'; name: string; loc?: Loc; mutable: boolean; type?: TypeNode; initializer?: Expression }
     | { kind: 'Destructure'; bindings: { name: string; loc?: Loc }[]; mutable: boolean; initializer: Expression }
-    | { kind: 'Import'; module: string; defaultImport?: string; defaultImportLoc?: Loc; namedImports: string[]; namedImportLocs?: Loc[]; importedTypes?: Record<string, TypeNode>; importedSymbols?: Record<string, { kind: string; value?: TypeNode; generics?: string[]; params?: Parameter[]; returnType?: TypeNode; type?: TypeNode; inheritedType?: TypeNode; overloads?: { params: Parameter[]; returnType: TypeNode }[] }> }
+    | { kind: 'Import'; module: string; defaultImport?: string; defaultImportLoc?: Loc; namedImports: string[]; namedImportLocs?: Loc[]; importedTypes?: Record<string, TypeNode>; importedSymbols?: Record<string, { kind: string; value?: TypeNode; generics?: string[]; params?: Parameter[]; returnType?: TypeNode; type?: TypeNode; inheritedType?: TypeNode; overloads?: { params: Parameter[]; returnType: TypeNode }[]; methods?: { name: string; generics?: string[]; params: Parameter[]; returnType: TypeNode }[] }> }
     | { kind: 'Export'; declaration: Statement; default?: boolean }
-    | { kind: 'FunctionDeclaration'; name: string; loc?: Loc; params: Parameter[]; returnType?: TypeNode; body: Statement[] }
+    | { kind: 'FunctionDeclaration'; name: string; loc?: Loc; generics?: string[]; genericLocs?: Loc[]; params: Parameter[]; returnType?: TypeNode; body: Statement[] }
     | { kind: 'TypeDeclaration'; name: string; loc?: Loc; generics: string[]; genericLocs?: Loc[]; value: TypeNode }
-    | { kind: 'ConstructorDeclaration'; name: string; loc?: Loc; inheritedType: TypeNode; overloads: Extract<Expression, { kind: 'Function' }>[] }
+    | { kind: 'ConstructorDeclaration'; name: string; loc?: Loc; generics: string[]; genericLocs?: Loc[]; inheritedType: TypeNode; overloads: Extract<Expression, { kind: 'Function' }>[]; methods: Extract<Statement, { kind: 'FunctionDeclaration' }>[] }
     | { kind: 'Return'; value?: Expression } | { kind: 'ExpressionStatement'; expression: Expression }
     | { kind: 'If'; condition: Expression; consequent: Statement[]; alternate?: Statement[] }
     | { kind: 'ForOf'; binding: string; loc?: Loc; mutable: boolean; iterable: Expression; body: Statement[] }
@@ -82,7 +82,7 @@ export class Parser {
         if (this.match('Keyword', 'export')) {
             const isDefault = this.match('Keyword', 'default')
             const declaration = this.statement()
-            if (!['Variable', 'FunctionDeclaration', 'TypeDeclaration', 'ConstructorDeclaration'].includes(declaration.kind)) this.fail('export must precede a declaration')
+            if (!['Import', 'Variable', 'FunctionDeclaration', 'TypeDeclaration', 'ConstructorDeclaration'].includes(declaration.kind)) this.fail('export must precede a declaration')
             return { kind: 'Export', declaration, default: isDefault }
         }
         if (this.match('Keyword', 'let') || this.match('Keyword', 'const')) {
@@ -135,14 +135,36 @@ export class Parser {
         }
         if (this.match('Keyword', 'constructor')) {
             const { name, loc } = this.identifier()
+            let generics: string[] = [], genericLocs: Loc[] = []
+            if (this.match('Less')) {
+                const names = this.genericNames()
+                generics = names.map(item => item.name)
+                genericLocs = names.map(item => item.loc)
+            }
             this.take('Colon', "Expected ':' before inherited constructor type")
             const inheritedType = this.type()
             this.take('LeftBrace', "Expected '{' before constructor overloads")
             const overloads: Extract<Expression, { kind: 'Function' }>[] = []
+            const methods: Extract<Statement, { kind: 'FunctionDeclaration' }>[] = []
             this.objectSeparators()
             while (!this.is('RightBrace') && !this.is('EOF')) {
                 this.take('Keyword', "Expected anonymous 'fun' constructor overload")
                 if (this.value(this.tokens[this.pos - 1]) !== 'fun') this.fail("Expected anonymous 'fun' constructor overload")
+                if (!this.is('LeftParen')) {
+                    const method = this.propertyName()
+                    let methodGenerics: string[] = [], methodGenericLocs: Loc[] = []
+                    if (this.match('Less')) {
+                        const names = this.genericNames()
+                        methodGenerics = names.map(item => item.name)
+                        methodGenericLocs = names.map(item => item.loc)
+                    }
+                    const params = this.parameters()
+                    const returnType = this.match('Colon') ? this.type() : undefined
+                    this.take('Equal', "Expected '=' before constructor method body")
+                    methods.push({ kind: 'FunctionDeclaration', name: method.name, loc: method.loc, generics: methodGenerics, genericLocs: methodGenericLocs, params, returnType, body: this.block() })
+                    this.objectSeparators()
+                    continue
+                }
                 const params = this.parameters()
                 const returnType = this.match('Colon') ? this.type() : undefined
                 this.take('Equal', "Expected '=' before constructor body")
@@ -151,7 +173,7 @@ export class Parser {
             }
             this.take('RightBrace')
             if (!overloads.length) this.fail('A constructor needs at least one anonymous function')
-            return { kind: 'ConstructorDeclaration', name, loc, inheritedType, overloads }
+            return { kind: 'ConstructorDeclaration', name, loc, generics, genericLocs, inheritedType, overloads, methods }
         }
         if (this.match('Keyword', 'return')) return { kind: 'Return', value: this.is('Newline') || this.is('Dedent') || this.is('EOF') ? undefined : this.expression() }
         if (this.is('Identifier') && assignmentOperators[this.tokens[this.pos + 1]?.type]) {
@@ -223,8 +245,9 @@ export class Parser {
         this.take('LeftParen'); const params: Parameter[] = []
         let optionalSeen = false, restSeen = false
         while (!this.is('RightParen')) {
-            const rest = this.is('Dot') && this.tokens[this.pos + 1]?.type === 'Dot' && this.tokens[this.pos + 2]?.type === 'Dot'
-            if (rest) this.pos += 3
+            const ellipsis = this.is('Ellipsis')
+            const rest = ellipsis || this.is('Dot') && this.tokens[this.pos + 1]?.type === 'Dot' && this.tokens[this.pos + 2]?.type === 'Dot'
+            if (rest) this.pos += ellipsis ? 1 : 3
             if (restSeen) this.fail('A rest parameter must be the last parameter')
             const { name, loc } = this.identifier(), type = this.match('Colon') ? this.type() : undefined, defaultValue = this.match('Equal') ? this.expression() : undefined
             if (rest && defaultValue !== undefined) this.fail('A rest parameter cannot have a default value')
@@ -619,7 +642,13 @@ export class Parser {
                     value = { kind: 'Function', params, returnType, body: this.block() }
                 }
                 else if (this.match('Colon')) value = this.expression()
-                else if (this.match('LeftParen')) { this.pos--; const params = this.parameters(); this.take('Equal', "Expected '=' for method body"); value = { kind: 'Function', params, body: this.block() } }
+                else if (this.match('LeftParen')) {
+                    this.pos--
+                    const params = this.parameters()
+                    const returnType = this.match('Colon') ? this.type() : undefined
+                    this.take('Equal', "Expected '=' for method body")
+                    value = { kind: 'Function', params, returnType, body: this.block() }
+                }
                 else if (explicitFunction) this.fail("Expected '(' after object function name")
                 else value = { kind: 'Identifier', name: property.name, loc: property.loc }
                 properties.push({ key: property.name, keyLoc: property.loc, value, accessor, readonly })

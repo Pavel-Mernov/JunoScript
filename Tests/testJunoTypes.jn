@@ -1,0 +1,10 @@
+import { Iterable, Range, Array } from 'juno/types'
+import { console } from 'juno'
+
+const textIndices = "abc".indices
+const arrayIndices = [10, 20].indices
+const filled = Array<number>(3, { fill: (element, index) => index })
+
+console.log(textIndices.toArray())
+console.log(arrayIndices.toArray())
+console.log(filled)

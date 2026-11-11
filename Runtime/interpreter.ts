@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
 import { Expression, Parameter, Statement, TypeNode, parse } from '../Lexer/parser'
 import { resolveModule } from '../Modules'
 
@@ -7,7 +7,7 @@ type Binding = { value: unknown; mutable: boolean; declaredType?: TypeNode }
 type TypeAlias = { value: TypeNode; generics: string[] }
 type Environment = { bindings: Map<string, Binding>; types: Map<string, TypeAlias>; parent?: Environment }
 type RuntimeFunction = { __junoFunction: true; params: Parameter[]; body: Statement[]; closure: Environment; thisValue?: unknown }
-type RuntimeConstructor = { __junoConstructor: true; inheritedType: TypeNode; overloads: RuntimeFunction[] }
+type RuntimeConstructor = { __junoConstructor: true; inheritedType: TypeNode; overloads: RuntimeFunction[]; [name: string]: unknown }
 class ReturnValue { constructor(readonly value: unknown) {} }
 
 export class Interpreter {
@@ -97,7 +97,9 @@ export class Interpreter {
                 if (!statement.overloads.length) throw new TypeError(`Constructor '${statement.name}' needs at least one anonymous function`)
                 this.registerTypeDeclarations(statement.inheritedType, env)
                 const overloads = statement.overloads.map(overload => ({ __junoFunction: true as const, params: overload.params, body: overload.body, closure: env }))
-                this.declare(env, statement.name, { __junoConstructor: true, inheritedType: statement.inheritedType, overloads } satisfies RuntimeConstructor, false)
+                const constructor: RuntimeConstructor = { __junoConstructor: true, inheritedType: statement.inheritedType, overloads }
+                for (const method of statement.methods) constructor[method.name] = { __junoFunction: true, params: method.params, body: method.body, closure: env } satisfies RuntimeFunction
+                this.declare(env, statement.name, constructor, false)
                 return
             }
             case 'Return': throw new ReturnValue(statement.value ? this.evaluate(statement.value, env) : null)
@@ -145,10 +147,10 @@ export class Interpreter {
     }
 
     private loadLocalModule(specifier: string, env: Environment): Record<string, unknown> {
-        const junoTypeModule = /^juno\/types\/(.+)$/.exec(specifier)
-        if (!junoTypeModule && !specifier.startsWith('.') && !specifier.startsWith('/')) throw new Error(`Unsupported module '${specifier}'`)
+        const junoTypeModule = specifier === 'juno/types' ? 'index' : /^juno\/types\/(.+)$/.exec(specifier)?.[1]
+        if (!junoTypeModule && !specifier.startsWith('.') && !isAbsolute(specifier)) throw new Error(`Unsupported module '${specifier}'`)
         const base = junoTypeModule
-            ? resolve(__dirname, '../../types', junoTypeModule[1])
+            ? resolve(__dirname, '../../types', junoTypeModule)
             : resolve(this.currentDirectory, specifier)
         const candidates = /\.jn$/i.test(base) ? [base] : [`${base}.jn`, resolve(base, 'index.jn')]
         let source: string | undefined
@@ -161,7 +163,7 @@ export class Interpreter {
         this.currentDirectory = resolve(base, '..')
         const moduleEnv: Environment = { bindings: new Map(), types: new Map(), parent: env }
         const importedModule = (specifier: string, importer: Environment): Record<string, unknown> => {
-            if (specifier.startsWith('juno/types/')) return this.loadLocalModule(specifier, importer)
+            if (specifier === 'juno/types' || specifier.startsWith('juno/types/')) return this.loadLocalModule(specifier, importer)
             const moduleBase = resolve(this.currentDirectory, specifier)
             const options = /\.jn$/i.test(moduleBase) ? [moduleBase] : [`${moduleBase}.jn`, resolve(moduleBase, 'index.jn')]
             const target = options.find(candidate => { try { return readFileSync(candidate).length >= 0 } catch { return false } })
@@ -176,6 +178,19 @@ export class Interpreter {
             if (statement.kind === 'Export') {
                 this.execute(statement.declaration, moduleEnv)
                 const declaration = statement.declaration
+                if (declaration.kind === 'Import') {
+                    if (declaration.defaultImport) {
+                        const binding = this.lookup(moduleEnv, declaration.defaultImport)
+                        if (binding) exported[statement.default ? 'default' : declaration.defaultImport] = binding.value
+                    }
+                    for (const name of declaration.namedImports) {
+                        const binding = this.lookup(moduleEnv, name)
+                        if (binding) exported[name] = binding.value
+                        const alias = moduleEnv.types.get(name)
+                        if (alias) (exported as any).__types ??= {}, (exported as any).__types[name] = alias
+                    }
+                    continue
+                }
                 if (declaration.kind !== 'Variable' && declaration.kind !== 'FunctionDeclaration' && declaration.kind !== 'TypeDeclaration' && declaration.kind !== 'ConstructorDeclaration') continue
                 const binding = this.lookup(moduleEnv, declaration.name)
                 if (binding) exported[statement.default ? 'default' : declaration.name] = binding.value
@@ -269,7 +284,7 @@ export class Interpreter {
                     }
                     if (property.value.kind === 'Function') {
                         const fn = property.value
-                        object[property.key] = { __junoFunction: true, params: fn.params, body: fn.body, closure: env, thisValue: object } satisfies RuntimeFunction
+                        object[property.key] = { __junoFunction: true, params: fn.params, body: fn.expressionBody ? [{ kind: 'Return', value: fn.expressionBody }] : fn.body, closure: env, thisValue: object } satisfies RuntimeFunction
                     } else object[property.key] = this.evaluate(property.value, env)
                     if (property.readonly) readonly.add(property.key)
                 }
@@ -440,8 +455,15 @@ export class Interpreter {
                 }
                 else callee = this.evaluate(expression.callee, env)
                 const args = expression.args.map(arg => this.evaluate(arg, env))
-                if (expression.typeArguments?.length) args.push(expression.typeArguments[0].kind === 'NamedType' ? expression.typeArguments[0].name : 'object')
-                if (typeof callee === 'function') return callee.apply(thisValue, args) ?? null
+                const passesRuntimeType = expression.callee.kind === 'Identifier' && expression.callee.name === 'isType'
+                    || expression.callee.kind === 'Member' && (expression.callee.property === 'isType' || expression.callee.property === 'as')
+                if (passesRuntimeType && expression.typeArguments?.length) args.push(expression.typeArguments[0].kind === 'NamedType' ? expression.typeArguments[0].name : 'object')
+                if (typeof callee === 'function') {
+                    const nativeArgs = args.map(argument => argument?.__junoFunction
+                        ? (...values: unknown[]) => this.callFunction(argument as RuntimeFunction, values)
+                        : argument)
+                    return callee.apply(thisValue, nativeArgs) ?? null
+                }
                 if (callee?.__junoConstructor) {
                     const constructor = callee as RuntimeConstructor
                     if (!constructor.overloads.length) throw new TypeError('A constructor needs at least one anonymous function')
@@ -485,12 +507,12 @@ export class Interpreter {
         let argumentIndex = 0
         for (const param of fn.params) {
             if (param.rest) {
-                this.declare(local, param.name, args.slice(argumentIndex), true)
+                if (param.name !== '_') this.declare(local, param.name, args.slice(argumentIndex), true)
                 argumentIndex = args.length
             } else {
                 const value = argumentIndex < args.length ? args[argumentIndex] : param.defaultValue ? this.evaluate(param.defaultValue, local) : null
                 argumentIndex++
-                this.declare(local, param.name, value, true, param.type)
+                if (param.name !== '_') this.declare(local, param.name, value, true, param.type)
             }
         }
         try {
@@ -879,6 +901,7 @@ export class Interpreter {
                 const matcher: TypeNode = { kind: 'UnionType', types: [string, regex] }
                 const callable = (params: TypeNode[], result: TypeNode) => ({ type: { kind: 'FunctionType', params, result } as TypeNode, optional: false })
                 if (name === 'length') return { type: number, optional: false }
+                if (name === 'indices') return { type: { kind: 'NamedType', name: 'Range' }, optional: false }
                 if (['find', 'findLast'].includes(name)) return callable([matcher], { kind: 'UnionType', types: [string, { kind: 'NamedType', name: 'null' }] })
                 if (['findIndex', 'findLastIndex', 'indexOf', 'lastIndexOf', 'search', 'charCodeAt', 'codePointAt', 'localeCompare'].includes(name)) return callable([matcher], number)
                 if (['includes', 'startsWith', 'endsWith', 'test'].includes(name)) return callable([matcher], boolean)
@@ -935,6 +958,9 @@ export class Interpreter {
         if (name === 'has' && (type.kind === 'ArrayType' || type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) {
             return { type: { kind: 'FunctionType', params: [{ kind: 'NamedType', name: 'string' }], result: { kind: 'NamedType', name: 'boolean' } }, optional: false }
         }
+        if (name === 'indices' && (type.kind === 'ArrayType' || type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) {
+            return { type: { kind: 'NamedType', name: 'Range' }, optional: false }
+        }
         if (name === 'push' && (type.kind === 'ArrayType' || type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) {
             const element = type.kind === 'ArrayType' ? type.element : type.args[0] ?? { kind: 'NamedType', name: 'any' }
             return { type: { kind: 'FunctionType', params: [element], result: { kind: 'NamedType', name: 'number' } }, optional: false }
@@ -949,6 +975,13 @@ export class Interpreter {
         if (object === null || object === undefined) {
             if (optional) return null
             throw new TypeError(`Cannot read property '${property}' of null`)
+        }
+        if (property === 'indices' && (typeof object === 'string' || Array.isArray(object))) {
+            return (resolveModule('juno') as Record<string, any>).Range(object.length)
+        }
+        if (Array.isArray(object) && (property === 'copy' || property === 'toArray')) return () => [...object]
+        if (object && typeof object === 'object' && (object as any).__junoFunction && property === 'call') {
+            return (thisArg: unknown, ...args: unknown[]) => this.callFunction(object as RuntimeFunction, args, thisArg)
         }
         if (typeof object === 'string') {
             const findMatch = (search: string | RegExp, last: boolean): { value: string; index: number } | null => {

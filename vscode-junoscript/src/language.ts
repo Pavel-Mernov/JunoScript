@@ -14,7 +14,7 @@ export type InlayHintInfo = {
     column: number
     label: string
     tooltip: string
-    kind: 'type' | 'parameter'
+    kind: 'type' | 'callbackType' | 'parameter'
 }
 
 export type DiagnosticInfo = {
@@ -29,7 +29,7 @@ type SymbolInfo =
     | { kind: 'var'; mutable: boolean; type: TypeNode; docs?: string }
     | { kind: 'fun'; params: Parameter[]; returnType: TypeNode; docs?: string }
     | { kind: 'type'; generics: string[]; value: TypeNode; docs?: string }
-    | { kind: 'constructor'; inheritedType: TypeNode; overloads: { params: Parameter[]; returnType: TypeNode }[]; docs?: string }
+    | { kind: 'constructor'; generics: string[]; inheritedType: TypeNode; overloads: { params: Parameter[]; returnType: TypeNode }[]; methods: { name: string; generics: string[]; params: Parameter[]; returnType: TypeNode }[]; docs?: string }
     | { kind: 'module'; module: string; docs?: string }
 
 type Env = Map<string, SymbolInfo>
@@ -177,7 +177,12 @@ function printSymbol(name: string, symbol: SymbolInfo): { code: string; docs?: s
             return { code: `type ${name}${generics}`, docs: symbol.docs }
         }
         case 'module': return { code: `import ${name} from '${symbol.module}'`, docs: symbol.docs }
-        case 'constructor': return { code: symbol.overloads.map(item => `constructor ${name}(${item.params.map(printParam).join(', ')}): ${name}`).join('\n'), docs: symbol.docs }
+        case 'constructor': {
+            const generics = symbol.generics.length ? `<${symbol.generics.join(', ')}>` : ''
+            const overloads = symbol.overloads.map(item => `constructor ${name}${generics}(${item.params.map(printParam).join(', ')}): ${name}${generics}`)
+            const methods = symbol.methods.map(method => `${name}.${method.name}${method.generics.length ? `<${method.generics.join(', ')}>` : ''}(${method.params.map(printParam).join(', ')}): ${printType(method.returnType)}`)
+            return { code: [...overloads, ...methods].join('\n'), docs: symbol.docs }
+        }
     }
 }
 
@@ -241,7 +246,10 @@ function resolveType(type: TypeNode, env: Env): TypeNode {
         return members.length ? { kind: 'ObjectType', members } : { kind: 'IntersectionType', types: parts }
     }
     if (type.kind === 'UnionType') return { ...type, types: type.types.map(part => resolveType(part, env)) }
-    if (type.kind === 'ArrayType') return { ...type, element: resolveType(type.element, env) }
+    if (type.kind === 'ArrayType') {
+        const element = resolveType(type.element, env)
+        return env.get('Array')?.kind === 'constructor' ? { kind: 'GenericType', name: 'Array', args: [element] } : { ...type, element }
+    }
     if (type.kind === 'ObjectType') return { ...type, members: type.members.map(member => ({ ...member, type: resolveType(member.type, env), params: member.params?.map(param => ({ ...param, type: param.type ? resolveType(param.type, env) : undefined })) })) }
     if (type.kind === 'FunctionType') return { ...type, params: type.params.map(param => resolveType(param, env)), result: resolveType(type.result, env) }
     return type
@@ -265,6 +273,22 @@ function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | Functi
             return lookupMember(constructor.inheritedType, name, env)
         }
     }
+    if (type.kind === 'GenericType') {
+        const constructor = env.get(type.name)
+        if (constructor?.kind === 'constructor') {
+            for (const overload of constructor.overloads) {
+                const result = instantiate(overload.returnType, constructor.generics, type.args)
+                if (result.kind === 'GenericType' && result.name === type.name) continue
+                const member = lookupMember(result, name, env)
+                if (member) return member
+            }
+            const inherited = instantiate(constructor.inheritedType, constructor.generics, type.args)
+            if (!(inherited.kind === 'GenericType' && inherited.name === type.name)) {
+                const member = lookupMember(inherited, name, env)
+                if (member) return member
+            }
+        }
+    }
     const resolved = resolveType(type, env)
     if (name === 'isType') return { kind: 'fun', params: [], returnType: named('boolean') }
     if (isNamedType(resolved, 'string')) {
@@ -274,6 +298,7 @@ function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | Functi
         const matcher = unionOf([string, named('RegEx')])
         switch (name) {
             case 'length': return number
+            case 'indices': return named('Range')
             case 'at':
             case 'charAt': return fn([p('index', number)], string)
             case 'charCodeAt':
@@ -360,6 +385,9 @@ function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | Functi
         }
         if (name === 'has') return { kind: 'fun', params: [{ name: 'key', type: named('string') }], returnType: named('boolean') }
     }
+    if (resolved.kind === 'FunctionType' && name === 'call') {
+        return { kind: 'fun', params: [{ name: 'thisArg', type: named('any') }, { name: 'args', type: arrayOf(named('any')), rest: true }], returnType: resolved.result }
+    }
     if (name === 'has' && (resolved.kind === 'ArrayType' || resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray'))) {
         return { kind: 'fun', params: [{ name: 'key', type: named('string') }], returnType: named('boolean') }
     }
@@ -375,6 +403,9 @@ function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | Functi
         const number = named('number'), boolean = named('boolean'), string = named('string'), any = named('any')
         switch (name) {
             case 'length': return number
+            case 'indices': return named('Range')
+            case 'copy':
+            case 'toArray': return fn([], arrayOf(element))
             case 'at': return fn([p('index', number)], unionOf([element, named('null')]))
             case 'concat': return fn([{ name: 'items', type: arrayOf(element), rest: true }], arrayOf(element))
             case 'every':
@@ -427,6 +458,54 @@ function lookupAccessor(type: TypeNode, name: string, accessor: 'get' | 'set', e
         }
     }
     return undefined
+}
+
+const arrayMethodDescriptions: Record<string, string> = {
+    at: 'Возвращает элемент по индексу. Отрицательный индекс отсчитывается от конца массива.',
+    concat: 'Создаёт новый массив, объединяя текущий массив с переданными элементами.',
+    copy: 'Создаёт независимую поверхностную копию массива.',
+    copyWithin: 'Копирует часть массива в другую позицию внутри этого же массива.',
+    entries: 'Возвращает пары индекса и значения массива.',
+    enumerate: 'Возвращает пары `[index, value]` для всех элементов массива.',
+    every: 'Проверяет, удовлетворяют ли все элементы условию callback.',
+    fill: 'Заполняет выбранный диапазон массива указанным значением.',
+    filter: 'Создаёт массив элементов, для которых callback вернул true.',
+    find: 'Возвращает первый элемент, удовлетворяющий условию, или null.',
+    findIndex: 'Возвращает индекс первого подходящего элемента или -1.',
+    findLast: 'Возвращает последний элемент, удовлетворяющий условию, или null.',
+    findLastIndex: 'Возвращает индекс последнего подходящего элемента или -1.',
+    flat: 'Создаёт массив с уменьшенной на один уровень вложенностью.',
+    flatMap: 'Применяет callback и объединяет полученные массивы на один уровень.',
+    forEach: 'Вызывает callback для каждого элемента массива.',
+    from: 'Создаёт новый Array из элементов источника и при необходимости преобразует их callback-функцией.',
+    includes: 'Проверяет наличие значения в массиве.',
+    indexOf: 'Возвращает первый индекс значения или -1.',
+    join: 'Объединяет элементы массива в строку через разделитель.',
+    lastIndexOf: 'Возвращает последний индекс значения или -1.',
+    map: 'Создаёт массив результатов вызова callback для каждого элемента.',
+    pop: 'Удаляет и возвращает последний элемент или null для пустого массива.',
+    push: 'Добавляет элементы в конец массива и возвращает новую длину.',
+    reduce: 'Сворачивает массив слева направо в одно значение.',
+    reduceRight: 'Сворачивает массив справа налево в одно значение.',
+    reverse: 'Разворачивает массив на месте и возвращает его.',
+    shift: 'Удаляет и возвращает первый элемент или null для пустого массива.',
+    slice: 'Создаёт копию выбранного диапазона массива.',
+    some: 'Проверяет, удовлетворяет ли хотя бы один элемент условию callback.',
+    sort: 'Сортирует массив на месте. Callback получает два элемента типа массива.',
+    splice: 'Удаляет и добавляет элементы на месте, возвращая удалённые элементы.',
+    toArray: 'Возвращает обычную копию элементов массива.',
+    toReversed: 'Создаёт новый массив с обратным порядком элементов.',
+    toSorted: 'Создаёт новый отсортированный массив.',
+    toSpliced: 'Создаёт новый массив с применённой операцией splice.',
+    unshift: 'Добавляет элементы в начало массива и возвращает новую длину.',
+    with: 'Создаёт копию массива с заменённым элементом по индексу.'
+}
+
+function arrayMethodDescription(type: TypeNode, name: string, env: Env): string | undefined {
+    const resolved = resolveType(type, env)
+    const arrayLike = resolved.kind === 'ArrayType'
+        || resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray')
+    return arrayLike ? arrayMethodDescriptions[name] : undefined
 }
 
 function narrowHasProperty(type: TypeNode, name: string, env: Env): TypeNode {
@@ -493,7 +572,7 @@ function isAssignableTo(expected: TypeNode, actual: TypeNode, env: Env): boolean
     return true
 }
 
-type ImportedSymbol = { kind: 'type'; value: TypeNode; generics: string[] } | { kind: 'fun'; params: Parameter[]; returnType: TypeNode } | { kind: 'constructor'; inheritedType: TypeNode; overloads: { params: Parameter[]; returnType: TypeNode }[] } | { kind: 'var'; type: TypeNode }
+type ImportedSymbol = { kind: 'type'; value: TypeNode; generics: string[] } | { kind: 'fun'; params: Parameter[]; returnType: TypeNode } | { kind: 'constructor'; generics: string[]; inheritedType: TypeNode; overloads: { params: Parameter[]; returnType: TypeNode }[]; methods: { name: string; generics: string[]; params: Parameter[]; returnType: TypeNode }[] } | { kind: 'var'; type: TypeNode }
 
 function importedDeclarations(statements: Statement[], filePath?: string, seen = new Set<string>()): Map<string, ImportedSymbol> {
     const result = new Map<string, ImportedSymbol>()
@@ -506,17 +585,20 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
         else if (declaration.kind === 'FunctionDeclaration' && exported) result.set(declaration.name, { kind: 'fun', params: declaration.params, returnType: declaration.returnType ?? inferFunctionReturnType(declaration.body, globals(), declaration.params) })
         else if (declaration.kind === 'ConstructorDeclaration' && exported) result.set(declaration.name, {
             kind: 'constructor',
+            generics: declaration.generics,
             inheritedType: declaration.inheritedType,
-            overloads: declaration.overloads.map(overload => ({ params: overload.params, returnType: overload.returnType ?? inferFunctionReturnType(overload.body, globals(), overload.params) }))
+            overloads: declaration.overloads.map(overload => ({ params: overload.params, returnType: overload.returnType ?? inferFunctionReturnType(overload.body, globals(), overload.params) })),
+            methods: declaration.methods.map(method => ({ name: method.name, generics: method.generics ?? [], params: method.params, returnType: method.returnType ?? inferFunctionReturnType(method.body, globals(), method.params) }))
         })
         else if (declaration.kind === 'Variable' && exported) result.set(declaration.name, { kind: 'var', type: declaration.type ?? (declaration.initializer ? inferExpression(declaration.initializer, globals()) : named('any')) })
     }
     if (!filePath) return result
     for (const statement of statements) {
-        if (statement.kind !== 'Import' || (!statement.module.startsWith('.') && !statement.module.startsWith('juno/types/'))) continue
+        const importedStatement = statement.kind === 'Import' ? statement : statement.kind === 'Export' && statement.declaration.kind === 'Import' ? statement.declaration : undefined
+        if (!importedStatement || (!importedStatement.module.startsWith('.') && importedStatement.module !== 'juno/types' && !importedStatement.module.startsWith('juno/types/'))) continue
         let base: string
-        if (statement.module.startsWith('juno/types/')) {
-            const relativeModule = statement.module.slice('juno/types/'.length)
+        if (importedStatement.module === 'juno/types' || importedStatement.module.startsWith('juno/types/')) {
+            const relativeModule = importedStatement.module === 'juno/types' ? 'index' : importedStatement.module.slice('juno/types/'.length)
             let directory = path.dirname(path.resolve(filePath))
             let found: string | undefined
             while (true) {
@@ -527,7 +609,7 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
                 directory = parent
             }
             base = found ?? path.resolve(__dirname, '../../types', relativeModule)
-        } else base = path.resolve(path.dirname(filePath), statement.module)
+        } else base = path.resolve(path.dirname(filePath), importedStatement.module)
         const candidates = /\.jn$/i.test(base) ? [base] : [`${base}.jn`, path.resolve(base, 'index.jn')]
         const importedFile = candidates.find(candidate => fs.existsSync(candidate))
         if (!importedFile || seen.has(importedFile)) continue
@@ -535,7 +617,7 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
         try {
             const nested = parse(fs.readFileSync(importedFile, 'utf8'), { validate: false, filePath: importedFile })
             const declarations = importedDeclarations(nested, importedFile, seen)
-            for (const name of statement.namedImports) if (declarations.has(name)) result.set(name, declarations.get(name)!)
+            for (const name of importedStatement.namedImports) if (declarations.has(name)) result.set(name, declarations.get(name)!)
         } catch { /* diagnostics handle unresolved or invalid modules */ }
     }
     if (statements.some(item => item.kind === 'Import' && item.module === 'juno' && item.namedImports.includes('Error'))) {
@@ -575,6 +657,74 @@ function inferLiteral(value: string | number | bigint | boolean | null): TypeNod
     if (typeof value === 'number') return named('number')
     if (typeof value === 'bigint') return named('BigInt')
     return named('boolean')
+}
+
+function inferGenericArguments(generics: string[], params: Parameter[], args: Expression[], env: Env): TypeNode[] {
+    const inferred = new Map<string, TypeNode>()
+    const collect = (pattern: TypeNode | undefined, actual: TypeNode): void => {
+        if (!pattern) return
+        if (pattern.kind === 'NamedType' && generics.includes(pattern.name)) {
+            if (!inferred.has(pattern.name) && !isNamedType(actual, 'any')) inferred.set(pattern.name, actual)
+            return
+        }
+        if (pattern.kind === 'ArrayType') {
+            const resolved = resolveType(actual, env)
+            const element = resolved.kind === 'ArrayType' ? resolved.element : resolved.kind === 'GenericType' && resolved.name === 'Array' ? resolved.args[0] : undefined
+            if (element) collect(pattern.element, element)
+            return
+        }
+        if (pattern.kind === 'GenericType') {
+            const resolved = resolveType(actual, env)
+            if (resolved.kind === 'GenericType' && resolved.name === pattern.name) pattern.args.forEach((part, index) => collect(part, resolved.args[index] ?? named('any')))
+            else if (pattern.name === 'Iterable') {
+                const element = resolved.kind === 'ArrayType' ? resolved.element : resolved.kind === 'GenericType' && resolved.name === 'Array' ? resolved.args[0] : iterableElementType(resolved, env)
+                if (element) collect(pattern.args[0], element)
+            }
+            return
+        }
+        if (pattern.kind === 'FunctionType') {
+            const resolved = removeNull(resolveType(actual, env))
+            if (resolved.kind === 'FunctionType') {
+                pattern.params.forEach((part, index) => collect(part, resolved.params[index] ?? named('any')))
+                collect(pattern.result, resolved.result)
+            }
+            return
+        }
+        if (pattern.kind === 'ObjectType') {
+            const resolved = resolveType(actual, env)
+            if (resolved.kind === 'ObjectType') for (const member of pattern.members) collect(member.type, resolved.members.find(item => item.name === member.name)?.type ?? named('any'))
+        }
+    }
+    params.forEach((param, index) => {
+        if (param.rest) {
+            const restType = parameterType(param)
+            const element = restType.kind === 'ArrayType' ? restType.element : restType.kind === 'GenericType' && restType.name === 'Array' ? restType.args[0] : undefined
+            if (element) args.slice(index).forEach(arg => collect(element, inferExpression(arg, env)))
+            return
+        }
+        const arg = args[index]
+        if (arg) collect(parameterType(param), inferExpression(arg, env))
+    })
+    return generics.map(name => inferred.get(name) ?? named('any'))
+}
+
+function constructorMethodForCall(callee: Expression, args: Expression[], env: Env): { params: Parameter[]; returnType: TypeNode } | undefined {
+    if (callee.kind !== 'Member' || callee.object.kind !== 'Identifier') return undefined
+    const constructor = env.get(callee.object.name)
+    if (constructor?.kind !== 'constructor') return undefined
+    const method = constructor.methods.find(item => item.name === callee.property)
+    if (!method) return undefined
+    const generics = [...constructor.generics, ...method.generics]
+    const inferred = inferGenericArguments(generics, method.params, args, env)
+    if (callee.object.name === 'Array' && method.name === 'from' && constructor.generics[0] && method.generics[0]) {
+        const targetIndex = generics.indexOf(constructor.generics[0])
+        const sourceIndex = generics.indexOf(method.generics[0])
+        if (!args[1] || isNamedType(inferred[targetIndex], 'any')) inferred[targetIndex] = inferred[sourceIndex]
+    }
+    return {
+        params: method.params.map(param => ({ ...param, type: param.type ? instantiate(param.type, generics, inferred) : undefined })),
+        returnType: instantiate(method.returnType, generics, inferred)
+    }
 }
 
 const errorType = (): TypeNode => named('<Error-Type>')
@@ -741,6 +891,11 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             return binaryResultType(expression.operator, left, right)
         }
         case 'Member': {
+            if (expression.object.kind === 'Identifier') {
+                const constructor = env.get(expression.object.name)
+                const method = constructor?.kind === 'constructor' ? constructor.methods.find(item => item.name === expression.property) : undefined
+                if (method) return functionType(method.params, method.returnType)
+            }
             const objectType = inferExpression(expression.object, env)
             const nonNullObjectType = removeNull(resolveType(objectType, env))
             const resolvedObjectType = resolveType(nonNullObjectType, env)
@@ -770,11 +925,19 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
         case 'Call': {
             if (expression.callee.kind === 'Member' && expression.callee.property === 'isType') return named('boolean')
             if (expression.callee.kind === 'Identifier' && expression.callee.name === 'isType') return named('boolean')
+            const constructorMethod = constructorMethodForCall(expression.callee, expression.args, env)
+            if (constructorMethod) return constructorMethod.returnType
             if (expression.callee.kind === 'Member' && expression.callee.property === 'as' && expression.typeArguments?.length) return expression.typeArguments[0]
             if (expression.callee.kind === 'Identifier' && env.get(expression.callee.name)?.kind === 'type') return named(expression.callee.name)
             if (expression.callee.kind === 'Identifier') {
                 const symbol = env.get(expression.callee.name)
-                if (symbol?.kind === 'constructor') return named(expression.callee.name)
+                if (symbol?.kind === 'constructor') {
+                    if (!symbol.generics.length) return named(expression.callee.name)
+                    const args = expression.typeArguments?.length
+                        ? expression.typeArguments
+                        : inferGenericArguments(symbol.generics, symbol.overloads[0]?.params ?? [], expression.args, env)
+                    return { kind: 'GenericType', name: expression.callee.name, args }
+                }
             }
             if (expression.callee.kind === 'Member' && expression.callee.property === 'map' && expression.args[0]?.kind === 'Function') {
                 const objectType = inferExpression(expression.callee.object, env)
@@ -967,7 +1130,7 @@ class Analyzer {
         this.hovers.push({ line: loc.line, column: loc.column, length: lengthOf(name, loc), code, docs, typeDescription })
     }
 
-    private addTypeHint(loc: Loc | undefined, name: string, hasType: boolean, type: TypeNode): void {
+    private addTypeHint(loc: Loc | undefined, name: string, hasType: boolean, type: TypeNode, kind: 'type' | 'callbackType' = 'type'): void {
         if (!loc || hasType) return
         const printed = printType(type)
         this.hints.push({
@@ -975,7 +1138,7 @@ class Analyzer {
             column: loc.column + name.length,
             label: `: ${printed}`,
             tooltip: printed,
-            kind: 'type'
+            kind
         })
     }
 
@@ -1095,7 +1258,7 @@ class Analyzer {
                     const symbol: SymbolInfo = importedSymbol?.kind === 'fun'
                         ? { kind: 'fun', params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named('any'), docs: imported }
                         : importedSymbol?.kind === 'constructor' && importedSymbol.inheritedType && importedSymbol.overloads
-                            ? { kind: 'constructor', inheritedType: importedSymbol.inheritedType, overloads: importedSymbol.overloads, docs: imported }
+                            ? { kind: 'constructor', generics: importedSymbol.generics ?? [], inheritedType: importedSymbol.inheritedType, overloads: importedSymbol.overloads, methods: (importedSymbol.methods ?? []).map(method => ({ ...method, generics: method.generics ?? [] })), docs: imported }
                         : {
                         kind: importedAlias || importedSymbol?.kind === 'type' ? 'type' : 'var',
                         mutable: false,
@@ -1216,7 +1379,8 @@ class Analyzer {
                     const returnType = overload.returnType ?? inferFunctionReturnType(overload.body, local, overload.params)
                     return { params: overload.params, returnType }
                 })
-                const symbol: SymbolInfo = { kind: 'constructor', inheritedType: statement.inheritedType, overloads }
+                const methods = statement.methods.map(method => ({ name: method.name, generics: method.generics ?? [], params: method.params, returnType: method.returnType ?? inferFunctionReturnType(method.body, env, method.params) }))
+                const symbol: SymbolInfo = { kind: 'constructor', generics: statement.generics, inheritedType: statement.inheritedType, overloads, methods }
                 this.bind(env, statement.name, symbol)
                 this.addHover(statement.name, statement.loc, printSymbol(statement.name, symbol).code, undefined, symbolTypeDescription(statement.name, symbol, env))
                 statement.overloads.forEach((overload, index) => {
@@ -1230,9 +1394,21 @@ class Analyzer {
                     }
                     this.statements(overload.body, local)
                     const actual = overloads[index].returnType
-                    if (!isAssignableTo(statement.inheritedType, actual, env)) {
+                    if (statement.name !== 'Array' && !isAssignableTo(statement.inheritedType, actual, env)) {
                         this.addDiagnostic(statement.loc, `Constructor overload returns '${printType(actual)}', which is not assignable to inherited type '${printType(statement.inheritedType)}'.`)
                     }
+                })
+                statement.methods.forEach((method, index) => {
+                    const methodInfo = methods[index]
+                    const generics = methodInfo.generics.length ? `<${methodInfo.generics.join(', ')}>` : ''
+                    this.addHover(method.name, method.loc, `(method) ${statement.name}.${method.name}${generics}(${method.params.map(printParam).join(', ')}): ${printType(methodInfo.returnType)}`, arrayMethodDescriptions[method.name])
+                    const local = bindInferredParameters(method.params, env)
+                    method.params.forEach(param => {
+                        const type = (local.get(param.name) as Extract<SymbolInfo, { kind: 'var' }> | undefined)?.type ?? parameterType(param)
+                        this.addHover(param.name, param.loc, param.name === '_' ? `(ignored parameter) _: ${printType(type)}` : parameterHover(param, type))
+                        if (param.name !== '_') this.addTypeHint(param.loc, param.name, Boolean(param.type), type)
+                    })
+                    this.statements(method.body, local)
                 })
                 return
             }
@@ -1376,11 +1552,27 @@ class Analyzer {
                 if (symbol) {
                     const printed = printSymbol(expression.name, symbol)
                     this.addHover(expression.name, expression.loc, printed.code, printed.docs, symbolTypeDescription(expression.name, symbol, env))
+                } else if (expression.loc) {
+                    this.diagnostics.push({
+                        line: expression.loc.line,
+                        column: expression.loc.column,
+                        length: expression.name.length,
+                        message: `Cannot find name '${expression.name}'.`
+                    })
                 }
                 return
             }
             case 'Array':
                 expression.elements.forEach(item => this.walkExpression(item, env, thisType))
+                return
+            case 'Assignment':
+                if (!env.has(expression.name) && expression.loc) this.diagnostics.push({
+                    line: expression.loc.line,
+                    column: expression.loc.column,
+                    length: expression.name.length,
+                    message: `Cannot find name '${expression.name}'.`
+                })
+                this.walkExpression(expression.value, env, thisType)
                 return
             case 'MemberAssignment':
                 this.walkExpression(expression.object, env, thisType)
@@ -1416,7 +1608,7 @@ class Analyzer {
                         if (symbol) {
                             const printed = printSymbol(property.value.name, symbol)
                             this.addHover(property.value.name, property.value.loc, printed.code, printed.docs)
-                        }
+                        } else this.walkExpression(property.value, env, thisType)
                     } else if (property.value.kind === 'Function') this.walkFunction(property.value, methodEnv)
                     else this.walkExpression(property.value, env, thisType)
                 }
@@ -1455,6 +1647,15 @@ class Analyzer {
             }
             case 'Member': {
                 this.walkExpression(expression.object, env, thisType)
+                if (expression.object.kind === 'Identifier') {
+                    const constructor = env.get(expression.object.name)
+                    const method = constructor?.kind === 'constructor' ? constructor.methods.find(item => item.name === expression.property) : undefined
+                    if (method) {
+                        const generics = method.generics.length ? `<${method.generics.join(', ')}>` : ''
+                        this.addHover(expression.property, expression.loc, `(method) ${expression.object.name}.${method.name}${generics}(${method.params.map(printParam).join(', ')}): ${printType(method.returnType)}`, arrayMethodDescriptions[method.name])
+                        return
+                    }
+                }
                 const objectType = inferExpression(expression.object, env)
                 const nullableObject = isNullable(objectType, env)
                 const nonNullObjectType = removeNull(resolveType(objectType, env))
@@ -1465,7 +1666,7 @@ class Analyzer {
                     const signature = expression.property === 'as'
                         ? '(method) as<T>(): T'
                         : `(method) ${expression.property}(${member.params.map(printParam).join(', ')}): ${printType(member.returnType)}`
-                    this.addHover(expression.property, expression.loc, signature)
+                    this.addHover(expression.property, expression.loc, signature, arrayMethodDescription(nonNullObjectType, expression.property, env))
                 } else if (member) {
                     this.addHover(expression.property, expression.loc, `(property) ${expression.property}: ${printType(member)}`)
                 } else if (resolvedObjectType.kind === 'UnionType') {
@@ -1529,8 +1730,17 @@ class Analyzer {
                     const hover = this.hovers.find(item => item.line === expression.callee.loc?.line && item.column === expression.callee.loc?.column && item.code.startsWith('(method)'))
                     if (hover) hover.code += `\n(infer) ${printType(inferExpression(expression, env))}`
                 }
+                const constructorMethod = constructorMethodForCall(expression.callee, expression.args, env)
+                const methodParameters = constructorMethod?.params ?? (expression.callee.kind === 'Member'
+                    ? (() => {
+                        const member = lookupMember(inferExpression(expression.callee.object, env), expression.callee.property, env)
+                        return isFunctionSymbol(member) ? member.params : undefined
+                    })()
+                    : undefined)
                 expression.args.forEach((arg, index) => {
-                    const contextualType = calleeType.kind === 'FunctionType' ? calleeType.params[index] : undefined
+                    const contextualType = methodParameters?.[index]
+                        ? parameterType(methodParameters[index])
+                        : calleeType.kind === 'FunctionType' ? calleeType.params[index] : undefined
                     if (arg.kind === 'Function') this.walkFunction(arg, env, contextualType)
                     else this.walkExpression(arg, env, thisType)
                 })
@@ -1558,18 +1768,19 @@ class Analyzer {
 
     private walkFunction(expression: Extract<Expression, { kind: 'Function' }>, env: Env, contextualType?: TypeNode): void {
         const local = bindInferredParameters(expression.params, env)
-        const contextual = contextualType ? resolveType(contextualType, env) : undefined
+        const contextual = contextualType ? removeNull(resolveType(contextualType, env)) : undefined
         if (contextual?.kind === 'FunctionType') expression.params.forEach((param, index) => {
             if (!param.type && contextual.params[index]) local.set(param.name, { kind: 'var', mutable: true, type: contextual.params[index] })
         })
-        for (const param of expression.params) {
-            const type = (local.get(param.name) as Extract<SymbolInfo, { kind: 'var' }>).type
+        for (const [index, param] of expression.params.entries()) {
+            const contextualParameter = contextual?.kind === 'FunctionType' ? contextual.params[index] : undefined
+            const type = contextualParameter ?? (local.get(param.name) as Extract<SymbolInfo, { kind: 'var' }>).type
             if (!param.type && param.defaultValue !== undefined) {
                 const index = expression.params.indexOf(param)
                 expression.params[index] = { ...param, type }
             }
-            this.addHover(param.name, param.loc, parameterHover(param, type))
-            this.addTypeHint(param.loc, param.name, Boolean(param.type), type)
+            this.addHover(param.name, param.loc, param.name === '_' ? `(ignored parameter) _: ${printType(type)}` : parameterHover(param, type))
+            if (param.name !== '_') this.addTypeHint(param.loc, param.name, Boolean(param.type), type, 'callbackType')
             if (param.type) this.walkType(param.type, env)
             if (param.defaultValue) this.walkExpression(param.defaultValue, local)
         }

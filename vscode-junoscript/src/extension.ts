@@ -62,11 +62,11 @@ export function activate(context: vscode.ExtensionContext): void {
                     const item = new vscode.InlayHint(
                         position,
                         hint.label,
-                        hint.kind === 'type' ? vscode.InlayHintKind.Type : vscode.InlayHintKind.Parameter
+                        hint.kind === 'parameter' ? vscode.InlayHintKind.Parameter : vscode.InlayHintKind.Type
                     )
                     item.tooltip = new vscode.MarkdownString()
                     item.tooltip.appendCodeblock(hint.tooltip, 'junoscript')
-                    item.paddingLeft = hint.kind === 'type'
+                    item.paddingLeft = hint.kind !== 'parameter'
                     item.paddingRight = hint.kind === 'parameter'
                     return [item]
                 })

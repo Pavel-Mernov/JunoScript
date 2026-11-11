@@ -394,7 +394,7 @@ var Parser = class _Parser {
     if (this.match("Keyword", "export")) {
       const isDefault = this.match("Keyword", "default");
       const declaration = this.statement();
-      if (!["Variable", "FunctionDeclaration", "TypeDeclaration", "ConstructorDeclaration"].includes(declaration.kind)) this.fail("export must precede a declaration");
+      if (!["Import", "Variable", "FunctionDeclaration", "TypeDeclaration", "ConstructorDeclaration"].includes(declaration.kind)) this.fail("export must precede a declaration");
       return { kind: "Export", declaration, default: isDefault };
     }
     if (this.match("Keyword", "let") || this.match("Keyword", "const")) {
@@ -453,14 +453,30 @@ var Parser = class _Parser {
     }
     if (this.match("Keyword", "constructor")) {
       const { name, loc } = this.identifier();
+      let generics = [], genericLocs = [];
+      if (this.match("Less")) {
+        const names = this.genericNames();
+        generics = names.map((item) => item.name);
+        genericLocs = names.map((item) => item.loc);
+      }
       this.take("Colon", "Expected ':' before inherited constructor type");
       const inheritedType = this.type();
       this.take("LeftBrace", "Expected '{' before constructor overloads");
       const overloads = [];
+      const methods = [];
       this.objectSeparators();
       while (!this.is("RightBrace") && !this.is("EOF")) {
         this.take("Keyword", "Expected anonymous 'fun' constructor overload");
         if (this.value(this.tokens[this.pos - 1]) !== "fun") this.fail("Expected anonymous 'fun' constructor overload");
+        if (!this.is("LeftParen")) {
+          const method2 = this.propertyName();
+          const params2 = this.parameters();
+          const returnType2 = this.match("Colon") ? this.type() : void 0;
+          this.take("Equal", "Expected '=' before constructor method body");
+          methods.push({ kind: "FunctionDeclaration", name: method2.name, loc: method2.loc, params: params2, returnType: returnType2, body: this.block() });
+          this.objectSeparators();
+          continue;
+        }
         const params = this.parameters();
         const returnType = this.match("Colon") ? this.type() : void 0;
         this.take("Equal", "Expected '=' before constructor body");
@@ -469,7 +485,7 @@ var Parser = class _Parser {
       }
       this.take("RightBrace");
       if (!overloads.length) this.fail("A constructor needs at least one anonymous function");
-      return { kind: "ConstructorDeclaration", name, loc, inheritedType, overloads };
+      return { kind: "ConstructorDeclaration", name, loc, generics, genericLocs, inheritedType, overloads, methods };
     }
     if (this.match("Keyword", "return")) return { kind: "Return", value: this.is("Newline") || this.is("Dedent") || this.is("EOF") ? void 0 : this.expression() };
     if (this.is("Identifier") && assignmentOperators[this.tokens[this.pos + 1]?.type]) {
@@ -550,8 +566,9 @@ var Parser = class _Parser {
     const params = [];
     let optionalSeen = false, restSeen = false;
     while (!this.is("RightParen")) {
-      const rest = this.is("Dot") && this.tokens[this.pos + 1]?.type === "Dot" && this.tokens[this.pos + 2]?.type === "Dot";
-      if (rest) this.pos += 3;
+      const ellipsis = this.is("Ellipsis");
+      const rest = ellipsis || this.is("Dot") && this.tokens[this.pos + 1]?.type === "Dot" && this.tokens[this.pos + 2]?.type === "Dot";
+      if (rest) this.pos += ellipsis ? 1 : 3;
       if (restSeen) this.fail("A rest parameter must be the last parameter");
       const { name, loc } = this.identifier(), type = this.match("Colon") ? this.type() : void 0, defaultValue = this.match("Equal") ? this.expression() : void 0;
       if (rest && defaultValue !== void 0) this.fail("A rest parameter cannot have a default value");
@@ -1045,8 +1062,9 @@ var Parser = class _Parser {
         else if (this.match("LeftParen")) {
           this.pos--;
           const params = this.parameters();
+          const returnType = this.match("Colon") ? this.type() : void 0;
           this.take("Equal", "Expected '=' for method body");
-          value = { kind: "Function", params, body: this.block() };
+          value = { kind: "Function", params, returnType, body: this.block() };
         } else if (explicitFunction) this.fail("Expected '(' after object function name");
         else value = { kind: "Identifier", name: property.name, loc: property.loc };
         properties.push({ key: property.name, keyLoc: property.loc, value, accessor, readonly });
@@ -1639,8 +1657,12 @@ function printSymbol(name, symbol) {
     }
     case "module":
       return { code: `import ${name} from '${symbol.module}'`, docs: symbol.docs };
-    case "constructor":
-      return { code: symbol.overloads.map((item) => `constructor ${name}(${item.params.map(printParam).join(", ")}): ${name}`).join("\n"), docs: symbol.docs };
+    case "constructor": {
+      const generics = symbol.generics.length ? `<${symbol.generics.join(", ")}>` : "";
+      const overloads = symbol.overloads.map((item) => `constructor ${name}${generics}(${item.params.map(printParam).join(", ")}): ${name}${generics}`);
+      const methods = symbol.methods.map((method2) => `${name}.${method2.name}(${method2.params.map(printParam).join(", ")}): ${printType(method2.returnType)}`);
+      return { code: [...overloads, ...methods].join("\n"), docs: symbol.docs };
+    }
   }
 }
 function instantiate(type, generics, args) {
@@ -1702,7 +1724,10 @@ function resolveType(type, env) {
     return members.length ? { kind: "ObjectType", members } : { kind: "IntersectionType", types: parts };
   }
   if (type.kind === "UnionType") return { ...type, types: type.types.map((part) => resolveType(part, env)) };
-  if (type.kind === "ArrayType") return { ...type, element: resolveType(type.element, env) };
+  if (type.kind === "ArrayType") {
+    const element = resolveType(type.element, env);
+    return env.get("Array")?.kind === "constructor" ? { kind: "GenericType", name: "Array", args: [element] } : { ...type, element };
+  }
   if (type.kind === "ObjectType") return { ...type, members: type.members.map((member) => ({ ...member, type: resolveType(member.type, env), params: member.params?.map((param) => ({ ...param, type: param.type ? resolveType(param.type, env) : void 0 })) })) };
   if (type.kind === "FunctionType") return { ...type, params: type.params.map((param) => resolveType(param, env)), result: resolveType(type.result, env) };
   return type;
@@ -1722,6 +1747,22 @@ function lookupMember(type, name, env) {
       return lookupMember(constructor.inheritedType, name, env);
     }
   }
+  if (type.kind === "GenericType") {
+    const constructor = env.get(type.name);
+    if (constructor?.kind === "constructor") {
+      for (const overload of constructor.overloads) {
+        const result = instantiate(overload.returnType, constructor.generics, type.args);
+        if (result.kind === "GenericType" && result.name === type.name) continue;
+        const member = lookupMember(result, name, env);
+        if (member) return member;
+      }
+      const inherited = instantiate(constructor.inheritedType, constructor.generics, type.args);
+      if (!(inherited.kind === "GenericType" && inherited.name === type.name)) {
+        const member = lookupMember(inherited, name, env);
+        if (member) return member;
+      }
+    }
+  }
   const resolved = resolveType(type, env);
   if (name === "isType") return { kind: "fun", params: [], returnType: named("boolean") };
   if (isNamedType(resolved, "string")) {
@@ -1732,6 +1773,8 @@ function lookupMember(type, name, env) {
     switch (name) {
       case "length":
         return number;
+      case "indices":
+        return named("Range");
       case "at":
       case "charAt":
         return fn([p("index", number)], string);
@@ -1858,6 +1901,8 @@ function lookupMember(type, name, env) {
     switch (name) {
       case "length":
         return number;
+      case "indices":
+        return named("Range");
       case "at":
         return fn([p("index", number)], unionOf([element, named("null")]));
       case "concat":
@@ -1931,6 +1976,51 @@ function lookupAccessor(type, name, accessor, env) {
   }
   return void 0;
 }
+var arrayMethodDescriptions = {
+  at: "\u0412\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u044D\u043B\u0435\u043C\u0435\u043D\u0442 \u043F\u043E \u0438\u043D\u0434\u0435\u043A\u0441\u0443. \u041E\u0442\u0440\u0438\u0446\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0439 \u0438\u043D\u0434\u0435\u043A\u0441 \u043E\u0442\u0441\u0447\u0438\u0442\u044B\u0432\u0430\u0435\u0442\u0441\u044F \u043E\u0442 \u043A\u043E\u043D\u0446\u0430 \u043C\u0430\u0441\u0441\u0438\u0432\u0430.",
+  concat: "\u0421\u043E\u0437\u0434\u0430\u0451\u0442 \u043D\u043E\u0432\u044B\u0439 \u043C\u0430\u0441\u0441\u0438\u0432, \u043E\u0431\u044A\u0435\u0434\u0438\u043D\u044F\u044F \u0442\u0435\u043A\u0443\u0449\u0438\u0439 \u043C\u0430\u0441\u0441\u0438\u0432 \u0441 \u043F\u0435\u0440\u0435\u0434\u0430\u043D\u043D\u044B\u043C\u0438 \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u0430\u043C\u0438.",
+  copy: "\u0421\u043E\u0437\u0434\u0430\u0451\u0442 \u043D\u0435\u0437\u0430\u0432\u0438\u0441\u0438\u043C\u0443\u044E \u043F\u043E\u0432\u0435\u0440\u0445\u043D\u043E\u0441\u0442\u043D\u0443\u044E \u043A\u043E\u043F\u0438\u044E \u043C\u0430\u0441\u0441\u0438\u0432\u0430.",
+  copyWithin: "\u041A\u043E\u043F\u0438\u0440\u0443\u0435\u0442 \u0447\u0430\u0441\u0442\u044C \u043C\u0430\u0441\u0441\u0438\u0432\u0430 \u0432 \u0434\u0440\u0443\u0433\u0443\u044E \u043F\u043E\u0437\u0438\u0446\u0438\u044E \u0432\u043D\u0443\u0442\u0440\u0438 \u044D\u0442\u043E\u0433\u043E \u0436\u0435 \u043C\u0430\u0441\u0441\u0438\u0432\u0430.",
+  entries: "\u0412\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u043F\u0430\u0440\u044B \u0438\u043D\u0434\u0435\u043A\u0441\u0430 \u0438 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u044F \u043C\u0430\u0441\u0441\u0438\u0432\u0430.",
+  enumerate: "\u0412\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u043F\u0430\u0440\u044B `[index, value]` \u0434\u043B\u044F \u0432\u0441\u0435\u0445 \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u043E\u0432 \u043C\u0430\u0441\u0441\u0438\u0432\u0430.",
+  every: "\u041F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u0442, \u0443\u0434\u043E\u0432\u043B\u0435\u0442\u0432\u043E\u0440\u044F\u044E\u0442 \u043B\u0438 \u0432\u0441\u0435 \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u044B \u0443\u0441\u043B\u043E\u0432\u0438\u044E callback.",
+  fill: "\u0417\u0430\u043F\u043E\u043B\u043D\u044F\u0435\u0442 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u044B\u0439 \u0434\u0438\u0430\u043F\u0430\u0437\u043E\u043D \u043C\u0430\u0441\u0441\u0438\u0432\u0430 \u0443\u043A\u0430\u0437\u0430\u043D\u043D\u044B\u043C \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435\u043C.",
+  filter: "\u0421\u043E\u0437\u0434\u0430\u0451\u0442 \u043C\u0430\u0441\u0441\u0438\u0432 \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u043E\u0432, \u0434\u043B\u044F \u043A\u043E\u0442\u043E\u0440\u044B\u0445 callback \u0432\u0435\u0440\u043D\u0443\u043B true.",
+  find: "\u0412\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u043F\u0435\u0440\u0432\u044B\u0439 \u044D\u043B\u0435\u043C\u0435\u043D\u0442, \u0443\u0434\u043E\u0432\u043B\u0435\u0442\u0432\u043E\u0440\u044F\u044E\u0449\u0438\u0439 \u0443\u0441\u043B\u043E\u0432\u0438\u044E, \u0438\u043B\u0438 null.",
+  findIndex: "\u0412\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u0438\u043D\u0434\u0435\u043A\u0441 \u043F\u0435\u0440\u0432\u043E\u0433\u043E \u043F\u043E\u0434\u0445\u043E\u0434\u044F\u0449\u0435\u0433\u043E \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u0430 \u0438\u043B\u0438 -1.",
+  findLast: "\u0412\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0438\u0439 \u044D\u043B\u0435\u043C\u0435\u043D\u0442, \u0443\u0434\u043E\u0432\u043B\u0435\u0442\u0432\u043E\u0440\u044F\u044E\u0449\u0438\u0439 \u0443\u0441\u043B\u043E\u0432\u0438\u044E, \u0438\u043B\u0438 null.",
+  findLastIndex: "\u0412\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u0438\u043D\u0434\u0435\u043A\u0441 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0433\u043E \u043F\u043E\u0434\u0445\u043E\u0434\u044F\u0449\u0435\u0433\u043E \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u0430 \u0438\u043B\u0438 -1.",
+  flat: "\u0421\u043E\u0437\u0434\u0430\u0451\u0442 \u043C\u0430\u0441\u0441\u0438\u0432 \u0441 \u0443\u043C\u0435\u043D\u044C\u0448\u0435\u043D\u043D\u043E\u0439 \u043D\u0430 \u043E\u0434\u0438\u043D \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u043E\u0441\u0442\u044C\u044E.",
+  flatMap: "\u041F\u0440\u0438\u043C\u0435\u043D\u044F\u0435\u0442 callback \u0438 \u043E\u0431\u044A\u0435\u0434\u0438\u043D\u044F\u0435\u0442 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u043D\u044B\u0435 \u043C\u0430\u0441\u0441\u0438\u0432\u044B \u043D\u0430 \u043E\u0434\u0438\u043D \u0443\u0440\u043E\u0432\u0435\u043D\u044C.",
+  forEach: "\u0412\u044B\u0437\u044B\u0432\u0430\u0435\u0442 callback \u0434\u043B\u044F \u043A\u0430\u0436\u0434\u043E\u0433\u043E \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u0430 \u043C\u0430\u0441\u0441\u0438\u0432\u0430.",
+  from: "\u0421\u043E\u0437\u0434\u0430\u0451\u0442 \u043D\u043E\u0432\u044B\u0439 Array \u0438\u0437 \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u043E\u0432 \u0438\u0441\u0442\u043E\u0447\u043D\u0438\u043A\u0430 \u0438 \u043F\u0440\u0438 \u043D\u0435\u043E\u0431\u0445\u043E\u0434\u0438\u043C\u043E\u0441\u0442\u0438 \u043F\u0440\u0435\u043E\u0431\u0440\u0430\u0437\u0443\u0435\u0442 \u0438\u0445 callback-\u0444\u0443\u043D\u043A\u0446\u0438\u0435\u0439.",
+  includes: "\u041F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u0442 \u043D\u0430\u043B\u0438\u0447\u0438\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u044F \u0432 \u043C\u0430\u0441\u0441\u0438\u0432\u0435.",
+  indexOf: "\u0412\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u043F\u0435\u0440\u0432\u044B\u0439 \u0438\u043D\u0434\u0435\u043A\u0441 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u044F \u0438\u043B\u0438 -1.",
+  join: "\u041E\u0431\u044A\u0435\u0434\u0438\u043D\u044F\u0435\u0442 \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u044B \u043C\u0430\u0441\u0441\u0438\u0432\u0430 \u0432 \u0441\u0442\u0440\u043E\u043A\u0443 \u0447\u0435\u0440\u0435\u0437 \u0440\u0430\u0437\u0434\u0435\u043B\u0438\u0442\u0435\u043B\u044C.",
+  lastIndexOf: "\u0412\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0438\u0439 \u0438\u043D\u0434\u0435\u043A\u0441 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u044F \u0438\u043B\u0438 -1.",
+  map: "\u0421\u043E\u0437\u0434\u0430\u0451\u0442 \u043C\u0430\u0441\u0441\u0438\u0432 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u043E\u0432 \u0432\u044B\u0437\u043E\u0432\u0430 callback \u0434\u043B\u044F \u043A\u0430\u0436\u0434\u043E\u0433\u043E \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u0430.",
+  pop: "\u0423\u0434\u0430\u043B\u044F\u0435\u0442 \u0438 \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0438\u0439 \u044D\u043B\u0435\u043C\u0435\u043D\u0442 \u0438\u043B\u0438 null \u0434\u043B\u044F \u043F\u0443\u0441\u0442\u043E\u0433\u043E \u043C\u0430\u0441\u0441\u0438\u0432\u0430.",
+  push: "\u0414\u043E\u0431\u0430\u0432\u043B\u044F\u0435\u0442 \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u044B \u0432 \u043A\u043E\u043D\u0435\u0446 \u043C\u0430\u0441\u0441\u0438\u0432\u0430 \u0438 \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u043D\u043E\u0432\u0443\u044E \u0434\u043B\u0438\u043D\u0443.",
+  reduce: "\u0421\u0432\u043E\u0440\u0430\u0447\u0438\u0432\u0430\u0435\u0442 \u043C\u0430\u0441\u0441\u0438\u0432 \u0441\u043B\u0435\u0432\u0430 \u043D\u0430\u043F\u0440\u0430\u0432\u043E \u0432 \u043E\u0434\u043D\u043E \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435.",
+  reduceRight: "\u0421\u0432\u043E\u0440\u0430\u0447\u0438\u0432\u0430\u0435\u0442 \u043C\u0430\u0441\u0441\u0438\u0432 \u0441\u043F\u0440\u0430\u0432\u0430 \u043D\u0430\u043B\u0435\u0432\u043E \u0432 \u043E\u0434\u043D\u043E \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435.",
+  reverse: "\u0420\u0430\u0437\u0432\u043E\u0440\u0430\u0447\u0438\u0432\u0430\u0435\u0442 \u043C\u0430\u0441\u0441\u0438\u0432 \u043D\u0430 \u043C\u0435\u0441\u0442\u0435 \u0438 \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u0435\u0433\u043E.",
+  shift: "\u0423\u0434\u0430\u043B\u044F\u0435\u0442 \u0438 \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u043F\u0435\u0440\u0432\u044B\u0439 \u044D\u043B\u0435\u043C\u0435\u043D\u0442 \u0438\u043B\u0438 null \u0434\u043B\u044F \u043F\u0443\u0441\u0442\u043E\u0433\u043E \u043C\u0430\u0441\u0441\u0438\u0432\u0430.",
+  slice: "\u0421\u043E\u0437\u0434\u0430\u0451\u0442 \u043A\u043E\u043F\u0438\u044E \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0433\u043E \u0434\u0438\u0430\u043F\u0430\u0437\u043E\u043D\u0430 \u043C\u0430\u0441\u0441\u0438\u0432\u0430.",
+  some: "\u041F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u0442, \u0443\u0434\u043E\u0432\u043B\u0435\u0442\u0432\u043E\u0440\u044F\u0435\u0442 \u043B\u0438 \u0445\u043E\u0442\u044F \u0431\u044B \u043E\u0434\u0438\u043D \u044D\u043B\u0435\u043C\u0435\u043D\u0442 \u0443\u0441\u043B\u043E\u0432\u0438\u044E callback.",
+  sort: "\u0421\u043E\u0440\u0442\u0438\u0440\u0443\u0435\u0442 \u043C\u0430\u0441\u0441\u0438\u0432 \u043D\u0430 \u043C\u0435\u0441\u0442\u0435. Callback \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442 \u0434\u0432\u0430 \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u0430 \u0442\u0438\u043F\u0430 \u043C\u0430\u0441\u0441\u0438\u0432\u0430.",
+  splice: "\u0423\u0434\u0430\u043B\u044F\u0435\u0442 \u0438 \u0434\u043E\u0431\u0430\u0432\u043B\u044F\u0435\u0442 \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u044B \u043D\u0430 \u043C\u0435\u0441\u0442\u0435, \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u044F \u0443\u0434\u0430\u043B\u0451\u043D\u043D\u044B\u0435 \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u044B.",
+  toArray: "\u0412\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u043E\u0431\u044B\u0447\u043D\u0443\u044E \u043A\u043E\u043F\u0438\u044E \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u043E\u0432 \u043C\u0430\u0441\u0441\u0438\u0432\u0430.",
+  toReversed: "\u0421\u043E\u0437\u0434\u0430\u0451\u0442 \u043D\u043E\u0432\u044B\u0439 \u043C\u0430\u0441\u0441\u0438\u0432 \u0441 \u043E\u0431\u0440\u0430\u0442\u043D\u044B\u043C \u043F\u043E\u0440\u044F\u0434\u043A\u043E\u043C \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u043E\u0432.",
+  toSorted: "\u0421\u043E\u0437\u0434\u0430\u0451\u0442 \u043D\u043E\u0432\u044B\u0439 \u043E\u0442\u0441\u043E\u0440\u0442\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0439 \u043C\u0430\u0441\u0441\u0438\u0432.",
+  toSpliced: "\u0421\u043E\u0437\u0434\u0430\u0451\u0442 \u043D\u043E\u0432\u044B\u0439 \u043C\u0430\u0441\u0441\u0438\u0432 \u0441 \u043F\u0440\u0438\u043C\u0435\u043D\u0451\u043D\u043D\u043E\u0439 \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u0435\u0439 splice.",
+  unshift: "\u0414\u043E\u0431\u0430\u0432\u043B\u044F\u0435\u0442 \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u044B \u0432 \u043D\u0430\u0447\u0430\u043B\u043E \u043C\u0430\u0441\u0441\u0438\u0432\u0430 \u0438 \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u043D\u043E\u0432\u0443\u044E \u0434\u043B\u0438\u043D\u0443.",
+  with: "\u0421\u043E\u0437\u0434\u0430\u0451\u0442 \u043A\u043E\u043F\u0438\u044E \u043C\u0430\u0441\u0441\u0438\u0432\u0430 \u0441 \u0437\u0430\u043C\u0435\u043D\u0451\u043D\u043D\u044B\u043C \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u043E\u043C \u043F\u043E \u0438\u043D\u0434\u0435\u043A\u0441\u0443."
+};
+function arrayMethodDescription(type, name, env) {
+  const resolved = resolveType(type, env);
+  const arrayLike = resolved.kind === "ArrayType" || resolved.kind === "GenericType" && (resolved.name === "Array" || resolved.name === "ReadonlyArray");
+  return arrayLike ? arrayMethodDescriptions[name] : void 0;
+}
 function narrowHasProperty(type, name, env) {
   const resolved = resolveType(type, env);
   if (resolved.kind === "IntersectionType") {
@@ -2001,17 +2091,20 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
     else if (declaration.kind === "FunctionDeclaration" && exported) result.set(declaration.name, { kind: "fun", params: declaration.params, returnType: declaration.returnType ?? inferFunctionReturnType2(declaration.body, globals(), declaration.params) });
     else if (declaration.kind === "ConstructorDeclaration" && exported) result.set(declaration.name, {
       kind: "constructor",
+      generics: declaration.generics,
       inheritedType: declaration.inheritedType,
-      overloads: declaration.overloads.map((overload) => ({ params: overload.params, returnType: overload.returnType ?? inferFunctionReturnType2(overload.body, globals(), overload.params) }))
+      overloads: declaration.overloads.map((overload) => ({ params: overload.params, returnType: overload.returnType ?? inferFunctionReturnType2(overload.body, globals(), overload.params) })),
+      methods: declaration.methods.map((method2) => ({ name: method2.name, params: method2.params, returnType: method2.returnType ?? inferFunctionReturnType2(method2.body, globals(), method2.params) }))
     });
     else if (declaration.kind === "Variable" && exported) result.set(declaration.name, { kind: "var", type: declaration.type ?? (declaration.initializer ? inferExpression(declaration.initializer, globals()) : named("any")) });
   }
   if (!filePath) return result;
   for (const statement of statements) {
-    if (statement.kind !== "Import" || !statement.module.startsWith(".") && !statement.module.startsWith("juno/types/")) continue;
+    const importedStatement = statement.kind === "Import" ? statement : statement.kind === "Export" && statement.declaration.kind === "Import" ? statement.declaration : void 0;
+    if (!importedStatement || !importedStatement.module.startsWith(".") && importedStatement.module !== "juno/types" && !importedStatement.module.startsWith("juno/types/")) continue;
     let base;
-    if (statement.module.startsWith("juno/types/")) {
-      const relativeModule = statement.module.slice("juno/types/".length);
+    if (importedStatement.module === "juno/types" || importedStatement.module.startsWith("juno/types/")) {
+      const relativeModule = importedStatement.module === "juno/types" ? "index" : importedStatement.module.slice("juno/types/".length);
       let directory = path.dirname(path.resolve(filePath));
       let found;
       while (true) {
@@ -2025,7 +2118,7 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
         directory = parent;
       }
       base = found ?? path.resolve(__dirname, "../../types", relativeModule);
-    } else base = path.resolve(path.dirname(filePath), statement.module);
+    } else base = path.resolve(path.dirname(filePath), importedStatement.module);
     const candidates = /\.jn$/i.test(base) ? [base] : [`${base}.jn`, path.resolve(base, "index.jn")];
     const importedFile = candidates.find((candidate) => fs.existsSync(candidate));
     if (!importedFile || seen.has(importedFile)) continue;
@@ -2033,7 +2126,7 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
     try {
       const nested = parse(fs.readFileSync(importedFile, "utf8"), { validate: false, filePath: importedFile });
       const declarations = importedDeclarations(nested, importedFile, seen);
-      for (const name of statement.namedImports) if (declarations.has(name)) result.set(name, declarations.get(name));
+      for (const name of importedStatement.namedImports) if (declarations.has(name)) result.set(name, declarations.get(name));
     } catch {
     }
   }
@@ -2077,6 +2170,54 @@ function inferLiteral(value) {
   if (typeof value === "number") return named("number");
   if (typeof value === "bigint") return named("BigInt");
   return named("boolean");
+}
+function inferGenericArguments(generics, params, args, env) {
+  const inferred = /* @__PURE__ */ new Map();
+  const collect = (pattern, actual) => {
+    if (!pattern) return;
+    if (pattern.kind === "NamedType" && generics.includes(pattern.name)) {
+      if (!inferred.has(pattern.name) && !isNamedType(actual, "any")) inferred.set(pattern.name, actual);
+      return;
+    }
+    if (pattern.kind === "ArrayType") {
+      const resolved = resolveType(actual, env);
+      const element = resolved.kind === "ArrayType" ? resolved.element : resolved.kind === "GenericType" && resolved.name === "Array" ? resolved.args[0] : void 0;
+      if (element) collect(pattern.element, element);
+      return;
+    }
+    if (pattern.kind === "GenericType") {
+      const resolved = resolveType(actual, env);
+      if (resolved.kind === "GenericType" && resolved.name === pattern.name) pattern.args.forEach((part, index) => collect(part, resolved.args[index] ?? named("any")));
+      return;
+    }
+    if (pattern.kind === "ObjectType") {
+      const resolved = resolveType(actual, env);
+      if (resolved.kind === "ObjectType") for (const member of pattern.members) collect(member.type, resolved.members.find((item) => item.name === member.name)?.type ?? named("any"));
+    }
+  };
+  params.forEach((param, index) => {
+    if (param.rest) {
+      const restType = parameterType(param);
+      const element = restType.kind === "ArrayType" ? restType.element : restType.kind === "GenericType" && restType.name === "Array" ? restType.args[0] : void 0;
+      if (element) args.slice(index).forEach((arg2) => collect(element, inferExpression(arg2, env)));
+      return;
+    }
+    const arg = args[index];
+    if (arg) collect(parameterType(param), inferExpression(arg, env));
+  });
+  return generics.map((name) => inferred.get(name) ?? named("any"));
+}
+function constructorMethodForCall(callee, args, env) {
+  if (callee.kind !== "Member" || callee.object.kind !== "Identifier") return void 0;
+  const constructor = env.get(callee.object.name);
+  if (constructor?.kind !== "constructor") return void 0;
+  const method2 = constructor.methods.find((item) => item.name === callee.property);
+  if (!method2) return void 0;
+  const inferred = inferGenericArguments(constructor.generics, method2.params, args, env);
+  return {
+    params: method2.params.map((param) => ({ ...param, type: param.type ? instantiate(param.type, constructor.generics, inferred) : void 0 })),
+    returnType: instantiate(method2.returnType, constructor.generics, inferred)
+  };
 }
 var errorType = () => named("<Error-Type>");
 function isNamedType(type, name) {
@@ -2233,6 +2374,11 @@ function inferExpression(expression, env) {
       return binaryResultType(expression.operator, left, right);
     }
     case "Member": {
+      if (expression.object.kind === "Identifier") {
+        const constructor = env.get(expression.object.name);
+        const method2 = constructor?.kind === "constructor" ? constructor.methods.find((item) => item.name === expression.property) : void 0;
+        if (method2) return functionType(method2.params, method2.returnType);
+      }
       const objectType = inferExpression(expression.object, env);
       const nonNullObjectType = removeNull(resolveType(objectType, env));
       const resolvedObjectType = resolveType(nonNullObjectType, env);
@@ -2260,11 +2406,17 @@ function inferExpression(expression, env) {
     case "Call": {
       if (expression.callee.kind === "Member" && expression.callee.property === "isType") return named("boolean");
       if (expression.callee.kind === "Identifier" && expression.callee.name === "isType") return named("boolean");
+      const constructorMethod = constructorMethodForCall(expression.callee, expression.args, env);
+      if (constructorMethod) return constructorMethod.returnType;
       if (expression.callee.kind === "Member" && expression.callee.property === "as" && expression.typeArguments?.length) return expression.typeArguments[0];
       if (expression.callee.kind === "Identifier" && env.get(expression.callee.name)?.kind === "type") return named(expression.callee.name);
       if (expression.callee.kind === "Identifier") {
         const symbol = env.get(expression.callee.name);
-        if (symbol?.kind === "constructor") return named(expression.callee.name);
+        if (symbol?.kind === "constructor") {
+          if (!symbol.generics.length) return named(expression.callee.name);
+          const args = expression.typeArguments?.length ? expression.typeArguments : inferGenericArguments(symbol.generics, symbol.overloads[0]?.params ?? [], expression.args, env);
+          return { kind: "GenericType", name: expression.callee.name, args };
+        }
       }
       if (expression.callee.kind === "Member" && expression.callee.property === "map" && expression.args[0]?.kind === "Function") {
         const objectType = inferExpression(expression.callee.object, env);
@@ -2443,7 +2595,7 @@ var Analyzer = class {
     if (!loc) return;
     this.hovers.push({ line: loc.line, column: loc.column, length: lengthOf(name, loc), code, docs, typeDescription: typeDescription2 });
   }
-  addTypeHint(loc, name, hasType, type) {
+  addTypeHint(loc, name, hasType, type, kind = "type") {
     if (!loc || hasType) return;
     const printed = printType(type);
     this.hints.push({
@@ -2451,7 +2603,7 @@ var Analyzer = class {
       column: loc.column + name.length,
       label: `: ${printed}`,
       tooltip: printed,
-      kind: "type"
+      kind
     });
   }
   addDiagnostic(loc, message) {
@@ -2542,7 +2694,7 @@ var Analyzer = class {
           const importedAlias = statement.importedTypes?.[name];
           const importedSymbol = statement.importedSymbols?.[name];
           const type = importedAlias ? resolveType(importedAlias, env) : importedSymbol?.kind === "var" ? importedSymbol.type ?? named("any") : name === "console" ? consoleType() : name === "Math" && statement.module === "juno" ? mathType() : name === "types" && statement.module === "juno" ? typeUtilitiesType() : statement.module === "types" && ["Partial", "Required", "Readonly", "Pick", "Omit"].includes(name) ? typeUtilitiesType().kind === "ObjectType" ? typeUtilitiesType().members.find((member) => member.name === name)?.type ?? named("any") : named("any") : named("any");
-          const symbol = importedSymbol?.kind === "fun" ? { kind: "fun", params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named("any"), docs: imported } : importedSymbol?.kind === "constructor" && importedSymbol.inheritedType && importedSymbol.overloads ? { kind: "constructor", inheritedType: importedSymbol.inheritedType, overloads: importedSymbol.overloads, docs: imported } : {
+          const symbol = importedSymbol?.kind === "fun" ? { kind: "fun", params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named("any"), docs: imported } : importedSymbol?.kind === "constructor" && importedSymbol.inheritedType && importedSymbol.overloads ? { kind: "constructor", generics: importedSymbol.generics ?? [], inheritedType: importedSymbol.inheritedType, overloads: importedSymbol.overloads, methods: importedSymbol.methods ?? [], docs: imported } : {
             kind: importedAlias || importedSymbol?.kind === "type" ? "type" : "var",
             mutable: false,
             ...importedAlias || importedSymbol?.kind === "type" ? { generics: importedSymbol?.generics ?? [], value: importedAlias ?? importedSymbol?.value ?? named("any") } : { type },
@@ -2663,7 +2815,8 @@ var Analyzer = class {
           const returnType = overload.returnType ?? inferFunctionReturnType2(overload.body, local, overload.params);
           return { params: overload.params, returnType };
         });
-        const symbol = { kind: "constructor", inheritedType: statement.inheritedType, overloads };
+        const methods = statement.methods.map((method2) => ({ name: method2.name, params: method2.params, returnType: method2.returnType ?? inferFunctionReturnType2(method2.body, env, method2.params) }));
+        const symbol = { kind: "constructor", generics: statement.generics, inheritedType: statement.inheritedType, overloads, methods };
         this.bind(env, statement.name, symbol);
         this.addHover(statement.name, statement.loc, printSymbol(statement.name, symbol).code, void 0, symbolTypeDescription(statement.name, symbol, env));
         statement.overloads.forEach((overload, index) => {
@@ -2677,9 +2830,20 @@ var Analyzer = class {
           }
           this.statements(overload.body, local);
           const actual = overloads[index].returnType;
-          if (!isAssignableTo(statement.inheritedType, actual, env)) {
+          if (statement.name !== "Array" && !isAssignableTo(statement.inheritedType, actual, env)) {
             this.addDiagnostic(statement.loc, `Constructor overload returns '${printType(actual)}', which is not assignable to inherited type '${printType(statement.inheritedType)}'.`);
           }
+        });
+        statement.methods.forEach((method2, index) => {
+          const methodInfo = methods[index];
+          this.addHover(method2.name, method2.loc, `(method) ${statement.name}.${method2.name}(${method2.params.map(printParam).join(", ")}): ${printType(methodInfo.returnType)}`, arrayMethodDescriptions[method2.name]);
+          const local = bindInferredParameters(method2.params, env);
+          method2.params.forEach((param) => {
+            const type = local.get(param.name)?.type ?? parameterType(param);
+            this.addHover(param.name, param.loc, param.name === "_" ? `(ignored parameter) _: ${printType(type)}` : parameterHover(param, type));
+            if (param.name !== "_") this.addTypeHint(param.loc, param.name, Boolean(param.type), type);
+          });
+          this.statements(method2.body, local);
         });
         return;
       }
@@ -2815,11 +2979,27 @@ var Analyzer = class {
         if (symbol) {
           const printed = printSymbol(expression.name, symbol);
           this.addHover(expression.name, expression.loc, printed.code, printed.docs, symbolTypeDescription(expression.name, symbol, env));
+        } else if (expression.loc) {
+          this.diagnostics.push({
+            line: expression.loc.line,
+            column: expression.loc.column,
+            length: expression.name.length,
+            message: `Cannot find name '${expression.name}'.`
+          });
         }
         return;
       }
       case "Array":
         expression.elements.forEach((item) => this.walkExpression(item, env, thisType));
+        return;
+      case "Assignment":
+        if (!env.has(expression.name) && expression.loc) this.diagnostics.push({
+          line: expression.loc.line,
+          column: expression.loc.column,
+          length: expression.name.length,
+          message: `Cannot find name '${expression.name}'.`
+        });
+        this.walkExpression(expression.value, env, thisType);
         return;
       case "MemberAssignment":
         this.walkExpression(expression.object, env, thisType);
@@ -2849,7 +3029,7 @@ var Analyzer = class {
             if (symbol) {
               const printed = printSymbol(property.value.name, symbol);
               this.addHover(property.value.name, property.value.loc, printed.code, printed.docs);
-            }
+            } else this.walkExpression(property.value, env, thisType);
           } else if (property.value.kind === "Function") this.walkFunction(property.value, methodEnv);
           else this.walkExpression(property.value, env, thisType);
         }
@@ -2888,6 +3068,14 @@ var Analyzer = class {
       }
       case "Member": {
         this.walkExpression(expression.object, env, thisType);
+        if (expression.object.kind === "Identifier") {
+          const constructor = env.get(expression.object.name);
+          const method2 = constructor?.kind === "constructor" ? constructor.methods.find((item) => item.name === expression.property) : void 0;
+          if (method2) {
+            this.addHover(expression.property, expression.loc, `(method) ${expression.object.name}.${method2.name}(${method2.params.map(printParam).join(", ")}): ${printType(method2.returnType)}`, arrayMethodDescriptions[method2.name]);
+            return;
+          }
+        }
         const objectType = inferExpression(expression.object, env);
         const nullableObject = isNullable(objectType, env);
         const nonNullObjectType = removeNull(resolveType(objectType, env));
@@ -2896,7 +3084,7 @@ var Analyzer = class {
         if (nullableObject && !expression.optional && expression.property !== "isType") this.diagnostics.push({ line: expression.loc?.line ?? 1, column: expression.loc?.column ?? 1, length: expression.property.length, message: `Cannot access '${expression.property}' on a nullable value; use ! or ?., or ?? to handle null.` });
         if (isFunctionSymbol(member)) {
           const signature = expression.property === "as" ? "(method) as<T>(): T" : `(method) ${expression.property}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}`;
-          this.addHover(expression.property, expression.loc, signature);
+          this.addHover(expression.property, expression.loc, signature, arrayMethodDescription(nonNullObjectType, expression.property, env));
         } else if (member) {
           this.addHover(expression.property, expression.loc, `(property) ${expression.property}: ${printType(member)}`);
         } else if (resolvedObjectType.kind === "UnionType") {
@@ -2965,8 +3153,13 @@ var Analyzer = class {
           if (hover) hover.code += `
 (infer) ${printType(inferExpression(expression, env))}`;
         }
+        const constructorMethod = constructorMethodForCall(expression.callee, expression.args, env);
+        const methodParameters = constructorMethod?.params ?? (expression.callee.kind === "Member" ? (() => {
+          const member = lookupMember(inferExpression(expression.callee.object, env), expression.callee.property, env);
+          return isFunctionSymbol(member) ? member.params : void 0;
+        })() : void 0);
         expression.args.forEach((arg, index) => {
-          const contextualType = calleeType.kind === "FunctionType" ? calleeType.params[index] : void 0;
+          const contextualType = methodParameters?.[index] ? parameterType(methodParameters[index]) : calleeType.kind === "FunctionType" ? calleeType.params[index] : void 0;
           if (arg.kind === "Function") this.walkFunction(arg, env, contextualType);
           else this.walkExpression(arg, env, thisType);
         });
@@ -2994,18 +3187,19 @@ var Analyzer = class {
   }
   walkFunction(expression, env, contextualType) {
     const local = bindInferredParameters(expression.params, env);
-    const contextual = contextualType ? resolveType(contextualType, env) : void 0;
+    const contextual = contextualType ? removeNull(resolveType(contextualType, env)) : void 0;
     if (contextual?.kind === "FunctionType") expression.params.forEach((param, index) => {
       if (!param.type && contextual.params[index]) local.set(param.name, { kind: "var", mutable: true, type: contextual.params[index] });
     });
-    for (const param of expression.params) {
-      const type = local.get(param.name).type;
+    for (const [index, param] of expression.params.entries()) {
+      const contextualParameter = contextual?.kind === "FunctionType" ? contextual.params[index] : void 0;
+      const type = contextualParameter ?? local.get(param.name).type;
       if (!param.type && param.defaultValue !== void 0) {
-        const index = expression.params.indexOf(param);
-        expression.params[index] = { ...param, type };
+        const index2 = expression.params.indexOf(param);
+        expression.params[index2] = { ...param, type };
       }
-      this.addHover(param.name, param.loc, parameterHover(param, type));
-      this.addTypeHint(param.loc, param.name, Boolean(param.type), type);
+      this.addHover(param.name, param.loc, param.name === "_" ? `(ignored parameter) _: ${printType(type)}` : parameterHover(param, type));
+      if (param.name !== "_") this.addTypeHint(param.loc, param.name, Boolean(param.type), type, "callbackType");
       if (param.type) this.walkType(param.type, env);
       if (param.defaultValue) this.walkExpression(param.defaultValue, local);
     }
@@ -3161,11 +3355,11 @@ ${info.docs}`);
           const item = new vscode.InlayHint(
             position,
             hint.label,
-            hint.kind === "type" ? vscode.InlayHintKind.Type : vscode.InlayHintKind.Parameter
+            hint.kind === "parameter" ? vscode.InlayHintKind.Parameter : vscode.InlayHintKind.Type
           );
           item.tooltip = new vscode.MarkdownString();
           item.tooltip.appendCodeblock(hint.tooltip, "junoscript");
-          item.paddingLeft = hint.kind === "type";
+          item.paddingLeft = hint.kind !== "parameter";
           item.paddingRight = hint.kind === "parameter";
           return [item];
         });

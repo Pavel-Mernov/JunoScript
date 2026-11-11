@@ -1,0 +1,169 @@
+import { Iterable } from './iterable'
+import { Range } from './range'
+
+export constructor Array<T> : Iterable<T> & T[] {
+    fun (length: number, options: {
+        fill: (T?, number?) -> T
+    }?) =
+        let _length = 0
+        let result = {
+            get length(): number =
+                return _length
+
+            get indices(): Range =
+                return Range(this.length)
+
+            fun copy(): T[] =
+                let array: T[] = []
+                let index = 0
+                while index < _length
+                    array.push(this[index])
+                    index++
+                return array
+
+            fun toArray(): T[] =
+                return this.copy()
+
+            fun enumerate(): any[][] =
+                let entries: any[][] = []
+                this.indices.forEach((index) => entries.push([index, this[index]]))
+                return entries
+
+            fun push(...items: T[]): number =
+                const previousLength = _length
+                _length += items.length
+                let index = 0
+                while index < items.length
+                    this[previousLength + index] = items[index]
+                    index++
+                return _length
+
+            fun pop(): T? =
+                if _length == 0
+                    return null
+                const value = this[_length - 1]
+                _length--
+                return value
+
+            fun shift(): T? =
+                if _length == 0
+                    return null
+                const value = this[0]
+                let index = 1
+                while index < _length
+                    this[index - 1] = this[index]
+                    index++
+                _length--
+                return value
+
+            fun unshift(...items: T[]): number =
+                const added = items.length
+                let index = _length - 1
+                while index >= 0
+                    this[index + added] = this[index]
+                    index--
+                let itemIndex = 0
+                while itemIndex < items.length
+                    this[itemIndex] = items[itemIndex]
+                    itemIndex++
+                _length += added
+                return _length
+
+            fun reverse(): T[] =
+                let left = 0
+                let right = _length - 1
+                while left < right
+                    const value = this[left]
+                    this[left] = this[right]
+                    this[right] = value
+                    left++
+                    right--
+                return this
+
+            fun sort(compare: ((T, T) -> number)?): T[] =
+                const sorted = compare == null ? this.toArray().sort() : this.toArray().sort(compare!)
+                let index = 0
+                while index < sorted.length
+                    this[index] = sorted[index]
+                    index++
+                return this
+
+            fun fill(value: T, start: number = 0, end: number = this.length): T[] =
+                let position = start < 0 ? _length + start : start
+                let to = end < 0 ? _length + end : end
+                if position < 0
+                    position = 0
+                if to > _length
+                    to = _length
+                while position < to
+                    this[position] = value
+                    position++
+                return this
+
+            fun slice(start: number = 0, end: number = this.length): T[] =
+                let result: T[] = []
+                let position = start < 0 ? _length + start : start
+                let limit = end < 0 ? _length + end : end
+                if position < 0
+                    position = 0
+                if limit > _length
+                    limit = _length
+                while position < limit
+                    result.push(this[position])
+                    position++
+                return result
+
+            fun copyWithin(target: number, start: number = 0, end: number = this.length): T[] =
+                let destination = target < 0 ? _length + target : target
+                if destination < 0
+                    destination = 0
+                const values = this.slice(start, end)
+                let index = 0
+                while index < values.length & destination + index < _length
+                    this[destination + index] = values[index]
+                    index++
+                return this
+
+            fun splice(start: number, deleteCount: number = this.length - start, ...items: T[]): T[] =
+                let position = start < 0 ? _length + start : start
+                if position < 0
+                    position = 0
+                if position > _length
+                    position = _length
+
+                let count = deleteCount
+                if count < 0
+                    count = 0
+                if count > _length - position
+                    count = _length - position
+
+                const removed = this.slice(position, position + count)
+                const tail = this.slice(position + count, _length)
+                _length = position
+                items.forEach((item) => this.push(item))
+                tail.forEach((item) => this.push(item))
+                return removed
+        }
+
+        let index = 0
+        while index < length
+            let element: T? = null
+            if options != null
+                element = options!.fill(element, index)
+            result.push(element)
+            index++
+
+        return result
+        
+    fun of(...items: T[]): T[] =
+        const fill = (_, idx: number): T => items[idx]
+        return Array<T>(items.length, { fill })
+
+    fun from<U>(items: Iterable<U>, mapFn: ((U, number) -> T)?, thisArg: any?): T[] =
+        const source = items.toArray()
+        const fill = (_, index: number): T =>
+            if mapFn == null
+                return source[index].as<T>()
+            return mapFn!.call(thisArg, source[index], index)
+        return Array<T>(source.length, { fill })
+}
