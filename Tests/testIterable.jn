@@ -27,3 +27,23 @@ console.log("every:", array.every((item) => item != null))
 # No element matches this predicate, so some() should return false.
 console.log("some:", array.some((item) => item == 99))
 array.forEach((item) => console.log("forEach:", item))
+
+const numbers = [1, 2]
+const words = ['three', 'four']
+const spreadArray = [0, ...numbers, ...words, 5]
+console.log("array spread:", spreadArray)
+
+const iterableSpread = ['before', ...array, 'after']
+console.log("iterable spread:", iterableSpread)
+
+fun collect(...values: (string | number)[]): (string | number)[] =
+    return values
+console.log("argument spread:", collect(0, ...numbers, ...words, 5))
+console.log("iterable argument spread:", collect(...array))
+
+const mixedSpread = [null, ...[1, true], ...'ok', { value: 2 }]
+console.log("mixed type spread:", mixedSpread)
+
+fun collectAny(...values: any[]): any[] =
+    return values
+console.log("mixed argument spread:", collectAny('start', ...[1, true], ...'ok', { value: 2 }, null))

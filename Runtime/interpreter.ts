@@ -218,6 +218,29 @@ export class Interpreter {
         return exported
     }
 
+    private evaluateSpread(expression: Expression, env: Environment): unknown[] {
+        const value = this.evaluate(expression, env)
+        let result: unknown
+        if (Array.isArray(value)) result = [...value]
+        else if (value && typeof value === 'object') {
+            const indices = Object.keys(value).filter(key => /^\d+$/.test(key)).map(Number).sort((a, b) => a - b)
+            if (indices.length > 0 || 'copy' in value && 'push' in value) result = indices.map(index => (value as any)[index])
+            else {
+                const toArray = this.readMember(value, 'toArray', false, expression, env)
+                if ((toArray as any)?.__junoFunction) result = this.callFunction(toArray as RuntimeFunction, [], value)
+                else if (typeof toArray === 'function') result = toArray.call(value)
+                else throw new TypeError('Spread requires a callable toArray() method')
+            }
+        } else {
+            const toArray = this.readMember(value, 'toArray', false, expression, env)
+            if ((toArray as any)?.__junoFunction) result = this.callFunction(toArray as RuntimeFunction, [], value)
+            else if (typeof toArray === 'function') result = toArray.call(value)
+            else throw new TypeError('Spread requires a callable toArray() method')
+        }
+        if (!Array.isArray(result)) throw new TypeError('Spread toArray() must return an array')
+        return result
+    }
+
     private evaluate(expression: Expression, env: Environment): any {
         switch (expression.kind) {
             case 'Literal': return expression.value
@@ -249,11 +272,17 @@ export class Interpreter {
                 return value
             }
             case 'Array': {
-                const array = expression.elements.map(item => this.evaluate(item, env))
+                const array: unknown[] = []
+                for (const item of expression.elements) {
+                    if (item.kind === 'Spread') array.push(...this.evaluateSpread(item.value, env))
+                    else array.push(this.evaluate(item, env))
+                }
                 Object.defineProperty(array, 'toString', { enumerable: false, value: function(this: object) { return stringifyJunoObject(this) } })
                 this.installDefaultHas(array)
                 return array
             }
+            case 'Spread':
+                throw new SyntaxError('Spread is only valid in arrays and call arguments')
             case 'Object': {
                 const object: Record<string, any> = {}
                 const accessors = new Map<string, PropertyDescriptor>()
@@ -454,12 +483,16 @@ export class Interpreter {
                     callee = this.readMember(thisValue, expression.callee.property, expression.callee.optional, expression.callee.object, env)
                 }
                 else callee = this.evaluate(expression.callee, env)
-                const args = expression.args.map(arg => this.evaluate(arg, env))
+                const args: unknown[] = []
+                for (const argument of expression.args) {
+                    if (argument.kind === 'Spread') args.push(...this.evaluateSpread(argument.value, env))
+                    else args.push(this.evaluate(argument, env))
+                }
                 const passesRuntimeType = expression.callee.kind === 'Identifier' && expression.callee.name === 'isType'
                     || expression.callee.kind === 'Member' && (expression.callee.property === 'isType' || expression.callee.property === 'as')
                 if (passesRuntimeType && expression.typeArguments?.length) args.push(expression.typeArguments[0].kind === 'NamedType' ? expression.typeArguments[0].name : 'object')
                 if (typeof callee === 'function') {
-                    const nativeArgs = args.map(argument => argument?.__junoFunction
+                    const nativeArgs = args.map(argument => (argument as any)?.__junoFunction
                         ? (...values: unknown[]) => this.callFunction(argument as RuntimeFunction, values)
                         : argument)
                     return callee.apply(thisValue, nativeArgs) ?? null
@@ -651,9 +684,17 @@ export class Interpreter {
             case 'Template': return { kind: 'NamedType', name: 'string' }
             case 'Identifier': return this.lookup(env, expression.name)?.declaredType ?? { kind: 'NamedType', name: 'any' }
             case 'Array': {
-                const elements = expression.elements.map(item => this.inferValueType(item, env))
+                const elements = expression.elements.map(item => {
+                    if (item.kind !== 'Spread') return this.inferValueType(item, env)
+                    const spread = this.inferValueType(item.value, env)
+                    return spread.kind === 'ArrayType' ? spread.element : { kind: 'NamedType', name: 'any' } as TypeNode
+                })
                 const flattened = elements.flatMap(type => type.kind === 'UnionType' ? type.types : [type])
                 return { kind: 'ArrayType', element: flattened.length === 0 ? { kind: 'NamedType', name: 'any' } : flattened.length === 1 ? flattened[0] : { kind: 'UnionType', types: flattened } }
+            }
+            case 'Spread': {
+                const spread = this.inferValueType(expression.value, env)
+                return spread.kind === 'ArrayType' ? spread.element : { kind: 'NamedType', name: 'any' }
             }
             case 'Object':
                 return { kind: 'ObjectType', members: expression.properties.flatMap(property => property.accessor === 'set' ? [] : [{

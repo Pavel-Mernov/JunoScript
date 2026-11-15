@@ -751,7 +751,10 @@ var Parser = class _Parser {
         const args = [];
         this.parenthesisSeparators();
         if (!this.is("RightParen")) do {
-          args.push(this.expression());
+          if (this.match("Ellipsis")) {
+            const token = this.tokens[this.pos - 1];
+            args.push({ kind: "Spread", value: this.expression(), loc: this.loc(token) });
+          } else args.push(this.expression());
           this.parenthesisSeparators();
         } while (this.match("Comma") && (this.parenthesisSeparators(), true));
         this.take("RightParen");
@@ -846,6 +849,9 @@ var Parser = class _Parser {
             break;
           case "Array":
             node.elements.forEach(shiftExpression);
+            break;
+          case "Spread":
+            shiftExpression(node.value);
             break;
           case "Object":
             for (const property of node.properties) {
@@ -1032,7 +1038,10 @@ var Parser = class _Parser {
       const elements = [];
       this.parenthesisSeparators();
       while (!this.is("RightBracket") && !this.is("EOF")) {
-        elements.push(this.expression());
+        if (this.match("Ellipsis")) {
+          const spread = this.tokens[this.pos - 1];
+          elements.push({ kind: "Spread", value: this.expression(), loc: this.loc(spread) });
+        } else elements.push(this.expression());
         this.parenthesisSeparators();
         if (this.match("Comma")) this.parenthesisSeparators();
         else if (!this.is("RightBracket")) this.fail("Expected ',' or ']' in array");
@@ -1102,6 +1111,10 @@ function inferredTypeNode(expression) {
       return { kind: "NamedType", name: "string" };
     case "Array":
       return { kind: "ArrayType", element: expression.elements[0] ? inferredTypeNode(expression.elements[0]) : { kind: "NamedType", name: "any" } };
+    case "Spread": {
+      const type = inferredTypeNode(expression.value);
+      return type.kind === "ArrayType" ? type.element : { kind: "NamedType", name: "any" };
+    }
     case "Object":
       return { kind: "ObjectType", members: expression.properties.flatMap((property) => property.accessor === "set" ? [] : [{
         name: property.key,
@@ -1130,8 +1143,16 @@ function inferExpressionType(expression, variables) {
       return variables.get(expression.name) ?? unknownType;
     case "Array": {
       if (expression.elements.length === 0) return { kind: "array", element: unknownType };
-      const elements = expression.elements.map((element) => inferExpressionType(element, variables));
+      const elements = expression.elements.map((element) => {
+        if (element.kind !== "Spread") return inferExpressionType(element, variables);
+        const spread = inferExpressionType(element.value, variables);
+        return spread.kind === "array" ? spread.element : unknownType;
+      });
       return { kind: "array", element: commonType(elements) };
+    }
+    case "Spread": {
+      const spread = inferExpressionType(expression.value, variables);
+      return spread.kind === "array" ? spread.element : unknownType;
     }
     case "Object":
       return {
@@ -1259,7 +1280,8 @@ function inferExpressionType(expression, variables) {
         const required = callee.params.filter((param) => !param.optional && !param.rest).length;
         const rest = callee.params.some((param) => param.rest);
         const maximum = rest ? Infinity : callee.params.length;
-        if (expression.args.length < required || expression.args.length > maximum) {
+        const hasSpread = expression.args.some((argument) => argument.kind === "Spread");
+        if (!hasSpread && (expression.args.length < required || expression.args.length > maximum)) {
           throw new SyntaxError(`Expected ${required}${maximum === required ? "" : ` to ${maximum === Infinity ? "any number of" : maximum}`} arguments, received ${expression.args.length}`);
         }
         expression.args.forEach((argument, index) => {
@@ -2269,11 +2291,37 @@ function iterableElementType(type, env) {
       const result = resolveType(toArray.type, env);
       if (result.kind === "ArrayType") return result.element;
       if (result.kind === "GenericType" && (result.name === "Array" || result.name === "ReadonlyArray")) return result.args[0] ?? named("any");
+      if (isNamedType(result, "Array") || isNamedType(result, "ReadonlyArray")) return named("any");
     }
   }
   if (resolved.kind === "UnionType") return unionOf(resolved.types.map((part) => iterableElementType(part, env)));
   if (isNamedType(resolved, "string")) return named("string");
   return named("any");
+}
+function spreadElementType(type, env) {
+  const resolved = resolveType(type, env);
+  if (isNamedType(resolved, "any")) return named("any");
+  if (isNamedType(resolved, "string")) return named("string");
+  if (resolved.kind === "ArrayType") return resolved.element;
+  if (resolved.kind === "GenericType" && (resolved.name === "Array" || resolved.name === "ReadonlyArray")) {
+    return resolved.args[0] ?? named("any");
+  }
+  if (resolved.kind === "UnionType" || resolved.kind === "IntersectionType") {
+    const elements = resolved.types.map((part) => spreadElementType(part, env));
+    if (resolved.kind === "UnionType" && elements.some((element) => !element)) return void 0;
+    const available = elements.filter((element) => Boolean(element));
+    if (available.length) return unionOf(available);
+  }
+  const toArray = lookupMember(resolved, "toArray", env);
+  if (isFunctionSymbol(toArray) && toArray.params.length === 0) {
+    const result = resolveType(toArray.returnType, env);
+    if (result.kind === "ArrayType") return result.element;
+    if (result.kind === "GenericType" && (result.name === "Array" || result.name === "ReadonlyArray")) {
+      return result.args[0] ?? named("any");
+    }
+    if (isNamedType(result, "Array") || isNamedType(result, "ReadonlyArray")) return named("any");
+  }
+  return void 0;
 }
 function isNullable(type, env) {
   const resolved = resolveType(type, env);
@@ -2337,7 +2385,7 @@ function inferExpression(expression, env) {
     }
     case "Array": {
       if (!expression.elements.length) return arrayOf(named("any"));
-      const elements = expression.elements.map((item) => inferExpression(item, env));
+      const elements = expression.elements.map((item) => item.kind === "Spread" ? spreadElementType(inferExpression(item.value, env), env) ?? errorType() : inferExpression(item, env));
       const resolvedElements = elements.map((item) => resolveType(item, env));
       if (resolvedElements.every((item) => item.kind === "ObjectType")) {
         const objectElements = resolvedElements;
@@ -2352,6 +2400,8 @@ function inferExpression(expression, env) {
       }
       return arrayOf(unionOf(elements));
     }
+    case "Spread":
+      return spreadElementType(inferExpression(expression.value, env), env) ?? errorType();
     case "Object": {
       const members = expression.properties.flatMap((property) => {
         if (property.spread) {
@@ -3022,7 +3072,34 @@ var Analyzer = class {
       }
       case "Array":
         expression.elements.forEach((item) => this.walkExpression(item, env, thisType));
+        if (expression.loc) this.hovers.push({
+          line: expression.loc.line,
+          column: expression.loc.column,
+          length: 1,
+          code: `(infer) ${printType(inferExpression(expression, env))}`
+        });
         return;
+      case "Spread": {
+        this.walkExpression(expression.value, env, thisType);
+        const source = inferExpression(expression.value, env);
+        const element = spreadElementType(source, env);
+        if (expression.loc) {
+          this.hovers.push({
+            line: expression.loc.line,
+            column: expression.loc.column,
+            length: 3,
+            code: element ? `(spread) ${printType(source)}
+(infer) ${printType(element)}` : `(spread) ${printType(source)}`
+          });
+          if (!element) this.diagnostics.push({
+            line: expression.loc.line,
+            column: expression.loc.column,
+            length: 3,
+            message: `Type '${printType(source)}' cannot be spread. Expected string, an array, or an object with toArray(): Array.`
+          });
+        }
+        return;
+      }
       case "Assignment":
         if (!env.has(expression.name) && expression.loc) this.diagnostics.push({
           line: expression.loc.line,

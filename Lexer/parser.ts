@@ -9,6 +9,7 @@ export type Expression =
     | { kind: 'RegEx'; source: string; flags: string; loc?: Loc }
     | { kind: 'Template'; parts: (string | Expression)[]; loc?: Loc }
     | { kind: 'Identifier'; name: string; loc?: Loc } | { kind: 'Array'; elements: Expression[]; loc?: Loc }
+    | { kind: 'Spread'; value: Expression; loc?: Loc }
       | { kind: 'Object'; properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set'; spread?: boolean; readonly?: boolean }[]; loc?: Loc }
     | { kind: 'Unary'; operator: string; operand: Expression; loc?: Loc }
     | { kind: 'Assignment'; name: string; loc?: Loc; operatorLoc?: Loc; operator?: string; value: Expression }
@@ -396,7 +397,10 @@ export class Parser {
                 const args: Expression[] = []
                 this.parenthesisSeparators()
                 if (!this.is('RightParen')) do {
-                    args.push(this.expression())
+                    if (this.match('Ellipsis')) {
+                        const token = this.tokens[this.pos - 1]
+                        args.push({ kind: 'Spread', value: this.expression(), loc: this.loc(token) })
+                    } else args.push(this.expression())
                     this.parenthesisSeparators()
                 } while (this.match('Comma') && (this.parenthesisSeparators(), true))
                 this.take('RightParen')
@@ -474,6 +478,7 @@ export class Parser {
                         break
                     case 'RegEx': break
                     case 'Array': node.elements.forEach(shiftExpression); break
+                    case 'Spread': shiftExpression(node.value); break
                     case 'Object':
                         for (const property of node.properties) {
                             property.keyLoc = shiftLoc(property.keyLoc)
@@ -607,7 +612,10 @@ export class Parser {
             const elements: Expression[] = []
             this.parenthesisSeparators()
             while (!this.is('RightBracket') && !this.is('EOF')) {
-                elements.push(this.expression())
+                if (this.match('Ellipsis')) {
+                    const spread = this.tokens[this.pos - 1]
+                    elements.push({ kind: 'Spread', value: this.expression(), loc: this.loc(spread) })
+                } else elements.push(this.expression())
                 this.parenthesisSeparators()
                 if (this.match('Comma')) this.parenthesisSeparators()
                 else if (!this.is('RightBracket')) this.fail("Expected ',' or ']' in array")
@@ -680,6 +688,10 @@ function inferredTypeNode(expression: Expression): TypeNode {
         case 'Literal': return { kind: 'NamedType', name: typeof expression.value === 'bigint' ? 'BigInt' : expression.value === null ? 'null' : typeof expression.value }
         case 'Template': return { kind: 'NamedType', name: 'string' }
         case 'Array': return { kind: 'ArrayType', element: expression.elements[0] ? inferredTypeNode(expression.elements[0]) : { kind: 'NamedType', name: 'any' } }
+        case 'Spread': {
+            const type = inferredTypeNode(expression.value)
+            return type.kind === 'ArrayType' ? type.element : { kind: 'NamedType', name: 'any' }
+        }
         case 'Object': return { kind: 'ObjectType', members: expression.properties.flatMap(property => property.accessor === 'set' ? [] : [{
             name: property.key,
             type: property.accessor === 'get' && property.value.kind === 'Function' ? property.value.returnType ?? { kind: 'NamedType', name: 'any' } : inferredTypeNode(property.value),
@@ -711,8 +723,17 @@ function inferExpressionType(
 
         case 'Array': {
             if (expression.elements.length === 0) return { kind: 'array', element: unknownType }
-            const elements = expression.elements.map(element => inferExpressionType(element, variables))
+            const elements = expression.elements.map(element => {
+                if (element.kind !== 'Spread') return inferExpressionType(element, variables)
+                const spread = inferExpressionType(element.value, variables)
+                return spread.kind === 'array' ? spread.element : unknownType
+            })
             return { kind: 'array', element: commonType(elements) }
+        }
+
+        case 'Spread': {
+            const spread = inferExpressionType(expression.value, variables)
+            return spread.kind === 'array' ? spread.element : unknownType
         }
 
         case 'Object':
@@ -899,7 +920,8 @@ function inferExpressionType(
                 const required = callee.params.filter(param => !param.optional && !param.rest).length
                 const rest = callee.params.some(param => param.rest)
                 const maximum = rest ? Infinity : callee.params.length
-                if (expression.args.length < required || expression.args.length > maximum) {
+                const hasSpread = expression.args.some(argument => argument.kind === 'Spread')
+                if (!hasSpread && (expression.args.length < required || expression.args.length > maximum)) {
                     throw new SyntaxError(`Expected ${required}${maximum === required ? '' : ` to ${maximum === Infinity ? 'any number of' : maximum}`} arguments, received ${expression.args.length}`)
                 }
                 expression.args.forEach((argument, index) => {

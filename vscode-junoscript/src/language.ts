@@ -750,11 +750,38 @@ function iterableElementType(type: TypeNode, env: Env): TypeNode {
             const result = resolveType(toArray.type, env)
             if (result.kind === 'ArrayType') return result.element
             if (result.kind === 'GenericType' && (result.name === 'Array' || result.name === 'ReadonlyArray')) return result.args[0] ?? named('any')
+            if (isNamedType(result, 'Array') || isNamedType(result, 'ReadonlyArray')) return named('any')
         }
     }
     if (resolved.kind === 'UnionType') return unionOf(resolved.types.map(part => iterableElementType(part, env)))
     if (isNamedType(resolved, 'string')) return named('string')
     return named('any')
+}
+
+function spreadElementType(type: TypeNode, env: Env): TypeNode | undefined {
+    const resolved = resolveType(type, env)
+    if (isNamedType(resolved, 'any')) return named('any')
+    if (isNamedType(resolved, 'string')) return named('string')
+    if (resolved.kind === 'ArrayType') return resolved.element
+    if (resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray')) {
+        return resolved.args[0] ?? named('any')
+    }
+    if (resolved.kind === 'UnionType' || resolved.kind === 'IntersectionType') {
+        const elements = resolved.types.map(part => spreadElementType(part, env))
+        if (resolved.kind === 'UnionType' && elements.some(element => !element)) return undefined
+        const available = elements.filter((element): element is TypeNode => Boolean(element))
+        if (available.length) return unionOf(available)
+    }
+    const toArray = lookupMember(resolved, 'toArray', env)
+    if (isFunctionSymbol(toArray) && toArray.params.length === 0) {
+        const result = resolveType(toArray.returnType, env)
+        if (result.kind === 'ArrayType') return result.element
+        if (result.kind === 'GenericType' && (result.name === 'Array' || result.name === 'ReadonlyArray')) {
+            return result.args[0] ?? named('any')
+        }
+        if (isNamedType(result, 'Array') || isNamedType(result, 'ReadonlyArray')) return named('any')
+    }
+    return undefined
 }
 
 function isNullable(type: TypeNode, env: Env): boolean {
@@ -821,7 +848,9 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
         }
         case 'Array': {
             if (!expression.elements.length) return arrayOf(named('any'))
-            const elements = expression.elements.map(item => inferExpression(item, env))
+            const elements = expression.elements.map(item => item.kind === 'Spread'
+                ? spreadElementType(inferExpression(item.value, env), env) ?? errorType()
+                : inferExpression(item, env))
             const resolvedElements = elements.map(item => resolveType(item, env))
             if (resolvedElements.every(item => item.kind === 'ObjectType')) {
                 const objectElements = resolvedElements as Extract<TypeNode, { kind: 'ObjectType' }>[]
@@ -836,6 +865,7 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             }
             return arrayOf(unionOf(elements))
         }
+        case 'Spread': return spreadElementType(inferExpression(expression.value, env), env) ?? errorType()
         case 'Object': {
             // Build the object's shape before inferring methods so `this` inside a
             // method can resolve both fields and other methods on the object.
@@ -1564,7 +1594,35 @@ class Analyzer {
             }
             case 'Array':
                 expression.elements.forEach(item => this.walkExpression(item, env, thisType))
+                if (expression.loc) this.hovers.push({
+                    line: expression.loc.line,
+                    column: expression.loc.column,
+                    length: 1,
+                    code: `(infer) ${printType(inferExpression(expression, env))}`
+                })
                 return
+            case 'Spread': {
+                this.walkExpression(expression.value, env, thisType)
+                const source = inferExpression(expression.value, env)
+                const element = spreadElementType(source, env)
+                if (expression.loc) {
+                    this.hovers.push({
+                        line: expression.loc.line,
+                        column: expression.loc.column,
+                        length: 3,
+                        code: element
+                            ? `(spread) ${printType(source)}\n(infer) ${printType(element)}`
+                            : `(spread) ${printType(source)}`
+                    })
+                    if (!element) this.diagnostics.push({
+                        line: expression.loc.line,
+                        column: expression.loc.column,
+                        length: 3,
+                        message: `Type '${printType(source)}' cannot be spread. Expected string, an array, or an object with toArray(): Array.`
+                    })
+                }
+                return
+            }
             case 'Assignment':
                 if (!env.has(expression.name) && expression.loc) this.diagnostics.push({
                     line: expression.loc.line,

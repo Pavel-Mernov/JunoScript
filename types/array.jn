@@ -15,10 +15,7 @@ export constructor Array<T> : Iterable<T> & T[] {
 
             fun copy(): T[] =
                 let array: T[] = []
-                let index = 0
-                while index < _length
-                    array.push(this[index])
-                    index++
+                array.push(...this)
                 return array
 
             fun toArray(): T[] =
@@ -26,16 +23,15 @@ export constructor Array<T> : Iterable<T> & T[] {
 
             fun enumerate(): (number | T)[][] =
                 let entries: (number | T)[][] = []
-                this.indices.forEach((index) => entries.push([index, this[index]]))
+                for const index of this.indices
+                    entries.push([index, this[index]])
                 return entries
 
             fun push(...items: T[]): number =
                 const previousLength = _length
                 _length += items.length
-                let index = 0
-                while index < items.length
+                for const index of items.indices
                     this[previousLength + index] = items[index]
-                    index++
                 return _length
 
             fun pop(): T? =
@@ -49,43 +45,35 @@ export constructor Array<T> : Iterable<T> & T[] {
                 if _length == 0
                     return null
                 const value = this[0]
-                let index = 1
-                while index < _length
-                    this[index - 1] = this[index]
-                    index++
+                for const index of this.indices
+                    if index > 0
+                        this[index - 1] = this[index]
                 _length--
                 return value
 
             fun unshift(...items: T[]): number =
                 const added = items.length
-                let index = _length - 1
-                while index >= 0
-                    this[index + added] = this[index]
-                    index--
-                let itemIndex = 0
-                while itemIndex < items.length
-                    this[itemIndex] = items[itemIndex]
-                    itemIndex++
+                for const index of this.indices
+                    const reverseIndex = _length - index - 1
+                    this[reverseIndex + added] = this[reverseIndex]
+                for const index of items.indices
+                    this[index] = items[index]
                 _length += added
                 return _length
 
             fun reverse(): T[] =
-                let left = 0
-                let right = _length - 1
-                while left < right
-                    const value = this[left]
-                    this[left] = this[right]
-                    this[right] = value
-                    left++
-                    right--
+                for const index of this.indices
+                    const opposite = _length - index - 1
+                    if index < opposite
+                        const value = this[index]
+                        this[index] = this[opposite]
+                        this[opposite] = value
                 return this
 
             fun sort(compare: ((T, T) -> number)?): T[] =
                 const sorted = compare == null ? this.toArray().sort() : this.toArray().sort(compare!)
-                let index = 0
-                while index < sorted.length
+                for const index of this.indices
                     this[index] = sorted[index]
-                    index++
                 return this
 
             fun fill(value: T, start: number = 0, end: number = this.length): T[] =
@@ -95,9 +83,9 @@ export constructor Array<T> : Iterable<T> & T[] {
                     position = 0
                 if to > _length
                     to = _length
-                while position < to
-                    this[position] = value
-                    position++
+                for const index of this.indices
+                    if index >= position & index < to
+                        this[index] = value
                 return this
 
             fun slice(start: number = 0, end: number = this.length): T[] =
@@ -108,9 +96,9 @@ export constructor Array<T> : Iterable<T> & T[] {
                     position = 0
                 if limit > _length
                     limit = _length
-                while position < limit
-                    result.push(this[position])
-                    position++
+                for const index of this.indices
+                    if index >= position & index < limit
+                        result.push(this[index])
                 return result
 
             fun copyWithin(target: number, start: number = 0, end: number = this.length): T[] =
@@ -118,10 +106,9 @@ export constructor Array<T> : Iterable<T> & T[] {
                 if destination < 0
                     destination = 0
                 const values = this.slice(start, end)
-                let index = 0
-                while index < values.length & destination + index < _length
-                    this[destination + index] = values[index]
-                    index++
+                for const index of this.indices
+                    if index < values.length & destination + index < _length
+                        this[destination + index] = values[index]
                 return this
 
             fun splice(start: number, deleteCount: number = this.length - start, ...items: T[]): T[] =
