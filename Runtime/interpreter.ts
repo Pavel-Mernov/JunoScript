@@ -313,12 +313,15 @@ export class Interpreter {
                     }
                     if (property.value.kind === 'Function') {
                         const fn = property.value
-                        object[property.key] = { __junoFunction: true, params: fn.params, body: fn.expressionBody ? [{ kind: 'Return', value: fn.expressionBody }] : fn.body, closure: env, thisValue: object } satisfies RuntimeFunction
+                        const runtimeFn = { __junoFunction: true, params: fn.params, body: fn.expressionBody ? [{ kind: 'Return', value: fn.expressionBody }] : fn.body, closure: env, thisValue: object } satisfies RuntimeFunction
+                        if (property.key === '') Object.defineProperty(object, '__junoCall', { enumerable: false, configurable: true, writable: true, value: runtimeFn })
+                        else object[property.key] = runtimeFn
                     } else object[property.key] = this.evaluate(property.value, env)
                     if (property.readonly) readonly.add(property.key)
                 }
                 for (const [key, descriptor] of accessors) Object.defineProperty(object, key, descriptor)
                 for (const key of readonly) Object.defineProperty(object, key, { ...Object.getOwnPropertyDescriptor(object, key), writable: false, enumerable: true, configurable: false })
+                this.installCallableMethods(object)
                 return object
             }
             case 'Unary': {
@@ -522,6 +525,7 @@ export class Interpreter {
                         : { kind: 'NamedType', name: callee.typeName }
                     return this.applyTypeDefaults(input, targetType, env)
                 }
+                if (callee?.__junoCall?.__junoFunction) return this.callFunction(callee.__junoCall, args, callee)
                 if (callee?.__junoFunction) return this.callFunction(callee, args, thisValue ?? callee.thisValue)
                 throw new TypeError('Value is not callable')
             }
@@ -604,6 +608,20 @@ export class Interpreter {
             enumerable: false,
             value: function(this: object, key: string) { return key in this }
         })
+    }
+
+    private installCallableMethods(value: Record<string, any>): void {
+        if (!value.__junoCall?.__junoFunction) return
+        const define = (name: string, method: (...args: any[]) => unknown): void => {
+            if (name in value) return
+            Object.defineProperty(value, name, { enumerable: false, configurable: true, writable: true, value: method })
+        }
+        define('call', (thisArg: unknown, ...args: unknown[]) => this.callFunction(value.__junoCall, args, thisArg))
+        define('apply', (thisArg: unknown, args: unknown[]) => {
+            if (!Array.isArray(args)) throw new TypeError('Callable object apply() expects an array as its second argument')
+            return this.callFunction(value.__junoCall, args, thisArg)
+        })
+        define('bind', (thisArg: unknown, ...boundArgs: unknown[]) => (...args: unknown[]) => this.callFunction(value.__junoCall, [...boundArgs, ...args], thisArg))
     }
 
     private writeTarget(target: Expression, value: unknown, env: Environment): void {
@@ -704,7 +722,9 @@ export class Interpreter {
                         : this.inferValueType(property.value, env),
                     optional: false,
                     readonly: false,
-                    constant: false
+                    constant: false,
+                    method: property.value.kind === 'Function' && !property.accessor,
+                    params: property.value.kind === 'Function' ? property.value.params : undefined
                 }]) }
             case 'Function':
                 return {
@@ -775,6 +795,7 @@ export class Interpreter {
 
     private isCallableType(type: TypeNode): boolean {
         return type.kind === 'FunctionType' || (type.kind === 'NamedType' && type.name === 'any')
+            || type.kind === 'ObjectType' && type.members.some(member => member.name === '' && member.method)
     }
 
     private instantiateUtilityType(type: Extract<TypeNode, { kind: 'GenericType' }>, env: Environment): TypeNode | null {
@@ -847,11 +868,12 @@ export class Interpreter {
         }
         if (type.kind === 'UnionType') return type.types.some(part => this.matchesTypeNode(value, part, env, resolving))
         if (type.kind === 'IntersectionType') return type.types.every(part => this.matchesTypeNode(value, part, env, resolving))
-        if (type.kind === 'FunctionType') return typeof value === 'function' || Boolean((value as any)?.__junoFunction)
+        if (type.kind === 'FunctionType') return typeof value === 'function' || Boolean((value as any)?.__junoFunction || (value as any)?.__junoCall?.__junoFunction)
         if (type.kind === 'ObjectType') {
             if (value === null || typeof value !== 'object') return false
             const object = value as Record<string, any>
             return type.members.every(member => {
+                if (member.name === '' && member.method) return Boolean(object.__junoCall?.__junoFunction)
                 if (!Object.prototype.hasOwnProperty.call(object, member.name)) return member.optional || member.defaultValue !== undefined
                 const memberValue = object[member.name]
                 if (member.accessor === 'set') return typeof Object.getOwnPropertyDescriptor(object, member.name)?.set === 'function'
@@ -910,6 +932,17 @@ export class Interpreter {
                 continue
             }
             if (member.method) {
+                if (member.name === '') {
+                    if (member.body && !runtimeValue.__junoCall?.__junoFunction) {
+                        Object.defineProperty(runtimeValue, '__junoCall', {
+                            enumerable: false,
+                            configurable: true,
+                            writable: true,
+                            value: { __junoFunction: true, params: member.params ?? [], body: member.body, closure: env, thisValue: value } satisfies RuntimeFunction
+                        })
+                    }
+                    continue
+                }
                 const isDefaultToString = member.name === 'toString' && runtimeValue[member.name]?.__junoDefaultToString
                 if (member.body && (isDefaultToString || (typeof runtimeValue[member.name] !== 'function' && !runtimeValue[member.name]?.__junoFunction))) {
                     ;(value as Record<string, any>)[member.name] = { __junoFunction: true, params: member.params ?? [], body: member.body, closure: env, thisValue: value } satisfies RuntimeFunction
@@ -924,6 +957,7 @@ export class Interpreter {
                 this.applyTypeDefaults(fieldValue, member.type, env, resolving)
             }
         }
+        this.installCallableMethods(runtimeValue)
         return value
     }
 
@@ -994,6 +1028,14 @@ export class Interpreter {
             const member = type.members.find(item => item.name === name && item.accessor === 'get')
                 ?? type.members.find(item => item.name === name)
             if (member) return { type: member.type, optional: member.optional }
+            const call = type.members.find(item => item.name === '' && item.method)
+            if (call) {
+                const any = { kind: 'NamedType', name: 'any' } as TypeNode
+                const signature = { kind: 'FunctionType', params: (call.params ?? []).map(param => param.type ?? any), result: call.type } as TypeNode
+                if (name === 'call') return { type: { kind: 'FunctionType', params: [any, ...(call.params ?? []).map(param => param.type ?? any)], result: call.type }, optional: false }
+                if (name === 'apply') return { type: { kind: 'FunctionType', params: [any, { kind: 'ArrayType', element: any }], result: call.type }, optional: false }
+                if (name === 'bind') return { type: { kind: 'FunctionType', params: [any], result: signature }, optional: false }
+            }
             if (name === 'has') return { type: { kind: 'FunctionType', params: [{ kind: 'NamedType', name: 'string' }], result: { kind: 'NamedType', name: 'boolean' } }, optional: false }
         }
         if (name === 'has' && (type.kind === 'ArrayType' || type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) {

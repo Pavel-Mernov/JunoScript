@@ -123,6 +123,7 @@ export function printType(type: TypeNode): string {
         }
         case 'ObjectType': {
             const members = type.members.map(member => {
+                if (member.name === '' && member.method) return `fun (${(member.params ?? []).map(printParam).join(', ')}): ${printType(member.type)}`
                 const prefix = `${member.readonly ? 'readonly ' : ''}${member.constant ? 'const ' : ''}${member.name}${member.optional ? '?' : ''}`
                 if (member.accessor === 'get') return `get ${member.name}(): ${printType(member.type)}`
                 if (member.accessor === 'set') return `set ${member.name}(${(member.params ?? []).map(printParam).join(', ')}): void`
@@ -261,6 +262,22 @@ function isFunctionSymbol(value: TypeNode | FunctionSymbol | undefined): value i
     return Boolean(value && typeof value === 'object' && 'kind' in value && value.kind === 'fun' && 'returnType' in value)
 }
 
+function callableType(type: TypeNode, env: Env): Extract<TypeNode, { kind: 'FunctionType' }> | undefined {
+    const resolved = resolveType(type, env)
+    if (resolved.kind === 'FunctionType') return resolved
+    if (resolved.kind === 'ObjectType') {
+        const call = resolved.members.find(member => member.name === '' && member.method)
+        if (call) return { kind: 'FunctionType', params: (call.params ?? []).map(parameterType), result: call.type }
+    }
+    if (resolved.kind === 'IntersectionType') {
+        for (const part of resolved.types) {
+            const call = callableType(part, env)
+            if (call) return call
+        }
+    }
+    return undefined
+}
+
 function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | FunctionSymbol | undefined {
     if (type.kind === 'NamedType') {
         const constructor = env.get(type.name)
@@ -382,6 +399,14 @@ function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | Functi
             if (member.accessor === 'set') return member.type
             if (member.method) return { kind: 'fun', params: member.params ?? [], returnType: member.type, body: member.body, ownerType: resolved }
             return member.type
+        }
+        const call = resolved.members.find(item => item.name === '' && item.method)
+        if (call) {
+            const params = call.params ?? []
+            const signature: TypeNode = { kind: 'FunctionType', params: params.map(parameterType), result: call.type }
+            if (name === 'call') return { kind: 'fun', params: [{ name: 'thisArg', type: named('any') }, ...params], returnType: call.type }
+            if (name === 'apply') return { kind: 'fun', params: [{ name: 'thisArg', type: named('any') }, { name: 'args', type: arrayOf(named('any')) }], returnType: call.type }
+            if (name === 'bind') return { kind: 'fun', params: [{ name: 'thisArg', type: named('any') }, { name: 'args', type: arrayOf(named('any')), rest: true }], returnType: signature }
         }
         if (name === 'has') return { kind: 'fun', params: [{ name: 'key', type: named('string') }], returnType: named('boolean') }
     }
@@ -556,6 +581,13 @@ function isAssignableTo(expected: TypeNode, actual: TypeNode, env: Env): boolean
         return target.name === (typeof value.value === 'string' ? 'string' : typeof value.value)
     }
     if (target.kind === 'ArrayType' && value.kind === 'ArrayType') return isAssignableTo(target.element, value.element, env)
+    if (target.kind === 'FunctionType') {
+        const callable = callableType(value, env)
+        return Boolean(callable
+            && target.params.length === callable.params.length
+            && target.params.every((item, index) => isAssignableTo(item, callable.params[index], env))
+            && isAssignableTo(target.result, callable.result, env))
+    }
     if (target.kind === 'ObjectType' && value.kind === 'ObjectType') {
         return target.members.filter(member => !member.optional && (!member.method || member.accessor === 'get') && member.accessor !== 'set' && !member.body && !isNullable(member.type, env)).every(member => {
             const actualMember = value.members.find(item => item.name === member.name)
@@ -568,7 +600,6 @@ function isAssignableTo(expected: TypeNode, actual: TypeNode, env: Env): boolean
     if (target.kind !== value.kind) return false
     if (target.kind === 'NamedType' && value.kind === 'NamedType') return target.name === value.name
     if (target.kind === 'GenericType' && value.kind === 'GenericType') return target.name === value.name && target.args.length === value.args.length && target.args.every((item, index) => isAssignableTo(item, value.args[index], env))
-    if (target.kind === 'FunctionType' && value.kind === 'FunctionType') return target.params.length === value.params.length && target.params.every((item, index) => isAssignableTo(item, value.params[index], env)) && isAssignableTo(target.result, value.result, env)
     return true
 }
 
@@ -1006,11 +1037,12 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
                 }
             }
             const callee = inferExpression(expression.callee, env)
-            if (callee.kind === 'FunctionType') return callee.result
+            const callable = callableType(callee, env)
+            if (callable) return callable.result
             if (callee.kind === 'UnionType') {
                 const results = callee.types.flatMap(part => {
-                    const resolved = resolveType(part, env)
-                    if (resolved.kind === 'FunctionType') return [resolved.result]
+                    const resolved = resolveType(part, env), callable = callableType(resolved, env)
+                    if (callable) return [callable.result]
                     return isNamedType(resolved, 'null') && expression.callee.kind === 'Member' && expression.callee.optional ? [named('null')] : []
                 })
                 if (results.length) return unionOf(results)
@@ -1201,6 +1233,12 @@ class Analyzer {
             const member = lookupMember(inferExpression(callee.object, env), callee.property, env)
             if (isFunctionSymbol(member)) params = member.params
         }
+        params ??= (() => {
+            const callable = callableType(inferExpression(callee, env), env)
+            if (!callable) return undefined
+            const call = lookupMember(inferExpression(callee, env), '', env)
+            return isFunctionSymbol(call) ? call.params : callable.params.map((type, index) => ({ name: `arg${index}`, type }))
+        })()
         if (!params) return
         let positional = 0
         args.forEach(arg => {
@@ -1345,8 +1383,12 @@ class Analyzer {
                             const member = expected.members.find(item => item.name === property.key)
                             if (!member) continue
                             const propertyType = inferExpression(property.value, env)
-                            if (!isAssignableTo(member.type, propertyType, env)) {
-                                if (property.keyLoc) this.diagnostics.push({ line: property.keyLoc.line, column: property.keyLoc.column, length: property.key.length, message: `Type '${printType(propertyType)}' is not assignable to type '${printType(member.type)}' for '${property.key}'.` })
+                            const expectedType = member.method
+                                ? { kind: 'FunctionType', params: (member.params ?? []).map(parameterType), result: member.type } as TypeNode
+                                : member.type
+                            if (!isAssignableTo(expectedType, propertyType, env)) {
+                                const label = property.key || '<call signature>'
+                                if (property.keyLoc) this.diagnostics.push({ line: property.keyLoc.line, column: property.keyLoc.column, length: Math.max(1, property.key.length), message: `Type '${printType(propertyType)}' is not assignable to type '${printType(expectedType)}' for '${label}'.` })
                             }
                         }
                         const missing = expected.members.filter(member => !member.optional && (!member.method || member.accessor === 'get') && member.accessor !== 'set' && !member.defaultValue && !isNullable(member.type, env) && !actualMembers.some(item => item.name === member.name))
@@ -1672,7 +1714,9 @@ class Analyzer {
                     }
                     const member = lookupMember(objectType, property.key, env)
                     const code = isFunctionSymbol(member)
-                        ? `(method) ${property.key}(${member.params.map(printParam).join(', ')}): ${printType(member.returnType)}`
+                        ? property.key === ''
+                            ? `(call) (${member.params.map(printParam).join(', ')}): ${printType(member.returnType)}`
+                            : `(method) ${property.key}(${member.params.map(printParam).join(', ')}): ${printType(member.returnType)}`
                         : `(property) ${property.key}: ${printType(member && !isFunctionSymbol(member) ? member : named('any'))}`
                     this.addHover(property.key, property.keyLoc, code)
                     if (property.value.kind === 'Identifier' && property.key === property.value.name) {
@@ -1770,6 +1814,7 @@ class Analyzer {
             case 'Call': {
                 this.walkExpression(expression.callee, env, thisType)
                 const calleeType = resolveType(inferExpression(expression.callee, env), env)
+                const directCallable = callableType(calleeType, env)
                 if (isNullable(calleeType, env) && !(expression.callee.kind === 'Member' && expression.callee.optional)) {
                     this.addDiagnostic(expressionStart(expression.callee), 'Cannot call a nullable value; use ! or ?? to handle null.')
                 }
@@ -1778,7 +1823,7 @@ class Analyzer {
                     const nonCallable = calleeType.types.find(part => {
                         const resolved = resolveType(part, env)
                         if (optionalCall && isNamedType(resolved, 'null')) return false
-                        return !isNamedType(resolved, 'any') && resolved.kind !== 'FunctionType'
+                        return !isNamedType(resolved, 'any') && !callableType(resolved, env)
                     })
                     if (nonCallable) {
                         let loc = expressionStart(expression.callee)
@@ -1812,7 +1857,7 @@ class Analyzer {
                 expression.args.forEach((arg, index) => {
                     const contextualType = methodParameters?.[index]
                         ? parameterType(methodParameters[index])
-                        : calleeType.kind === 'FunctionType' ? calleeType.params[index] : undefined
+                        : directCallable?.params[index]
                     if (arg.kind === 'Function') this.walkFunction(arg, env, contextualType)
                     else this.walkExpression(arg, env, thisType)
                 })

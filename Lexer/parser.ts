@@ -318,10 +318,15 @@ export class Parser {
             const members: TypeMember[] = []; this.objectSeparators()
             while (!this.is('RightBrace') && !this.is('EOF')) {
                 const readonly = this.match('Keyword', 'readonly'), constant = this.match('Keyword', 'const')
+                const explicitFunction = this.match('Keyword', 'fun')
                 const accessor = this.is('Identifier') && ['get', 'set'].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === 'Identifier'
                     ? String(this.value(this.tokens[this.pos++])) as 'get' | 'set'
                     : undefined
-                const { name, loc } = this.propertyName(); let optional = this.match('Question')
+                const anonymousFunction = explicitFunction && this.is('LeftParen')
+                const { name, loc } = anonymousFunction
+                    ? { name: '', loc: this.loc(this.tokens[this.pos - 1]) }
+                    : this.propertyName()
+                let optional = this.match('Question')
                 let params: Parameter[] | undefined, method = false, type: TypeNode, body: Statement[] | undefined
                 if (this.is('LeftParen')) {
                     method = true
@@ -329,10 +334,15 @@ export class Parser {
                     const returnType = this.match('Colon') ? this.type() : undefined
                     if (this.match('Equal')) {
                         body = this.is('Newline') ? this.block() : [{ kind: 'Return', value: this.expression() }]
+                        const last = body.at(-1)
+                        if (anonymousFunction && last?.kind === 'ExpressionStatement') {
+                            body[body.length - 1] = { kind: 'Return', value: last.expression }
+                        }
                         type = returnType ?? { kind: 'NamedType', name: 'any' }
                     } else type = returnType ?? { kind: 'NamedType', name: 'void' }
                 }
                 else {
+                    if (explicitFunction) this.fail("Expected '(' after object function name")
                     if (this.match('Colon')) type = this.type()
                     else if (this.is('Equal')) type = { kind: 'NamedType', name: 'any' }
                     else this.fail("Expected ':' or '=' after field name")
@@ -639,7 +649,10 @@ export class Parser {
                 const accessor = this.is('Identifier') && ['get', 'set'].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === 'Identifier'
                     ? String(this.value(this.tokens[this.pos++])) as 'get' | 'set'
                     : undefined
-                const property = this.propertyName()
+                const anonymousFunction = explicitFunction && this.is('LeftParen')
+                const property = anonymousFunction
+                    ? { name: '', loc: this.loc(this.tokens[this.pos - 1]) }
+                    : this.propertyName()
                 let value: Expression
                 if (accessor) {
                     const params = this.parameters()
@@ -655,7 +668,12 @@ export class Parser {
                     const params = this.parameters()
                     const returnType = this.match('Colon') ? this.type() : undefined
                     this.take('Equal', "Expected '=' for method body")
-                    value = { kind: 'Function', params, returnType, body: this.block() }
+                    const body = this.block()
+                    const last = body.at(-1)
+                    if (anonymousFunction && last?.kind === 'ExpressionStatement') {
+                        body[body.length - 1] = { kind: 'Return', value: last.expression }
+                    }
+                    value = { kind: 'Function', params, returnType, body }
                 }
                 else if (explicitFunction) this.fail("Expected '(' after object function name")
                 else value = { kind: 'Identifier', name: property.name, loc: property.loc }
@@ -1024,6 +1042,7 @@ function describeType(type: InferredType): string {
 
 function isAssignable(expected: InferredType, actual: InferredType): boolean {
     if (expected.kind === 'unknown' || actual.kind === 'unknown') return true
+    if (expected.kind === 'function' && actual.kind === 'object') return actual.fields.get('')?.kind === 'function'
     if (expected.kind === 'union') return actual.kind === 'union'
         ? actual.types.every(part => expected.types.some(option => isAssignable(option, part)))
         : expected.types.some(option => isAssignable(option, actual))

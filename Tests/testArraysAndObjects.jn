@@ -1,6 +1,6 @@
 import { Array } from 'juno/types'
 import { console } from 'juno'
-import { Range } from 'juno'
+import { Range } from 'juno/types'
 
 console.log("=== Array and object index tests ===")
 
@@ -121,5 +121,98 @@ console.log('Array.from one string', fromString.toArray())
 console.log('Array.from mapped', fromMapped.toArray())
 console.log('Array.from thisArg', fromWithThisArg.toArray())
 console.log('Array.of numbers', ofNumbers.toArray())
+
+type Functional = {
+    fun (arg : string | number) =
+        "Anonymous method. param: ${this.param}. arg: ${arg}."
+    readonly prop = "prop"
+    readonly param : string | number
+}
+
+const funcObject = {
+    field : 'something...',
+    fun (arg : string | number) =
+        return 'func object. field:${this.field}. arg:${arg}'
+}
+
+type FunctionPrototype = {
+    fun (arg : string | number): string
+    fun describe(arg : string): string
+}
+
+const typedFunc = Functional({ param: "typed" })
+const prototypeFunc : FunctionPrototype = {
+    fun (arg : string | number) =
+        return "prototype call. arg:${arg}"
+    fun describe(arg : string) =
+        return "prototype method. arg:${arg}"
+}
+
+console.log(typedFunc)
+console.log(funcObject)
+console.log(prototypeFunc)
+console.log(typedFunc("argument"))
+console.log(funcObject(42))
+console.log(prototypeFunc("anonymous"))
+console.log(prototypeFunc.describe("named"))
+
+const callableContext = { field: "call context" }
+const boundFuncObject = funcObject.bind(callableContext)
+console.log(funcObject.call(callableContext, "call"))
+console.log(funcObject.apply(callableContext, ["apply"]))
+console.log(boundFuncObject("bind"))
+
+const overriddenCallable = {
+    fun (arg : string) =
+        return "anonymous:${arg}"
+    fun call(thisArg : any, arg : string) =
+        return "overridden call:${arg}"
+    fun apply(thisArg : any, args : any[]) =
+        return "overridden apply:${args[0]}"
+    fun bind(thisArg : any) =
+        return "overridden bind"
+}
+
+console.log(overriddenCallable.call(null, "value"))
+console.log(overriddenCallable.apply(null, ["value"]))
+console.log(overriddenCallable.bind(null))
+
+fun invokeCallback(callback : (string | number) -> string, arg : string | number): string =
+    return callback(arg)
+
+const assignedCallable : (string | number) -> string = funcObject
+console.log(assignedCallable("assigned"))
+console.log(invokeCallback(funcObject, "argument"))
+
+fun regularCallback(arg : string | number): string =
+    return "regular callback:${arg}"
+
+fun callTwice(callback : (string | number) -> string, first : string | number, second : string | number): string[] =
+    return [callback(first), callback(second)]
+
+fun callbackFactory(callback : (string | number) -> string): (string | number) -> string =
+    return callback
+
+const returnedFunction = callbackFactory(regularCallback)
+const returnedCallable = callbackFactory(funcObject)
+console.log(callTwice(regularCallback, "first", 2))
+console.log(callTwice(funcObject, "first", 2))
+console.log(returnedFunction("returned function"))
+console.log(returnedCallable("returned callable"))
+
+fun addNumbers(left : number, right : number): number =
+    return left + right
+
+const callableAdder = {
+    offset: 10,
+    fun (left : number, right : number): number =
+        return this.offset + left + right
+}
+
+fun calculate(callback : (number, number) -> number, left : number, right : number): number =
+    return callback(left, right)
+
+console.log(calculate(addNumbers, 3, 4))
+console.log(calculate(callableAdder, 3, 4))
 
 console.log("=== Array and object index tests complete ===")
