@@ -2285,17 +2285,29 @@ function iterableElementType(type, env) {
   if (resolved.kind === "GenericType" && (resolved.name === "Array" || resolved.name === "ReadonlyArray")) {
     return resolved.args[0] ?? named("any");
   }
-  if (resolved.kind === "ObjectType") {
-    const toArray = resolved.members.find((member) => member.name === "toArray" && member.method);
-    if (toArray) {
-      const result = resolveType(toArray.type, env);
-      if (result.kind === "ArrayType") return result.element;
-      if (result.kind === "GenericType" && (result.name === "Array" || result.name === "ReadonlyArray")) return result.args[0] ?? named("any");
-      if (isNamedType(result, "Array") || isNamedType(result, "ReadonlyArray")) return named("any");
-    }
-  }
   if (resolved.kind === "UnionType") return unionOf(resolved.types.map((part) => iterableElementType(part, env)));
   if (isNamedType(resolved, "string")) return named("string");
+  const arrayElement = (candidate) => {
+    const result = resolveType(candidate, env);
+    if (result.kind === "ArrayType") return result.element;
+    if (result.kind === "GenericType" && (result.name === "Array" || result.name === "ReadonlyArray")) return result.args[0] ?? named("any");
+    if (isNamedType(result, "Array") || isNamedType(result, "ReadonlyArray")) return named("any");
+    return void 0;
+  };
+  const toArray = lookupMember(type, "toArray", env);
+  if (isFunctionSymbol(toArray)) {
+    const element = arrayElement(toArray.returnType);
+    if (element) return element;
+  }
+  const iterator = lookupMember(type, "iterator", env);
+  if (isFunctionSymbol(iterator)) {
+    const next = removeNull(resolveType(iterator.returnType, env));
+    if (next.kind === "FunctionType") {
+      const yielded = removeNull(resolveType(next.result, env));
+      const value = lookupMember(yielded, "value", env);
+      if (value && !isFunctionSymbol(value)) return value;
+    }
+  }
   return named("any");
 }
 function spreadElementType(type, env) {
