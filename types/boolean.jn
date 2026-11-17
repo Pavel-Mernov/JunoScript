@@ -1,0 +1,18 @@
+import { Math } from 'juno'
+
+type BooleanConstructor = {
+    fun (value : any) : boolean
+}
+
+export const Boolean : BooleanConstructor = {
+    fun (value: any): boolean =
+        const falsyValues : any[] = [0, -0, 0n, '', null, false, Math.NaN]
+
+        if falsyValues.includes(value)
+            return false
+        if value.isType<{ fun toBoolean(): boolean }>()
+            return value.toBoolean()
+        return true
+    fun toString() = 
+        return 'Boolean'
+}

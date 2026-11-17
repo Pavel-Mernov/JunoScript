@@ -215,4 +215,13 @@ fun calculate(callback : (number, number) -> number, left : number, right : numb
 console.log(calculate(addNumbers, 3, 4))
 console.log(calculate(callableAdder, 3, 4))
 
+const defaultBooleanObject = { value: 1 }
+const overriddenBooleanObject = {
+    value: 0,
+    fun toBoolean(): boolean =
+        return this.value > 0
+}
+console.log("default object boolean:", !!defaultBooleanObject, defaultBooleanObject ? "truthy" : "falsy")
+console.log("overridden object boolean:", !!overriddenBooleanObject, overriddenBooleanObject ? "truthy" : "falsy")
+
 console.log("=== Array and object index tests complete ===")

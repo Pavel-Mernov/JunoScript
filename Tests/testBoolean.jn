@@ -1,4 +1,6 @@
 import { console } from 'juno:node'
+import { Math } from 'juno'
+import { Boolean } from '../types/boolean'
 
 const ready = true
 const hasName = false
@@ -29,3 +31,27 @@ if ready & (hasName | !hasName)
 const number = ready ? 42 : 0
 const fallbackNumber = optionalName == null ? 7 : 8
 console.log("ternary values:", number, fallbackNumber)
+
+const defaultTruthyObject = { label: 'default' }
+const customFalsyObject = {
+    fun toBoolean(): boolean =
+        return false
+}
+const customTruthyObject = {
+    fun toBoolean(): boolean =
+        return true
+}
+
+console.log("object !!:", !!defaultTruthyObject, !!customFalsyObject, !!customTruthyObject)
+console.log("object ternary:", defaultTruthyObject ? 'true' : 'false', customFalsyObject ? 'true' : 'false')
+if customFalsyObject
+    console.log("custom falsy object branch must not run")
+else
+    console.log("custom falsy object condition: false")
+
+console.log("Boolean numbers:", Boolean(0), Boolean(-0), Boolean(1), Boolean(-1), Boolean(Math.NaN), Boolean(Math.Infinity))
+console.log("Boolean BigInt:", Boolean(0n), Boolean(1n), Boolean(-1n))
+console.log("Boolean strings:", Boolean(''), Boolean('0'), Boolean('false'), Boolean('Juno'))
+console.log("Boolean null and booleans:", Boolean(null), Boolean(false), Boolean(true))
+console.log("Boolean collections:", Boolean([]), Boolean([0]), Boolean({}), Boolean({ value: 0 }))
+console.log("Boolean custom objects:", Boolean(customFalsyObject), Boolean(customTruthyObject), Boolean(defaultTruthyObject))

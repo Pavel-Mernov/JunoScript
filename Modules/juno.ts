@@ -48,9 +48,15 @@ export type Error = {
     stack?: string
 }
 
+const JunoMath = Object.create(Math) as Math & { readonly NaN: number; readonly Infinity: number }
+Object.defineProperties(JunoMath, {
+    NaN: { value: Number.NaN, enumerable: true },
+    Infinity: { value: Number.POSITIVE_INFINITY, enumerable: true }
+})
+
 const juno: Record<string, any> = { 
     console,
-    Math,
+    Math: JunoMath,
     types,
     Error,
     Range

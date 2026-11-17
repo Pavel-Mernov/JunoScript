@@ -339,7 +339,7 @@ export class Interpreter {
                     return value
                 }
                 if (value == null) throw new TypeError(`Cannot apply '${expression.operator}' to null`)
-                return expression.operator === '-' ? -value : !value
+                return expression.operator === '-' ? -value : !this.toBoolean(value)
             }
             case 'Binary': {
                 const left = this.evaluate(expression.left, env)
@@ -415,10 +415,10 @@ export class Interpreter {
                         )
             
                     case '|':
-                        return Boolean(left) || Boolean(right)
+                        return this.toBoolean(left) || this.toBoolean(right)
             
                     case '&':
-                        return Boolean(left) && Boolean(right)
+                        return this.toBoolean(left) && this.toBoolean(right)
             
                     default:
                         throw new Error(`Unsupported operator '${expression.operator}'`)
@@ -662,13 +662,28 @@ export class Interpreter {
             if (bothNumbers || bothBigInts) return left / (right as any)
         } else if (operator === '%=') {
             if (bothNumbers || bothBigInts) return left % (right as any)
-        } else if (operator === '&=') return Boolean(left) && Boolean(right)
-        else if (operator === '|=') return Boolean(left) || Boolean(right)
+        } else if (operator === '&=') return this.toBoolean(left) && this.toBoolean(right)
+        else if (operator === '|=') return this.toBoolean(left) || this.toBoolean(right)
         throw new TypeError(`Invalid operands for '${operator}': ${type} and ${typeof right}`)
     }
 
     private requireCondition(value: unknown): boolean {
         if (value == null) throw new TypeError('Cannot use null as a condition; use ! or ?? to handle null')
+        return this.toBoolean(value)
+    }
+
+    private toBoolean(value: unknown): boolean {
+        if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
+            const method = (value as any).toBoolean
+            if (method === undefined) return true
+            const result = method?.__junoFunction
+                ? this.callFunction(method as RuntimeFunction, [], value)
+                : typeof method === 'function'
+                    ? method.call(value)
+                    : (() => { throw new TypeError("Property 'toBoolean' must be a function") })()
+            if (typeof result !== 'boolean') throw new TypeError("Method 'toBoolean' must return boolean")
+            return result
+        }
         return Boolean(value)
     }
     private lookup(env: Environment, name: string): Binding | undefined {
@@ -683,7 +698,8 @@ export class Interpreter {
         if (expression.kind === 'Identifier') return this.lookup(env, expression.name)?.declaredType ?? null
         if (expression.kind === 'Member') {
             const parentType = this.typeOf(expression.object, env)
-            return parentType ? this.findTypeMember(parentType, expression.property, env)?.type ?? null : null
+            const lookupType = parentType && expression.optional ? this.nonNullableType(parentType) : parentType
+            return lookupType ? this.findTypeMember(lookupType, expression.property, env)?.type ?? null : null
         }
         if (expression.kind === 'Index') {
             const parentType = this.typeOf(expression.object, env) ?? this.inferValueType(expression.object, env)
@@ -692,6 +708,15 @@ export class Interpreter {
             if (resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray')) return resolved.args[0] ?? { kind: 'NamedType', name: 'any' }
         }
         return null
+    }
+
+    private nonNullableType(type: TypeNode): TypeNode {
+        if (type.kind !== 'UnionType') return type
+        const types = type.types.filter(part => !(
+            part.kind === 'NamedType' && part.name === 'null'
+            || part.kind === 'LiteralType' && part.value === null
+        ))
+        return types.length === 1 ? types[0] : { ...type, types }
     }
 
     private inferValueType(expression: Expression, env: Environment): TypeNode {
@@ -949,6 +974,16 @@ export class Interpreter {
                 }
                 continue
             }
+            const nullableMember = member.type.kind === 'NamedType' && member.type.name === 'null'
+                || member.type.kind === 'UnionType' && member.type.types.some(part => part.kind === 'NamedType' && part.name === 'null')
+            if (!Object.prototype.hasOwnProperty.call(value, member.name) && (member.optional || nullableMember) && member.defaultValue === undefined) {
+                Object.defineProperty(runtimeValue, member.name, {
+                    value: null,
+                    enumerable: false,
+                    writable: !member.readonly,
+                    configurable: !member.readonly
+                })
+            }
             if (!Object.prototype.hasOwnProperty.call(value, member.name) && member.defaultValue) {
                 ;(value as Record<string, any>)[member.name] = this.evaluate(member.defaultValue, env)
             }
@@ -1048,6 +1083,10 @@ export class Interpreter {
             const element = type.kind === 'ArrayType' ? type.element : type.args[0] ?? { kind: 'NamedType', name: 'any' }
             return { type: { kind: 'FunctionType', params: [element], result: { kind: 'NamedType', name: 'number' } }, optional: false }
         }
+        if (name === 'includes' && (type.kind === 'ArrayType' || type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) {
+            const element = type.kind === 'ArrayType' ? type.element : type.args[0] ?? { kind: 'NamedType', name: 'any' }
+            return { type: { kind: 'FunctionType', params: [element], result: { kind: 'NamedType', name: 'boolean' } }, optional: false }
+        }
         if (name === 'toString' && !(type.kind === 'LiteralType' && type.value === null)) {
             return { type: { kind: 'NamedType', name: 'string' }, optional: false }
         }
@@ -1100,11 +1139,13 @@ export class Interpreter {
             }
         }
         const declaredType = this.typeOf(owner, env)
-        if (declaredType && !(declaredType.kind === 'NamedType' && declaredType.name === 'any') && !this.findTypeMember(declaredType, property, env)) {
+        const memberLookupType = declaredType && optional ? this.nonNullableType(declaredType) : declaredType
+        const declaredMember = memberLookupType ? this.findTypeMember(memberLookupType, property, env) : null
+        if (declaredType && !(declaredType.kind === 'NamedType' && declaredType.name === 'any') && !declaredMember) {
             throw new TypeError(`Property '${property}' does not exist on declared type`)
         }
         if (!(property in Object(object))) {
-            if (optional || this.findTypeMember(declaredType ?? { kind: 'NamedType', name: 'any' }, property, env)?.optional) return null
+            if (optional || declaredMember?.optional) return null
             throw new TypeError(`Property '${property}' does not exist on value`)
         }
         const value = (object as any)[property]

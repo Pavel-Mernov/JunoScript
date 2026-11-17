@@ -1,3 +1,4 @@
 export import { Iterable } from './iterable'
 export import { Range } from './range'
 export import { Array } from './array'
+export import { Boolean } from './boolean'

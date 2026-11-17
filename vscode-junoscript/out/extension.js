@@ -1346,6 +1346,7 @@ function sameType(a, b) {
 function typeFromNode(type, aliases = /* @__PURE__ */ new Map(), resolving = /* @__PURE__ */ new Set()) {
   if (type.kind === "LiteralType") return { kind: "literal", value: type.value };
   if (type.kind === "NamedType") {
+    if (type.name === "any" || type.name === "unknown") return unknownType;
     const alias = aliases.get(type.name);
     if (alias && !resolving.has(type.name)) {
       const next = new Set(resolving);
@@ -1589,7 +1590,7 @@ function mathType() {
   return {
     kind: "ObjectType",
     members: [
-      ...["E", "LN10", "LN2", "LOG10E", "LOG2E", "PI", "SQRT1_2", "SQRT2"].map((name) => field(name, number, true)),
+      ...["E", "LN10", "LN2", "LOG10E", "LOG2E", "PI", "SQRT1_2", "SQRT2", "NaN", "Infinity"].map((name) => field(name, number, true)),
       ...["abs", "acos", "acosh", "asin", "asinh", "atan", "atanh", "cbrt", "ceil", "clz32", "cos", "cosh", "exp", "expm1", "floor", "fround", "log", "log10", "log1p", "log2", "round", "sign", "sin", "sinh", "sqrt", "tan", "tanh", "trunc"].map(unary),
       binary("atan2"),
       binary("imul"),
@@ -2095,6 +2096,9 @@ function arrayMethodDescription(type, name, env) {
 }
 function narrowHasProperty(type, name, env) {
   const resolved = resolveType(type, env);
+  if (isNamedType(resolved, "any")) {
+    return { kind: "ObjectType", members: [field(name, named("any"))] };
+  }
   if (resolved.kind === "IntersectionType") {
     return { ...resolved, types: resolved.types.map((part) => narrowHasProperty(part, name, env)) };
   }
@@ -2203,6 +2207,8 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
       const declarations = importedDeclarations(nested, importedFile, seen);
       for (const name of importedStatement.namedImports) if (declarations.has(name)) result.set(name, declarations.get(name));
     } catch {
+    } finally {
+      seen.delete(importedFile);
     }
   }
   if (statements.some((item) => item.kind === "Import" && item.module === "juno" && item.namedImports.includes("Error"))) {
@@ -2783,13 +2789,21 @@ var Analyzer = class {
   }
   narrowedConditionEnv(condition, env, whenTruthy) {
     const narrowed = new Map(env);
-    if (condition.kind === "Call" && condition.callee.kind === "Member" && condition.callee.property === "has" && condition.callee.object.kind === "Identifier" && condition.callee.object.name === "this") {
+    if (condition.kind === "Call" && whenTruthy && condition.typeArguments?.[0]) {
+      const identifier = condition.callee.kind === "Member" && condition.callee.property === "isType" && condition.callee.object.kind === "Identifier" ? condition.callee.object : condition.callee.kind === "Identifier" && condition.callee.name === "isType" && condition.args[0]?.kind === "Identifier" ? condition.args[0] : void 0;
+      if (identifier) {
+        const symbol = narrowed.get(identifier.name);
+        if (symbol?.kind === "var") narrowed.set(identifier.name, { ...symbol, type: condition.typeArguments[0] });
+      }
+    }
+    if (condition.kind === "Call" && condition.callee.kind === "Member" && condition.callee.property === "has" && condition.callee.object.kind === "Identifier" && whenTruthy) {
       const argument = condition.args[0];
       const argumentSymbol = argument?.kind === "Identifier" ? env.get(argument.name) : void 0;
       const property = argument?.kind === "Literal" && typeof argument.value === "string" ? argument.value : argumentSymbol?.kind === "var" && argumentSymbol.type.kind === "LiteralType" && typeof argumentSymbol.type.value === "string" ? argumentSymbol.type.value : void 0;
       if (property) {
-        const self = narrowed.get("this");
-        if (self?.kind === "var") narrowed.set("this", { ...self, type: narrowHasProperty(self.type, property, env) });
+        const objectName = condition.callee.object.name;
+        const object = narrowed.get(objectName);
+        if (object?.kind === "var") narrowed.set(objectName, { ...object, type: narrowHasProperty(object.type, property, env) });
       }
     }
     if (condition.kind === "Binary" && (condition.operator === "==" || condition.operator === "!=")) {
@@ -2901,6 +2915,10 @@ var Analyzer = class {
         const symbol = { kind: "var", mutable: statement.mutable, type: statement.type ?? type };
         this.bind(env, statement.name, symbol);
         const printed = printSymbol(statement.name, symbol);
+        if (statement.type && isNamedType(resolveType(statement.type, env), "any") && statement.initializer) {
+          printed.code += `
+(infer) ${printType(inferExpression(statement.initializer, env))}`;
+        }
         this.addHover(statement.name, statement.loc, printed.code, void 0, symbolTypeDescription(statement.name, symbol, env));
         this.addTypeHint(statement.loc, statement.name, Boolean(statement.type), type);
         if (statement.type) this.walkType(statement.type, env);
@@ -3252,6 +3270,14 @@ var Analyzer = class {
         const nonNullObjectType = removeNull(resolveType(objectType, env));
         const resolvedObjectType = resolveType(nonNullObjectType, env);
         const member = lookupMember(nonNullObjectType, expression.property, env);
+        if (isNamedType(resolvedObjectType, "any") && !["isType", "has"].includes(expression.property)) {
+          this.diagnostics.push({
+            line: expression.loc?.line ?? 1,
+            column: expression.loc?.column ?? 1,
+            length: expression.property.length,
+            message: `Cannot access '${expression.property}' on type 'any'; check the value with isType<T>() or has() first.`
+          });
+        }
         if (nullableObject && !expression.optional && expression.property !== "isType") this.diagnostics.push({ line: expression.loc?.line ?? 1, column: expression.loc?.column ?? 1, length: expression.property.length, message: `Cannot access '${expression.property}' on a nullable value; use ! or ?., or ?? to handle null.` });
         if (isFunctionSymbol(member)) {
           const signature = expression.property === "as" ? "(method) as<T>(): T" : `(method) ${expression.property}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}`;
@@ -3421,7 +3447,9 @@ function analyze(source, filePath) {
     const analyzer = new Analyzer();
     const statements = parse(source, { validate: false, filePath });
     const imported = importedDeclarations(statements, filePath);
-    if (JSON.stringify(statements).includes("Iterable")) {
+    const stringifyForTypeSearch = (value) => JSON.stringify(value, (_key, item) => typeof item === "bigint" ? `${item}n` : item);
+    const needsIterable = stringifyForTypeSearch(statements).includes("Iterable") || stringifyForTypeSearch([...imported]).includes("Iterable");
+    if (needsIterable) {
       const fs = require("node:fs");
       const path = require("node:path");
       let directory = path.dirname(path.resolve(filePath ?? process.cwd()));

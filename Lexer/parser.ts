@@ -995,6 +995,7 @@ function sameType(a: InferredType, b: InferredType): boolean {
 function typeFromNode(type: TypeNode, aliases: Map<string, TypeNode> = new Map(), resolving = new Set<string>()): InferredType {
     if (type.kind === 'LiteralType') return { kind: 'literal', value: type.value }
     if (type.kind === 'NamedType') {
+        if (type.name === 'any' || type.name === 'unknown') return unknownType
         const alias = aliases.get(type.name)
         if (alias && !resolving.has(type.name)) {
             const next = new Set(resolving)

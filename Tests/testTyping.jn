@@ -1,4 +1,33 @@
 import { console } from 'juno:node'
+import { Math } from 'juno'
+import { Boolean } from '../types/boolean'
+
+console.log("special numbers:", Math.NaN, Math.Infinity, -Math.Infinity)
+console.log("Boolean constructor:", Boolean(0), Boolean(Math.NaN), Boolean(''), Boolean('Juno'))
+
+type BooleanCallable = {
+    fun (value: any): boolean
+}
+
+const booleanCallable: BooleanCallable = {
+    fun (value: any): boolean =
+        return Boolean(value)
+}
+
+console.log("callable object:", booleanCallable(0), booleanCallable(1))
+
+type BooleanOverride = {
+    enabled: boolean
+    fun toBoolean(): boolean
+}
+
+const typedBooleanObject: BooleanOverride = {
+    enabled: false,
+    fun toBoolean(): boolean =
+        return this.enabled
+}
+
+console.log("typed object boolean:", typedBooleanObject.toBoolean(), !!typedBooleanObject, typedBooleanObject ? "truthy" : "falsy")
 
 # const result1 = 7 + '1'
 
@@ -19,6 +48,25 @@ const paul : Person = {
     surname : 'Mernov',
     age : 23
 }
+
+# `any` must be narrowed before its properties can be used.
+const unknownPerson: any = paul
+
+# unknownPerson.name # type error: check `any` first
+
+if unknownPerson.isType<Person>()
+    console.log("narrowed any by type:", unknownPerson.name, unknownPerson.greet())
+
+const unknownAddress: any = { id: 'home' }
+if unknownAddress.has('id')
+    console.log("narrowed any by value:", unknownAddress.id)
+
+# An untyped parameter is inferred as `any` and narrowed in the same way.
+fun printInferredAny(value) =
+    if value.isType<Person>()
+        console.log("inferred any narrowed to Person:", value.name)
+
+printInferredAny(paul)
 
 const maria : Person? = {
     age: 22,
@@ -53,4 +101,5 @@ type Enum2 =
 type Or2 = { name : string }
     | string
 
-const ex2 : Enum2 = 1
+const ex2 : Enum2 = 0
+

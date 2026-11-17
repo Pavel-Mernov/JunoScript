@@ -232,6 +232,10 @@
     "types": {
       "patterns": [
         {
+          "name": "entity.name.type.junoscript",
+          "match": "\\bany\\b"
+        },
+        {
           "name": "support.type.primitive.junoscript",
           "match": "\\b(string|number|boolean|void)\\b"
         },
