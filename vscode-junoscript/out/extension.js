@@ -394,7 +394,7 @@ var Parser = class _Parser {
     if (this.match("Keyword", "export")) {
       const isDefault = this.match("Keyword", "default");
       const declaration = this.statement();
-      if (!["Import", "Variable", "FunctionDeclaration", "TypeDeclaration", "ConstructorDeclaration"].includes(declaration.kind)) this.fail("export must precede a declaration");
+      if (!["Import", "Variable", "Destructure", "FunctionDeclaration", "TypeDeclaration", "ConstructorDeclaration"].includes(declaration.kind)) this.fail("export must precede a declaration");
       return { kind: "Export", declaration, default: isDefault };
     }
     if (this.match("Keyword", "let") || this.match("Keyword", "const")) {
@@ -528,27 +528,30 @@ var Parser = class _Parser {
     let defaultImportLoc;
     const namedImports = [];
     const namedImportLocs = [];
-    if (this.match("LeftBrace")) {
-      if (!this.is("RightBrace")) do {
+    const namedImportList = () => {
+      this.parenthesisSeparators();
+      while (!this.is("RightBrace")) {
         const ident = this.identifier();
         namedImports.push(ident.name);
         namedImportLocs.push(ident.loc);
-      } while (this.match("Comma"));
+        this.parenthesisSeparators();
+        if (this.match("Comma")) this.parenthesisSeparators();
+        else if (!this.is("RightBrace")) this.fail("Expected ',' or '}' after imported name");
+      }
       this.take("RightBrace", "Expected '}' after imported names");
+    };
+    if (this.match("LeftBrace")) {
+      namedImportList();
     } else {
       const ident = this.identifier();
       defaultImport = ident.name;
       defaultImportLoc = ident.loc;
       if (this.match("Comma")) {
         this.take("LeftBrace", "Expected '{' before named imports");
-        if (!this.is("RightBrace")) do {
-          const named2 = this.identifier();
-          namedImports.push(named2.name);
-          namedImportLocs.push(named2.loc);
-        } while (this.match("Comma"));
-        this.take("RightBrace", "Expected '}' after imported names");
+        namedImportList();
       }
     }
+    this.parenthesisSeparators();
     this.take("Keyword", "Expected 'from' after import names");
     const moduleToken = this.take("String", "Expected 'juno', 'juno:node', or 'types' module name");
     const module2 = String(this.value(moduleToken));
@@ -2159,6 +2162,55 @@ function isAssignableTo(expected, actual, env) {
   if (target.kind === "GenericType" && value.kind === "GenericType") return target.name === value.name && target.args.length === value.args.length && target.args.every((item, index) => isAssignableTo(item, value.args[index], env));
   return true;
 }
+function hostType(source) {
+  if (!source) return named("any");
+  try {
+    const declaration = parse(`type __HostType = ${source.trim()}`, { validate: false })[0];
+    return declaration.kind === "TypeDeclaration" ? declaration.value : named("any");
+  } catch {
+    return named("any");
+  }
+}
+function hostDeclarations(source) {
+  const result = /* @__PURE__ */ new Map();
+  const functions = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*(?::\s*([^\n{]+))?/g;
+  for (const match of source.matchAll(functions)) {
+    const params = match[2].trim() ? match[2].split(",").map((raw, index) => {
+      const part = raw.trim(), rest = part.startsWith("...");
+      const clean = rest ? part.slice(3) : part;
+      const separator = clean.indexOf(":");
+      const rawName = (separator < 0 ? clean : clean.slice(0, separator)).trim();
+      const optional = rawName.endsWith("?");
+      const name = rawName.replace(/\?$/, "") || `arg${index}`;
+      const type = hostType(separator < 0 ? void 0 : clean.slice(separator + 1));
+      return { name, type, rest, ...optional ? { defaultValue: { kind: "Literal", value: null } } : {} };
+    }) : [];
+    result.set(match[1], { kind: "fun", params, returnType: hostType(match[3]) });
+  }
+  for (const match of source.matchAll(/export\s+(?:const|let|var|class)\s+([A-Za-z_$][\w$]*)/g)) {
+    if (!result.has(match[1])) result.set(match[1], { kind: "var", type: named("any") });
+  }
+  for (const match of source.matchAll(/export\s+(?:const|let|var)\s*\{([^}]+)\}\s*=\s*([^\n;]+)/g)) {
+    const sourceExpression = match[2].trim();
+    for (const item of match[1].split(",")) {
+      const [sourceName, exportedName = sourceName] = item.trim().split(/\s*:\s*/);
+      if (!sourceName) continue;
+      if (sourceExpression === "globalThis.String" && ["fromCharCode", "fromCodePoint"].includes(sourceName)) {
+        const parameterName = sourceName === "fromCharCode" ? "codes" : "codePoints";
+        result.set(exportedName, {
+          kind: "fun",
+          params: [{ name: parameterName, type: arrayOf(named("number")), rest: true }],
+          returnType: named("string")
+        });
+      } else result.set(exportedName, { kind: "var", type: named("any") });
+    }
+  }
+  for (const match of source.matchAll(/(?:exports\.([A-Za-z_$][\w$]*)|module\.exports\.([A-Za-z_$][\w$]*))\s*=/g)) {
+    const name = match[1] ?? match[2];
+    if (!result.has(name)) result.set(name, { kind: "var", type: named("any") });
+  }
+  return result;
+}
 function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new Set()) {
   const result = /* @__PURE__ */ new Map();
   const fs = require("node:fs");
@@ -2176,6 +2228,13 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
       methods: declaration.methods.map((method2) => ({ name: method2.name, generics: method2.generics ?? [], params: method2.params, returnType: method2.returnType ?? inferFunctionReturnType2(method2.body, globals(), method2.params) }))
     });
     else if (declaration.kind === "Variable" && exported) result.set(declaration.name, { kind: "var", type: declaration.type ?? (declaration.initializer ? inferExpression(declaration.initializer, globals()) : named("any")) });
+    else if (declaration.kind === "Destructure" && exported) {
+      const source = inferExpression(declaration.initializer, globals());
+      for (const binding of declaration.bindings) {
+        const member = lookupMember(source, binding.name, globals());
+        result.set(binding.name, { kind: "var", type: member && !isFunctionSymbol(member) ? member : named("any") });
+      }
+    }
   }
   if (!filePath) return result;
   for (const statement of statements) {
@@ -2198,11 +2257,23 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
       }
       base = found ?? path.resolve(__dirname, "../../types", relativeModule);
     } else base = path.resolve(path.dirname(filePath), importedStatement.module);
-    const candidates = /\.jn$/i.test(base) ? [base] : [`${base}.jn`, path.resolve(base, "index.jn")];
+    const candidates = /\.(?:jn|[cm]?[jt]s)$/i.test(base) ? [base] : [
+      `${base}.jn`,
+      `${base}.js`,
+      `${base}.ts`,
+      path.resolve(base, "index.jn"),
+      path.resolve(base, "index.js"),
+      path.resolve(base, "index.ts")
+    ];
     const importedFile = candidates.find((candidate) => fs.existsSync(candidate));
     if (!importedFile || seen.has(importedFile)) continue;
     seen.add(importedFile);
     try {
+      if (!/\.jn$/i.test(importedFile)) {
+        const declarations2 = hostDeclarations(fs.readFileSync(importedFile, "utf8"));
+        for (const name of importedStatement.namedImports) if (declarations2.has(name)) result.set(name, declarations2.get(name));
+        continue;
+      }
       const nested = parse(fs.readFileSync(importedFile, "utf8"), { validate: false, filePath: importedFile });
       const declarations = importedDeclarations(nested, importedFile, seen);
       for (const name of importedStatement.namedImports) if (declarations.has(name)) result.set(name, declarations.get(name));
@@ -2713,6 +2784,7 @@ var Analyzer = class {
   hovers = [];
   hints = [];
   diagnostics = [];
+  semanticTokens = [];
   analyze(statements, builtins = /* @__PURE__ */ new Map()) {
     const env = globals();
     for (const [name, symbol] of builtins) if (symbol.kind === "type") {
@@ -2876,7 +2948,7 @@ var Analyzer = class {
         return;
       }
       case "Variable": {
-        this.walkExpression(statement.initializer, env);
+        this.walkExpression(statement.initializer, env, statement.type ? resolveType(statement.type, env) : void 0);
         const type = statement.type ? resolveType(statement.type, env) : statement.initializer ? inferExpression(statement.initializer, env) : named("any");
         if (statement.type && statement.initializer?.kind === "Object") {
           const expected = resolveType(statement.type, env);
@@ -3201,7 +3273,7 @@ var Analyzer = class {
         this.walkExpression(expression.value, env, thisType);
         return;
       case "Object": {
-        const objectType = inferExpression(expression, env);
+        const objectType = thisType ? resolveType(thisType, env) : inferExpression(expression, env);
         const methodEnv = new Map(env);
         this.bind(methodEnv, "this", { kind: "var", mutable: false, type: objectType });
         for (const property of expression.properties) {
@@ -3212,6 +3284,14 @@ var Analyzer = class {
           const member = lookupMember(objectType, property.key, env);
           const code = isFunctionSymbol(member) ? property.key === "" ? `(call) (${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}` : `(method) ${property.key}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}` : `(property) ${property.key}: ${printType(member && !isFunctionSymbol(member) ? member : named("any"))}`;
           this.addHover(property.key, property.keyLoc, code);
+          if (property.key && property.keyLoc && isFunctionSymbol(member)) {
+            this.semanticTokens.push({
+              line: property.keyLoc.line,
+              column: property.keyLoc.column,
+              length: property.key.length,
+              type: "method"
+            });
+          }
           if (property.value.kind === "Identifier" && property.key === property.value.name) {
             const symbol = env.get(property.value.name);
             if (symbol) {
@@ -3270,7 +3350,8 @@ var Analyzer = class {
         const nonNullObjectType = removeNull(resolveType(objectType, env));
         const resolvedObjectType = resolveType(nonNullObjectType, env);
         const member = lookupMember(nonNullObjectType, expression.property, env);
-        if (isNamedType(resolvedObjectType, "any") && !["isType", "has"].includes(expression.property)) {
+        const assertedUniversalMember = expression.object.kind === "Unary" && expression.object.operator === "postfix!" && expression.property === "toString";
+        if (isNamedType(resolvedObjectType, "any") && !["isType", "has"].includes(expression.property) && !assertedUniversalMember) {
           this.diagnostics.push({
             line: expression.loc?.line ?? 1,
             column: expression.loc?.column ?? 1,
@@ -3480,7 +3561,7 @@ function analyze(source, filePath) {
     const iterable = imported.get("Iterable");
     if (iterable?.kind === "type" && !statements.some((statement) => statement.kind === "TypeDeclaration" && statement.name === "Iterable")) builtins.set("Iterable", iterable);
     analyzer.analyze(statements, builtins);
-    return { hovers: analyzer.hovers, hints: analyzer.hints, diagnostics: analyzer.diagnostics };
+    return { hovers: analyzer.hovers, hints: analyzer.hints, diagnostics: analyzer.diagnostics, semanticTokens: analyzer.semanticTokens };
   } catch (error) {
     return void 0;
     return void 0;
@@ -3500,6 +3581,7 @@ function inlayHintsFor(source, filePath) {
 function activate(context) {
   const selector = { language: "junoscript", scheme: "file" };
   const diagnostics = vscode.languages.createDiagnosticCollection("junoscript");
+  const semanticLegend = new vscode.SemanticTokensLegend(["method"]);
   const updateDiagnostics = (document) => {
     if (document.languageId !== "junoscript") return;
     const result = analyze(document.getText(), document.uri.fsPath);
@@ -3543,6 +3625,16 @@ ${info.docs}`);
         return new vscode.Hover(markdown, range);
       }
     }),
+    vscode.languages.registerDocumentSemanticTokensProvider(selector, {
+      provideDocumentSemanticTokens(document) {
+        const builder = new vscode.SemanticTokensBuilder(semanticLegend);
+        const result = analyze(document.getText(), document.uri.fsPath);
+        for (const token of result?.semanticTokens ?? []) {
+          builder.push(token.line - 1, token.column - 1, token.length, 0, 0);
+        }
+        return builder.build();
+      }
+    }, semanticLegend),
     vscode.languages.registerInlayHintsProvider(selector, {
       provideInlayHints(document) {
         const config = vscode.workspace.getConfiguration("junoscript.inlayHints");

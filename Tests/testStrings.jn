@@ -1,4 +1,20 @@
 import { console } from 'juno:node'
+import { String } from '../types/string'
+
+console.log("=== String constructor tests ===")
+console.log("String values:", String(null), String('Juno'), String(42), String(-7), String(10n), String(true), String(false))
+console.log("String arrays and objects:", String([1, 2, 3]), String({ name: 'Juno' }))
+
+const customStringObject = {
+    value: 'custom',
+    fun toString(): string =
+        return "String(${this.value})"
+}
+console.log("String custom toString:", String(customStringObject))
+
+console.log("String.fromCharCode:", String.fromCharCode(65, 66, 67), String.fromCharCode(74, 117, 110, 111))
+console.log("String.fromCodePoint:", String.fromCodePoint(128512), String.fromCodePoint(128640, 10024))
+console.log("String.raw:", String.raw({ raw: ['line\\n', ' = ', ''] }, 'value', 42))
 
 const name = "Ada"
 const age = 36

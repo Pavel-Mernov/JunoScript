@@ -1,0 +1,33 @@
+import { fromCharCode, fromCodePoint } from './string.ts'
+
+type StringConstructor = {
+    fun (value: any): string
+    fromCharCode(...codes: number[]): string
+    fromCodePoint(...codePoints: number[]): string
+    raw(template: { raw: string[] }, ...substitutions: any[]): string
+}
+
+export const String : StringConstructor = {
+    fun (value : any) : string =
+        if value == null
+            return 'null'
+        return value!.toString()
+
+    fromCharCode,
+
+    fromCodePoint,
+
+    fun raw(template: { raw: string[] }, ...substitutions: any[]): string =
+        let result = ''
+        let index = 0
+        
+        while index < template.raw.length
+            result += template.raw[index]
+        
+            if index < substitutions.length
+                result += this(substitutions[index])
+        
+            index++
+        
+        return result
+}

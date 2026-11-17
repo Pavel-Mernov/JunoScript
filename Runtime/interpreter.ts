@@ -152,20 +152,30 @@ export class Interpreter {
         const base = junoTypeModule
             ? resolve(__dirname, '../../types', junoTypeModule)
             : resolve(this.currentDirectory, specifier)
-        const candidates = /\.jn$/i.test(base) ? [base] : [`${base}.jn`, resolve(base, 'index.jn')]
+        const candidates = /\.(?:jn|[cm]?[jt]s)$/i.test(base) ? [base] : [
+            `${base}.jn`, `${base}.js`, `${base}.ts`,
+            resolve(base, 'index.jn'), resolve(base, 'index.js'), resolve(base, 'index.ts')
+        ]
         let source: string | undefined
         let file = candidates[0]
         for (const candidate of candidates) {
             try { source = readFileSync(candidate, 'utf8'); file = candidate; break } catch { /* try next candidate */ }
         }
         if (source === undefined) throw new Error(`Cannot find module '${specifier}'`)
+        if (!/\.jn$/i.test(file)) {
+            const loaded = require(file) as Record<string, unknown>
+            return loaded && typeof loaded === 'object' ? loaded : { default: loaded }
+        }
         const previousDirectory = this.currentDirectory
         this.currentDirectory = resolve(base, '..')
         const moduleEnv: Environment = { bindings: new Map(), types: new Map(), parent: env }
         const importedModule = (specifier: string, importer: Environment): Record<string, unknown> => {
             if (specifier === 'juno/types' || specifier.startsWith('juno/types/')) return this.loadLocalModule(specifier, importer)
             const moduleBase = resolve(this.currentDirectory, specifier)
-            const options = /\.jn$/i.test(moduleBase) ? [moduleBase] : [`${moduleBase}.jn`, resolve(moduleBase, 'index.jn')]
+            const options = /\.(?:jn|[cm]?[jt]s)$/i.test(moduleBase) ? [moduleBase] : [
+                `${moduleBase}.jn`, `${moduleBase}.js`, `${moduleBase}.ts`,
+                resolve(moduleBase, 'index.jn'), resolve(moduleBase, 'index.js'), resolve(moduleBase, 'index.ts')
+            ]
             const target = options.find(candidate => { try { return readFileSync(candidate).length >= 0 } catch { return false } })
             if (!target) throw new Error(`Cannot find module '${specifier}'`)
             const saved = this.currentDirectory
@@ -188,6 +198,13 @@ export class Interpreter {
                         if (binding) exported[name] = binding.value
                         const alias = moduleEnv.types.get(name)
                         if (alias) (exported as any).__types ??= {}, (exported as any).__types[name] = alias
+                    }
+                    continue
+                }
+                if (declaration.kind === 'Destructure') {
+                    for (const binding of declaration.bindings) {
+                        const value = this.lookup(moduleEnv, binding.name)
+                        if (value) exported[binding.name] = value.value
                     }
                     continue
                 }
@@ -569,7 +586,7 @@ export class Interpreter {
     private childEnvironment(parent: Environment): Environment { return { bindings: new Map(), types: new Map(), parent } }
 
     private adaptModule(module: Record<string, any>, env: Environment): Record<string, any> {
-        const adapted = 'console' in module ? { ...module, console: this.adaptConsole(module.console) } : module
+        const adapted = 'console' in module ? { ...module, console: this.adaptConsole(module.console) } : { ...module }
         this.installDefaultHas(adapted)
         return adapted
     }
@@ -1075,6 +1092,9 @@ export class Interpreter {
         }
         if (name === 'has' && (type.kind === 'ArrayType' || type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) {
             return { type: { kind: 'FunctionType', params: [{ kind: 'NamedType', name: 'string' }], result: { kind: 'NamedType', name: 'boolean' } }, optional: false }
+        }
+        if (name === 'length' && (type.kind === 'ArrayType' || type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) {
+            return { type: { kind: 'NamedType', name: 'number' }, optional: false }
         }
         if (name === 'indices' && (type.kind === 'ArrayType' || type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) {
             return { type: { kind: 'NamedType', name: 'Range' }, optional: false }

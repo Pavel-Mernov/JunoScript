@@ -83,7 +83,7 @@ export class Parser {
         if (this.match('Keyword', 'export')) {
             const isDefault = this.match('Keyword', 'default')
             const declaration = this.statement()
-            if (!['Import', 'Variable', 'FunctionDeclaration', 'TypeDeclaration', 'ConstructorDeclaration'].includes(declaration.kind)) this.fail('export must precede a declaration')
+            if (!['Import', 'Variable', 'Destructure', 'FunctionDeclaration', 'TypeDeclaration', 'ConstructorDeclaration'].includes(declaration.kind)) this.fail('export must precede a declaration')
             return { kind: 'Export', declaration, default: isDefault }
         }
         if (this.match('Keyword', 'let') || this.match('Keyword', 'const')) {
@@ -209,27 +209,30 @@ export class Parser {
         let defaultImportLoc: Loc | undefined
         const namedImports: string[] = []
         const namedImportLocs: Loc[] = []
-        if (this.match('LeftBrace')) {
-            if (!this.is('RightBrace')) do {
+        const namedImportList = (): void => {
+            this.parenthesisSeparators()
+            while (!this.is('RightBrace')) {
                 const ident = this.identifier()
                 namedImports.push(ident.name)
                 namedImportLocs.push(ident.loc)
-            } while (this.match('Comma'))
+                this.parenthesisSeparators()
+                if (this.match('Comma')) this.parenthesisSeparators()
+                else if (!this.is('RightBrace')) this.fail("Expected ',' or '}' after imported name")
+            }
             this.take('RightBrace', "Expected '}' after imported names")
+        }
+        if (this.match('LeftBrace')) {
+            namedImportList()
         } else {
             const ident = this.identifier()
             defaultImport = ident.name
             defaultImportLoc = ident.loc
             if (this.match('Comma')) {
                 this.take('LeftBrace', "Expected '{' before named imports")
-                if (!this.is('RightBrace')) do {
-                    const named = this.identifier()
-                    namedImports.push(named.name)
-                    namedImportLocs.push(named.loc)
-                } while (this.match('Comma'))
-                this.take('RightBrace', "Expected '}' after imported names")
+                namedImportList()
             }
         }
+        this.parenthesisSeparators()
         this.take('Keyword', "Expected 'from' after import names")
         const moduleToken = this.take('String', "Expected 'juno', 'juno:node', or 'types' module name")
         const module = String(this.value(moduleToken))

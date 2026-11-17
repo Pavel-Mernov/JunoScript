@@ -4,6 +4,7 @@ import { analyze, hoverAt, inlayHintsFor } from './language'
 export function activate(context: vscode.ExtensionContext): void {
     const selector: vscode.DocumentSelector = { language: 'junoscript', scheme: 'file' }
     const diagnostics = vscode.languages.createDiagnosticCollection('junoscript')
+    const semanticLegend = new vscode.SemanticTokensLegend(['method'])
 
     const updateDiagnostics = (document: vscode.TextDocument): void => {
         if (document.languageId !== 'junoscript') return
@@ -50,6 +51,16 @@ export function activate(context: vscode.ExtensionContext): void {
                 return new vscode.Hover(markdown, range)
             }
         }),
+        vscode.languages.registerDocumentSemanticTokensProvider(selector, {
+            provideDocumentSemanticTokens(document) {
+                const builder = new vscode.SemanticTokensBuilder(semanticLegend)
+                const result = analyze(document.getText(), document.uri.fsPath)
+                for (const token of result?.semanticTokens ?? []) {
+                    builder.push(token.line - 1, token.column - 1, token.length, 0, 0)
+                }
+                return builder.build()
+            }
+        }, semanticLegend),
         vscode.languages.registerInlayHintsProvider(selector, {
             provideInlayHints(document) {
                 const config = vscode.workspace.getConfiguration('junoscript.inlayHints')

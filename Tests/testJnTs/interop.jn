@@ -1,0 +1,42 @@
+import { console } from 'juno:node'
+import {
+    createProfile,
+    formatValue,
+    scaleNumbers,
+    applyMapper,
+    label,
+    version,
+    nestedValue
+} from './native.ts'
+
+type Profile = {
+    name: string
+    scores: number[]
+    active: boolean
+    metadata: {
+        source: string
+        version: number
+    }
+}
+
+type NativeNested = {
+    owner: { name: string }
+    flags: string[]
+    optional: string?
+}
+
+export constructor TsProfile : Profile {
+    fun (name: string, ...scores: number[]): Profile =
+        return createProfile(name, scores).as<Profile>()
+}
+
+const profile = TsProfile('Ada', 10, 20, 30)
+const scaled = scaleNumbers(profile.scores, 2)
+const mapped = applyMapper(scaled, (value: number, index: number) => value + index).as<number[]>()
+
+console.log('TS destructured exports:', label, version)
+console.log('TS union arguments:', formatValue('Juno'), formatValue(42), formatValue(null))
+console.log('TS complex return:', profile.name, profile.active, profile.metadata.source)
+console.log('TS arrays:', scaled, mapped)
+if nestedValue.isType<NativeNested>()
+    console.log('TS nested value:', nestedValue.owner.name, nestedValue.flags, nestedValue.optional)
