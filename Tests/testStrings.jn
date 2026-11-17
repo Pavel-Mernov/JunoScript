@@ -1,5 +1,5 @@
 import { console } from 'juno:node'
-import { String } from '../types/string'
+import { String } from 'juno'
 
 console.log("=== String constructor tests ===")
 console.log("String values:", String(null), String('Juno'), String(42), String(-7), String(10n), String(true), String(false))

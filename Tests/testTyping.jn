@@ -1,6 +1,5 @@
 import { console } from 'juno:node'
-import { Math } from 'juno'
-import { Boolean } from '../types/boolean'
+import { Math, Boolean } from 'juno'
 
 console.log("special numbers:", Math.NaN, Math.Infinity, -Math.Infinity)
 console.log("Boolean constructor:", Boolean(0), Boolean(Math.NaN), Boolean(''), Boolean('Juno'))

@@ -1904,6 +1904,9 @@ function lookupMember(type, name, env) {
         return fn([], { kind: "FunctionType", params: [], result: unionOf([{ kind: "ObjectType", members: [field("value", string)] }, named("null")]) });
     }
   }
+  if (isNamedType(resolved, "number") && name === "valueOf") {
+    return { kind: "fun", params: [], returnType: named("number") };
+  }
   if (isNamedType(resolved, "RegEx")) {
     const fn = (params, returnType) => ({ kind: "fun", params, returnType });
     const string = named("string"), boolean = named("boolean"), number = named("number"), any = named("any");
@@ -2173,6 +2176,15 @@ function hostType(source) {
 }
 function hostDeclarations(source) {
   const result = /* @__PURE__ */ new Map();
+  const localTypes = /* @__PURE__ */ new Map();
+  const numberStatic = (name) => {
+    const number = named("number"), boolean = named("boolean"), string = named("string");
+    if (["EPSILON", "MAX_SAFE_INTEGER", "MAX_VALUE", "MIN_SAFE_INTEGER", "MIN_VALUE", "NEGATIVE_INFINITY", "POSITIVE_INFINITY", "NaN"].includes(name)) return field(name, number, true);
+    if (["isFinite", "isInteger", "isNaN", "isSafeInteger"].includes(name)) return method(name, [{ name: "value", type: number }], boolean);
+    if (name === "parseFloat") return method(name, [{ name: "value", type: string }], number);
+    if (name === "parseInt") return method(name, [{ name: "value", type: string }, { name: "radix", type: number, defaultValue: { kind: "Literal", value: null } }], number);
+    return void 0;
+  };
   const functions = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*(?::\s*([^\n{]+))?/g;
   for (const match of source.matchAll(functions)) {
     const params = match[2].trim() ? match[2].split(",").map((raw, index) => {
@@ -2189,6 +2201,36 @@ function hostDeclarations(source) {
   }
   for (const match of source.matchAll(/export\s+(?:const|let|var|class)\s+([A-Za-z_$][\w$]*)/g)) {
     if (!result.has(match[1])) result.set(match[1], { kind: "var", type: named("any") });
+  }
+  for (const match of source.matchAll(/const\s*\{([^}]+)\}\s*=\s*globalThis\.Number/g)) {
+    for (const item of match[1].split(",")) {
+      const [sourceName, localName = sourceName] = item.trim().split(/\s*:\s*/);
+      const member = numberStatic(sourceName);
+      if (!member) continue;
+      localTypes.set(localName, member.method ? { kind: "FunctionType", params: (member.params ?? []).map(parameterType), result: member.type } : member.type);
+    }
+  }
+  const assigned = /const\s+([A-Za-z_$][\w$]*)\s*=\s*Object\.assign\s*\(\s*\(([^)]*)\)\s*:\s*([^=\n]+)=>[\s\S]*?,\s*\{([\s\S]*?)\}\s*\)/g;
+  for (const match of source.matchAll(assigned)) {
+    const callParams = match[2].trim() ? match[2].split(",").map((raw, index) => {
+      const separator = raw.indexOf(":");
+      const rawName = (separator < 0 ? raw : raw.slice(0, separator)).trim();
+      const optional = rawName.includes("?");
+      return { name: rawName.replace(/\?/g, "") || `arg${index}`, type: hostType(separator < 0 ? void 0 : raw.slice(separator + 1)), ...optional ? { defaultValue: { kind: "Literal", value: null } } : {} };
+    }) : [];
+    const members = [{ name: "", optional: false, readonly: false, constant: false, method: true, params: callParams, type: hostType(match[3]) }];
+    for (const item of match[4].split(",")) {
+      const name = item.trim().match(/^([A-Za-z_$][\w$]*)/)?.[1];
+      if (!name) continue;
+      const type = localTypes.get(name);
+      if (type?.kind === "FunctionType") members.push(method(name, type.params.map((param, index) => ({ name: index === 0 ? "value" : `arg${index}`, type: param })), type.result));
+      else if (type) members.push(field(name, type, true));
+    }
+    localTypes.set(match[1], { kind: "ObjectType", members });
+  }
+  for (const match of source.matchAll(/export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*;?/g)) {
+    const type = localTypes.get(match[2]);
+    if (type) result.set(match[1], { kind: "var", type });
   }
   for (const match of source.matchAll(/export\s+(?:const|let|var)\s*\{([^}]+)\}\s*=\s*([^\n;]+)/g)) {
     const sourceExpression = match[2].trim();
@@ -2215,6 +2257,11 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
   const result = /* @__PURE__ */ new Map();
   const fs = require("node:fs");
   const path = require("node:path");
+  const declarationEnv = globals();
+  for (const statement of statements) {
+    const declaration = statement.kind === "Export" ? statement.declaration : statement;
+    if (declaration.kind === "TypeDeclaration") declarationEnv.set(declaration.name, { kind: "type", generics: declaration.generics, value: declaration.value });
+  }
   for (const statement of statements) {
     const declaration = statement.kind === "Export" ? statement.declaration : statement;
     const exported = statement.kind === "Export";
@@ -2227,7 +2274,7 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
       overloads: declaration.overloads.map((overload) => ({ params: overload.params, returnType: overload.returnType ?? inferFunctionReturnType2(overload.body, globals(), overload.params) })),
       methods: declaration.methods.map((method2) => ({ name: method2.name, generics: method2.generics ?? [], params: method2.params, returnType: method2.returnType ?? inferFunctionReturnType2(method2.body, globals(), method2.params) }))
     });
-    else if (declaration.kind === "Variable" && exported) result.set(declaration.name, { kind: "var", type: declaration.type ?? (declaration.initializer ? inferExpression(declaration.initializer, globals()) : named("any")) });
+    else if (declaration.kind === "Variable" && exported) result.set(declaration.name, { kind: "var", type: declaration.type ? resolveType(declaration.type, declarationEnv) : declaration.initializer ? inferExpression(declaration.initializer, declarationEnv) : named("any") });
     else if (declaration.kind === "Destructure" && exported) {
       const source = inferExpression(declaration.initializer, globals());
       for (const binding of declaration.bindings) {
@@ -2312,6 +2359,31 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
         }
       } catch {
       }
+    }
+  }
+  const junoConstructors = ["Boolean", "Number", "String"];
+  for (const name of junoConstructors) if (statements.some((item) => item.kind === "Import" && item.module === "juno" && item.namedImports.includes(name))) {
+    let directory = path.dirname(path.resolve(filePath ?? process.cwd()));
+    let base;
+    while (true) {
+      const candidate = path.join(directory, "types", name.toLowerCase());
+      if (fs.existsSync(`${candidate}.jn`) || fs.existsSync(`${candidate}.ts`)) {
+        base = candidate;
+        break;
+      }
+      const parent = path.dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+    base ??= path.resolve(__dirname, "../../types", name.toLowerCase());
+    const candidates = [`${base}.jn`, `${base}.ts`];
+    const file = candidates.find((candidate) => fs.existsSync(candidate));
+    if (!file) continue;
+    try {
+      const declarations = /\.jn$/i.test(file) ? importedDeclarations(parse(fs.readFileSync(file, "utf8"), { validate: false, filePath: file }), file, seen) : hostDeclarations(fs.readFileSync(file, "utf8"));
+      const constructor = declarations.get(name);
+      if (constructor) result.set(name, constructor);
+    } catch {
     }
   }
   return result;

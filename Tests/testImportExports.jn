@@ -6,7 +6,7 @@ import {
     Greeting,
     fromCharCode,
     fromCodePoint
-} from './exports'
+} from './testExports'
 import { Error } from 'juno'
 import { console } from 'juno:node'
 

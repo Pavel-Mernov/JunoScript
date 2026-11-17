@@ -50,12 +50,13 @@ export class Interpreter {
                 const adaptedModule = this.adaptModule(module, env)
                 if (statement.defaultImport) this.declare(env, statement.defaultImport, adaptedModule, false)
                 for (const name of statement.namedImports) {
-                    if (!(name in module) && !(module as any).__junoTypes?.[name]) throw new Error(`Module '${statement.module}' has no export '${name}'`)
-                    if (statement.module === 'juno' && name === 'Range') {
-                        const rangeModule = this.loadLocalModule('juno/types/range', env)
-                        this.declare(env, name, rangeModule.Range, false)
+                    if (statement.module === 'juno' && ['Range', 'Boolean', 'Number', 'String'].includes(name)) {
+                        const constructorModule = this.loadLocalModule(`juno/types/${name.toLowerCase()}`, env)
+                        if (!(name in constructorModule)) throw new Error(`Module 'juno' has no export '${name}'`)
+                        this.declare(env, name, constructorModule[name], false)
                         continue
                     }
+                    if (!(name in module) && !(module as any).__junoTypes?.[name]) throw new Error(`Module '${statement.module}' has no export '${name}'`)
                     if (!(name in module) && (module as any).__junoTypes?.[name]) {
                         const alias = (module as any).__junoTypes[name] as TypeAlias
                         ;(statement.importedTypes ??= {})[name] = alias.value
@@ -1049,6 +1050,9 @@ export class Interpreter {
                 if (name === 'test') return { type: { kind: 'FunctionType', params: [input], result: boolean }, optional: false }
                 if (name === 'exec') return { type: { kind: 'FunctionType', params: [input], result: { kind: 'UnionType', types: [{ kind: 'ArrayType', element: string }, { kind: 'NamedType', name: 'null' }] } }, optional: false }
                 if (name === 'compile') return { type: { kind: 'FunctionType', params: [input, string], result: { kind: 'NamedType', name: 'RegEx' } }, optional: false }
+            }
+            if (type.name === 'number' && name === 'valueOf') {
+                return { type: { kind: 'FunctionType', params: [], result: { kind: 'NamedType', name: 'number' } }, optional: false }
             }
             if (name === 'toString' && type.name !== 'null') return { type: { kind: 'NamedType', name: 'string' }, optional: false }
             return null

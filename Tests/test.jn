@@ -3,6 +3,7 @@
 import juno from 'juno'
 import node from 'juno:node'
 import { console } from 'juno:node'
+import { Number } from 'juno'
 
 console.log("=== JunoScript smoke tests ===")
 console.log("Imports parsed successfully")
@@ -29,6 +30,12 @@ console.log("Type declarations: Error, Result<T>, User")
 
 let answer: number = 40 + 2
 console.log("let answer =", answer)
+
+const convertedNumber: number = Number('42')
+const numberValue: number = convertedNumber.valueOf()
+console.log("Number constructor:", convertedNumber, Number(false), Number(null))
+console.log("Number statics:", Number.isInteger(convertedNumber), Number.isNaN(Number.NaN), Number.parseInt('101', 2))
+console.log("number.valueOf():", numberValue)
 
 const greeting = "Hello, " + "JunoScript"
 console.log("const greeting =", greeting)
