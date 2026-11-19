@@ -1,0 +1,130 @@
+import { console } from 'juno:node'
+import { KeyOf, Exclude } from 'types'
+
+fun identity<T is string | number = string>(value: T): T =
+    return value
+
+const explicitString = identity<string>('Juno')
+const inferredNumber = identity(42)
+
+console.log('generic constraint:', explicitString, inferredNumber)
+
+fun chooseKey<T is 'name' | 'age' = 'name'>(key: T = 'name'): T =
+    return key
+
+const defaultKey = chooseKey()
+const explicitKey = chooseKey('age')
+
+console.log('literal union constraint:', defaultKey, explicitKey)
+
+fun omit<T is ('name' | 'age') = ('name' | 'age')>(...keys: T[]): T =
+    return keys
+
+const omittedKeys = omit('name', 'age')
+
+console.log('array constraint:', omittedKeys)
+
+type KeyType = 'primary' | 'secondary'
+type ValueType = number
+type ConstructedObject = {
+    [key: KeyType]: ValueType
+    label: string
+}
+
+type KeyValueObject = {
+    primary : string,
+    secondary : number
+}
+
+type ConstructedObject2 = {
+    [key : KeyType] : KeyValueObject[key]
+}
+
+const constructedObj2: ConstructedObject2 = {
+    primary: 'mapped',
+    secondary: 42
+}
+const mappedPrimary = constructedObj2.primary
+const mappedSecondary = constructedObj2.secondary
+
+const constructedObj: ConstructedObject = {
+    primary: 10,
+    secondary: 20,
+    label: 'indexed'
+}
+const constructedKey: KeyType = 'primary'
+const constructedValue = constructedObj[constructedKey]
+type ConstructedValue = typeof<constructedObj[constructedKey]>
+type ConstructedKeys = KeyOf<ConstructedObject>
+type NumericConstructedKeys = Exclude<ConstructedKeys, 'label'>
+
+console.log('index signature:', constructedValue, isType<ConstructedValue>(constructedValue))
+console.log('mapped fields:', mappedPrimary, mappedSecondary)
+console.log('Exclude:', isType<NumericConstructedKeys>('primary'), isType<NumericConstructedKeys>('label'))
+
+type Box<T is string | number = string> = {
+    value: T
+}
+
+const defaultBox = Box({ value: 'default' })
+const numberBox = Box({ value: 7 })
+
+console.log('generic type defaults:', defaultBox.value, numberBox.value)
+
+type GenericPrototype = {
+    echo<T is 'name' | 'age' = 'name'>(value: T): T
+}
+
+const genericPrototype: GenericPrototype = {
+    fun echo(value: any): any =
+        return value
+}
+
+const b = Box({ value : 7 })
+const val = b['value']
+type BoxType = typeof<b>
+type BKey = KeyOf<BoxType>
+const value: BKey = 'value'
+type T = typeof<b[value]>
+type ValueFromType = BoxType[BKey]
+
+console.log('generic method prototype:', genericPrototype.echo('age'))
+
+type Formatter = {
+    prefix: string
+}
+
+constructor FormatterConstructor<T is string = string>: Formatter {
+    fun (prefix: string): Formatter =
+        return { prefix }
+
+    fun format<U is string | number = string>(value: U): string =
+        return value.toString()
+}
+
+console.log('generic constructor method:', FormatterConstructor.format(42))
+
+type MixedKeyObject = {
+    name: string
+    7: boolean
+}
+
+type MixedKey = KeyOf<MixedKeyObject>
+type ArrayKey = KeyOf<string[]>
+
+console.log('KeyOf object:', isType<MixedKey>('name'), isType<MixedKey>(7), isType<MixedKey>('age'))
+console.log('KeyOf array:', isType<ArrayKey>(0), isType<ArrayKey>('length'), isType<ArrayKey>('map'), isType<ArrayKey>('missing'))
+
+const indexedObject: MixedKeyObject = { name: 'indexed', 7: true }
+const indexedKey: MixedKey = 'name'
+const indexedArray = ['zero', 'one']
+
+console.log('object index literal:', indexedObject['name'], indexedObject[7])
+console.log('object index KeyOf:', indexedObject[indexedKey])
+console.log('array index keys:', indexedArray[0], indexedArray['length'], isType<Function>(indexedArray['map']))
+
+console.log('Box indexed inference:', val, isType<T>(val), isType<ValueFromType>(val))
+
+const pickedBox = b.pick('value')
+const omittedBox = b.omit('value')
+console.log('pick/omit inference:', pickedBox.value, omittedBox.has('value'))

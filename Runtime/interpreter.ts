@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
-import { Expression, Parameter, Statement, TypeNode, parse } from '../Lexer/parser'
+import { Expression, Parameter, Statement, TypeMember, TypeNode, parse } from '../Lexer/parser'
 import { resolveModule } from '../Modules'
 
 type Binding = { value: unknown; mutable: boolean; declaredType?: TypeNode }
-type TypeAlias = { value: TypeNode; generics: string[] }
+type TypeAlias = { value: TypeNode; generics: string[]; genericDefaults?: (TypeNode | undefined)[] }
 type Environment = { bindings: Map<string, Binding>; types: Map<string, TypeAlias>; parent?: Environment }
 type RuntimeFunction = { __junoFunction: true; params: Parameter[]; body: Statement[]; closure: Environment; thisValue?: unknown }
 type RuntimeConstructor = { __junoConstructor: true; inheritedType: TypeNode; overloads: RuntimeFunction[]; [name: string]: unknown }
@@ -26,10 +26,10 @@ export class Interpreter {
         const statements = parse(source, { filePath })
         for (const statement of statements) {
             if (statement.kind === 'TypeDeclaration') {
-                this.globals.types.set(statement.name, { value: statement.value, generics: statement.generics })
+                this.globals.types.set(statement.name, { value: statement.value, generics: statement.generics, genericDefaults: statement.genericDefaults })
                 this.registerTypeDeclarations(statement.value, this.globals)
             } else if (statement.kind === 'Export' && statement.declaration.kind === 'TypeDeclaration') {
-                this.globals.types.set(statement.declaration.name, { value: statement.declaration.value, generics: statement.declaration.generics })
+                this.globals.types.set(statement.declaration.name, { value: statement.declaration.value, generics: statement.declaration.generics, genericDefaults: statement.declaration.genericDefaults })
                 this.registerTypeDeclarations(statement.declaration.value, this.globals)
             }
         }
@@ -88,7 +88,7 @@ export class Interpreter {
                 return
             }
             case 'TypeDeclaration': {
-                env.types.set(statement.name, { value: statement.value, generics: statement.generics })
+                env.types.set(statement.name, { value: statement.value, generics: statement.generics, genericDefaults: statement.genericDefaults })
                 this.registerTypeDeclarations(statement.value, env)
                 this.declare(env, statement.name, { __junoTypeConstructor: true, typeName: statement.name, typeNode: statement.value, generics: statement.generics }, false)
                 return
@@ -129,7 +129,7 @@ export class Interpreter {
             if (type.name === 'Iterable') {
                 const declarations = parse(readFileSync(resolve(__dirname, '../../types/iterable.jn'), 'utf8'))
                 for (const declaration of declarations) if (declaration.kind === 'Export' && declaration.declaration.kind === 'TypeDeclaration') {
-                    const alias = { value: declaration.declaration.value, generics: declaration.declaration.generics }
+                    const alias = { value: declaration.declaration.value, generics: declaration.declaration.generics, genericDefaults: declaration.declaration.genericDefaults }
                     env.types.set(declaration.declaration.name, alias)
                     if (!env.bindings.has(declaration.declaration.name)) {
                         this.declare(env, declaration.declaration.name, { __junoTypeConstructor: true, typeName: declaration.declaration.name, typeNode: alias.value, generics: alias.generics }, false)
@@ -145,6 +145,7 @@ export class Interpreter {
         else if (type.kind === 'UnionType' || type.kind === 'IntersectionType') type.types.forEach(part => this.registerTypeDeclarations(part, env, seen))
         else if (type.kind === 'ObjectType') type.members.forEach(member => this.registerTypeDeclarations(member.type, env, seen))
         else if (type.kind === 'ArrayType') this.registerTypeDeclarations(type.element, env, seen)
+        else if (type.kind === 'IndexedAccessType') { this.registerTypeDeclarations(type.object, env, seen); this.registerTypeDeclarations(type.index, env, seen) }
     }
 
     private loadLocalModule(specifier: string, env: Environment): Record<string, unknown> {
@@ -455,8 +456,11 @@ export class Interpreter {
                 const index = this.evaluate(expression.index, env)
                 if (object == null) throw new TypeError('Cannot index null')
                 if (Array.isArray(object)) {
-                    if (typeof index !== 'number' || !Number.isInteger(index) || index < 0 || index >= object.length) {
+                    if (typeof index === 'number' && (!Number.isInteger(index) || index < 0 || index >= object.length)) {
                         throw new TypeError(`Array index must be an integer in [0, ${object.length}); received ${String(index)}`)
+                    }
+                    if (typeof index !== 'number' && typeof index !== 'string') {
+                        throw new TypeError(`Array index must be a number or an array member name; received ${typeof index}`)
                     }
                 } else if (typeof object === 'object' || typeof object === 'function') {
                     if (typeof index !== 'string' && typeof index !== 'number') {
@@ -645,10 +649,38 @@ export class Interpreter {
     }
 
     private installDefaultHas(value: object): void {
-        if ('has' in value) return
-        Object.defineProperty(value, 'has', {
+        if (!('has' in value)) Object.defineProperty(value, 'has', {
             enumerable: false,
             value: function(this: object, key: string) { return key in this }
+        })
+        const installResult = (result: any): any => {
+            if (result && typeof result === 'object') {
+                if (!Array.isArray(result) && !Object.prototype.hasOwnProperty.call(result, 'toString')) result.toString = this.defaultToString()
+                this.installDefaultHas(result)
+            }
+            return result
+        }
+        if (!('pick' in value)) Object.defineProperty(value, 'pick', {
+            enumerable: false,
+            value: function(this: any, ...keys: (string | number)[]) {
+                if (Array.isArray(this) && keys.every(key => typeof key === 'number')) return installResult(keys.map(key => this[key]))
+                const result: Record<string, unknown> = {}
+                for (const key of keys) if (key in this) result[String(key)] = this[key]
+                return installResult(result)
+            }
+        })
+        if (!('omit' in value)) Object.defineProperty(value, 'omit', {
+            enumerable: false,
+            value: function(this: any, ...keys: (string | number)[]) {
+                if (Array.isArray(this) && keys.every(key => typeof key === 'number')) {
+                    const removed = new Set(keys)
+                    return installResult(this.filter((_item: unknown, index: number) => !removed.has(index)))
+                }
+                const removed = new Set(keys.map(String))
+                const result: Record<string, unknown> = {}
+                for (const key of Object.keys(this)) if (!removed.has(key)) result[key] = this[key]
+                return installResult(result)
+            }
         })
     }
 
@@ -745,11 +777,34 @@ export class Interpreter {
         }
         if (expression.kind === 'Index') {
             const parentType = this.typeOf(expression.object, env) ?? this.inferValueType(expression.object, env)
-            const resolved = this.resolveAliasType(parentType, env)
-            if (resolved.kind === 'ArrayType') return resolved.element
-            if (resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray')) return resolved.args[0] ?? { kind: 'NamedType', name: 'any' }
+            const keyType: TypeNode = expression.index.kind === 'Literal' && (typeof expression.index.value === 'string' || typeof expression.index.value === 'number')
+                ? { kind: 'LiteralType', value: expression.index.value }
+                : this.typeOf(expression.index, env) ?? this.inferValueType(expression.index, env)
+            return this.indexedType(parentType, keyType, env)
         }
         return null
+    }
+
+    private indexedType(objectType: TypeNode, keyType: TypeNode, env: Environment): TypeNode | null {
+        const object = this.resolveAliasType(objectType, env)
+        const key = this.resolveAliasType(keyType, env)
+        const keys = key.kind === 'UnionType' ? key.types : [key]
+        const results: TypeNode[] = []
+        for (const part of keys) {
+            if ((object.kind === 'ArrayType' || object.kind === 'GenericType' && (object.name === 'Array' || object.name === 'ReadonlyArray')) && (part.kind === 'NamedType' && part.name === 'number' || part.kind === 'LiteralType' && typeof part.value === 'number')) {
+                results.push(object.kind === 'ArrayType' ? object.element : object.args[0] ?? { kind: 'NamedType', name: 'any' })
+                continue
+            }
+            if (part.kind !== 'LiteralType' || typeof part.value !== 'string' && typeof part.value !== 'number') return null
+            const member = this.findTypeMember(object, String(part.value), env)
+            if (member) results.push(member.type)
+            else if (object.kind === 'ObjectType') {
+                const signature = object.members.find(item => item.indexType && this.matchesTypeNode(part.value, item.indexType, env))
+                if (!signature) return null
+                results.push(signature.type)
+            } else return null
+        }
+        return results.length === 1 ? results[0] : results.length ? { kind: 'UnionType', types: results } : null
     }
 
     private nonNullableType(type: TypeNode): TypeNode {
@@ -818,12 +873,28 @@ export class Interpreter {
         }
     }
 
+    private inferRuntimeValueType(value: unknown): TypeNode {
+        if (value === null || value === undefined) return { kind: 'NamedType', name: 'null' }
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return { kind: 'LiteralType', value }
+        if (typeof value === 'bigint') return { kind: 'NamedType', name: 'BigInt' }
+        if (typeof value === 'function' || (value as any)?.__junoFunction) return { kind: 'NamedType', name: 'Function' }
+        if (Array.isArray(value)) {
+            const elements = value.map(item => this.inferRuntimeValueType(item))
+            const unique = elements.filter((item, index) => elements.findIndex(other => typeName(other) === typeName(item)) === index)
+            return { kind: 'ArrayType', element: unique.length === 1 ? unique[0] : unique.length ? { kind: 'UnionType', types: unique } : { kind: 'NamedType', name: 'any' } }
+        }
+        const members: TypeMember[] = Object.entries(value as Record<string, unknown>)
+            .filter(([name, member]) => !name.startsWith('__') && typeof member !== 'function' && !(member as any)?.__junoFunction)
+            .map(([name, member]) => ({ name, type: this.inferRuntimeValueType(member), optional: false, readonly: false, constant: false }))
+        return { kind: 'ObjectType', members }
+    }
+
     private resolveAliasType(type: TypeNode, env: Environment, resolving = new Set<string>()): TypeNode {
         if (type.kind === 'NamedType') {
             if (resolving.has(type.name)) return type
             for (let current: Environment | undefined = env; current; current = current.parent) {
                 const alias = current.types.get(type.name)
-                if (alias && alias.generics.length === 0) return this.resolveAliasType(alias.value, env, new Set([...resolving, type.name]))
+                if (alias && alias.generics.every((_name, index) => alias.genericDefaults?.[index])) return this.resolveAliasType(this.instantiateAlias(alias, []), env, new Set([...resolving, type.name]))
             }
             return type
         }
@@ -841,20 +912,28 @@ export class Interpreter {
             return { ...type, types: parts }
         }
         if (type.kind === 'ArrayType') return { ...type, element: this.resolveAliasType(type.element, env, resolving) }
-        if (type.kind === 'ObjectType') return { ...type, members: type.members.map(member => ({ ...member, type: this.resolveAliasType(member.type, env, resolving) })) }
+        if (type.kind === 'TypeOfType') return this.resolveAliasType(this.inferRuntimeValueType(this.evaluate(type.expression, env)), env, resolving)
+        if (type.kind === 'IndexedAccessType') return this.indexedType(type.object, type.index, env) ?? { kind: 'NamedType', name: 'any' }
+        if (type.kind === 'ObjectType') return { ...type, members: type.members.map(member => ({
+            ...member,
+            type: this.resolveAliasType(member.type, env, new Set([...resolving, ...(member.generics ?? [])])),
+            indexType: member.indexType ? this.resolveAliasType(member.indexType, env, resolving) : undefined,
+            params: member.params?.map(param => ({ ...param, type: param.type ? this.resolveAliasType(param.type, env, new Set([...resolving, ...(member.generics ?? [])])) : undefined }))
+        })) }
         if (type.kind === 'FunctionType') return { ...type, params: type.params.map(param => this.resolveAliasType(param, env, resolving)), result: this.resolveAliasType(type.result, env, resolving) }
         return type
     }
 
     private instantiateAlias(alias: TypeAlias, args: TypeNode[]): TypeNode {
-        const substitutions = new Map(alias.generics.map((name, index) => [name, args[index] ?? { kind: 'NamedType', name } as TypeNode]))
+        const substitutions = new Map(alias.generics.map((name, index) => [name, args[index] ?? alias.genericDefaults?.[index] ?? { kind: 'NamedType', name } as TypeNode]))
         const replace = (node: TypeNode): TypeNode => {
             if (node.kind === 'NamedType' && substitutions.has(node.name)) return substitutions.get(node.name)!
             if (node.kind === 'GenericType') return { ...node, args: node.args.map(replace) }
             if (node.kind === 'UnionType' || node.kind === 'IntersectionType') return { ...node, types: node.types.map(replace) }
             if (node.kind === 'ArrayType') return { ...node, element: replace(node.element) }
+            if (node.kind === 'IndexedAccessType') return { ...node, object: replace(node.object), index: replace(node.index) }
             if (node.kind === 'FunctionType') return { ...node, params: node.params.map(replace), result: replace(node.result) }
-            if (node.kind === 'ObjectType') return { ...node, members: node.members.map(member => ({ ...member, type: replace(member.type) })) }
+            if (node.kind === 'ObjectType') return { ...node, members: node.members.map(member => ({ ...member, type: replace(member.type), indexType: member.indexType ? replace(member.indexType) : undefined })) }
             return node
         }
         return replace(alias.value)
@@ -866,8 +945,28 @@ export class Interpreter {
     }
 
     private instantiateUtilityType(type: Extract<TypeNode, { kind: 'GenericType' }>, env: Environment): TypeNode | null {
-        if (!['Partial', 'Required', 'Readonly', 'Pick', 'Omit'].includes(type.name) || !type.args[0]) return null
+        if (!['Partial', 'Required', 'Readonly', 'Pick', 'Omit', 'KeyOf', 'Exclude'].includes(type.name) || !type.args[0]) return null
+        if (type.name === 'Exclude') {
+            const source = this.resolveAliasType(type.args[0], env)
+            const excluded = type.args[1] ? this.resolveAliasType(type.args[1], env) : { kind: 'NamedType', name: 'never' } as TypeNode
+            const parts = source.kind === 'UnionType' ? source.types : [source]
+            const remaining = parts.filter(part => typeName(part) !== typeName(excluded) && !(excluded.kind === 'UnionType' && excluded.types.some(item => typeName(item) === typeName(part))))
+            return remaining.length === 1 ? remaining[0] : remaining.length ? { kind: 'UnionType', types: remaining } : { kind: 'NamedType', name: 'never' }
+        }
         const source = this.resolveAliasType(type.args[0], env)
+        if (type.name === 'KeyOf') {
+            if (source.kind === 'ArrayType' || source.kind === 'GenericType' && (source.name === 'Array' || source.name === 'ReadonlyArray')) {
+                const names = ['length', 'indices', 'has', 'pick', 'omit', 'at', 'concat', 'copy', 'copyWithin', 'entries', 'enumerate', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'forEach', 'includes', 'indexOf', 'iterator', 'join', 'lastIndexOf', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toArray', 'toReversed', 'toSorted', 'toSpliced', 'toString', 'unshift', 'with']
+                return { kind: 'UnionType', types: [{ kind: 'NamedType', name: 'number' }, ...names.map(name => ({ kind: 'LiteralType', value: name } as TypeNode))] }
+            }
+            if (source.kind !== 'ObjectType') return null
+            const keys: TypeNode[] = source.members.flatMap(member => {
+                if (member.indexType) return [member.indexType]
+                const numeric = Number(member.name)
+                return [{ kind: 'LiteralType', value: member.name !== '' && Number.isFinite(numeric) && String(numeric) === member.name ? numeric : member.name }]
+            })
+            return keys.length === 1 ? keys[0] : { kind: 'UnionType', types: keys }
+        }
         if (source.kind !== 'ObjectType') return null
         let members = source.members
         if (type.name === 'Partial') members = members.map(member => ({ ...member, optional: true }))
@@ -901,15 +1000,19 @@ export class Interpreter {
     }
 
     private matchesTypeNode(value: unknown, type: TypeNode, env: Environment, resolving = new Set<string>()): boolean {
+        if (type.kind === 'TypeOfType' || type.kind === 'IndexedAccessType') {
+            const resolved = this.resolveAliasType(type, env, resolving)
+            return this.matchesTypeNode(value, resolved, env, resolving)
+        }
         if (type.kind === 'NamedType') {
             if (type.name === 'any' || type.name === 'unknown') return true
             if (type.name === 'null') return value === null
             if (type.name === 'Array' || type.name === 'ReadonlyArray') return Array.isArray(value)
             for (let current: Environment | undefined = env; current; current = current.parent) {
                 const alias = current.types.get(type.name)
-                if (alias && alias.generics.length === 0) {
+                if (alias && alias.generics.every((_name, index) => alias.genericDefaults?.[index])) {
                     if (resolving.has(type.name)) return false
-                    return this.matchesTypeNode(value, alias.value, env, new Set([...resolving, type.name]))
+                    return this.matchesTypeNode(value, this.instantiateAlias(alias, []), env, new Set([...resolving, type.name]))
                 }
             }
             switch (type.name) {
@@ -939,7 +1042,15 @@ export class Interpreter {
         if (type.kind === 'ObjectType') {
             if (value === null || typeof value !== 'object') return false
             const object = value as Record<string, any>
-            return type.members.every(member => {
+            for (const signature of type.members.filter(member => member.indexType)) {
+                for (const [key, memberValue] of Object.entries(object)) {
+                    if (key.startsWith('__') || typeof memberValue === 'function' || memberValue?.__junoFunction) continue
+                    const numeric = Number(key)
+                    const runtimeKey = Number.isFinite(numeric) && String(numeric) === key ? numeric : key
+                    if (this.matchesTypeNode(runtimeKey, signature.indexType!, env, resolving) && !this.matchesTypeNode(memberValue, signature.type, env, resolving)) return false
+                }
+            }
+            return type.members.filter(member => !member.indexType).every(member => {
                 if (member.name === '' && member.method) return Boolean(object.__junoCall?.__junoFunction)
                 if (!Object.prototype.hasOwnProperty.call(object, member.name)) return member.optional || member.defaultValue !== undefined
                 const memberValue = object[member.name]
@@ -962,7 +1073,7 @@ export class Interpreter {
             if (resolving.has(type.name)) return value
             for (let current: Environment | undefined = env; current; current = current.parent) {
                 const alias = current.types.get(type.name)
-                if (alias && alias.generics.length === 0) return this.applyTypeDefaults(value, alias.value, env, new Set([...resolving, type.name]))
+                if (alias && alias.generics.every((_name, index) => alias.genericDefaults?.[index])) return this.applyTypeDefaults(value, this.instantiateAlias(alias, []), env, new Set([...resolving, type.name]))
             }
             return value
         }
@@ -986,6 +1097,7 @@ export class Interpreter {
             runtimeValue.toString = this.defaultToString()
         }
         for (const member of type.members) {
+            if (member.indexType) continue
             if (member.accessor && member.body) {
                 const previous = Object.getOwnPropertyDescriptor(runtimeValue, member.name) ?? { enumerable: true, configurable: true }
                 const runtimeFn: RuntimeFunction = { __junoFunction: true, params: member.params ?? [], body: member.body, closure: env, thisValue: value }
@@ -1043,7 +1155,7 @@ export class Interpreter {
             if (resolving.has(type.name)) return null
             for (let current: Environment | undefined = env; current; current = current.parent) {
                 const alias = current.types.get(type.name)
-                if (alias && alias.generics.length === 0) return this.findTypeMember(alias.value, name, env, new Set([...resolving, type.name]))
+                if (alias && alias.generics.every((_generic, index) => alias.genericDefaults?.[index])) return this.findTypeMember(this.instantiateAlias(alias, []), name, env, new Set([...resolving, type.name]))
             }
             if (type.name === 'string') {
                 const string = { kind: 'NamedType', name: 'string' } as TypeNode
@@ -1105,9 +1217,11 @@ export class Interpreter {
             }
         }
         if (type.kind === 'ObjectType') {
-            const member = type.members.find(item => item.name === name && item.accessor === 'get')
-                ?? type.members.find(item => item.name === name)
+            const member = type.members.find(item => !item.indexType && item.name === name && item.accessor === 'get')
+                ?? type.members.find(item => !item.indexType && item.name === name)
             if (member) return { type: member.type, optional: member.optional }
+            const indexMember = type.members.find(item => item.indexType && this.matchesTypeNode(name, item.indexType, env))
+            if (indexMember) return { type: indexMember.type, optional: indexMember.optional }
             const call = type.members.find(item => item.name === '' && item.method)
             if (call) {
                 const any = { kind: 'NamedType', name: 'any' } as TypeNode
@@ -1117,6 +1231,10 @@ export class Interpreter {
                 if (name === 'bind') return { type: { kind: 'FunctionType', params: [any], result: signature }, optional: false }
             }
             if (name === 'has') return { type: { kind: 'FunctionType', params: [{ kind: 'NamedType', name: 'string' }], result: { kind: 'NamedType', name: 'boolean' } }, optional: false }
+            if (name === 'pick' || name === 'omit') return { type: { kind: 'FunctionType', params: [{ kind: 'ArrayType', element: { kind: 'NamedType', name: 'any' } }], result: type }, optional: false }
+        }
+        if ((name === 'pick' || name === 'omit') && (type.kind === 'ArrayType' || type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) {
+            return { type: { kind: 'FunctionType', params: [{ kind: 'ArrayType', element: { kind: 'NamedType', name: 'number' } }], result: type }, optional: false }
         }
         if (name === 'has' && (type.kind === 'ArrayType' || type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) {
             return { type: { kind: 'FunctionType', params: [{ kind: 'NamedType', name: 'string' }], result: { kind: 'NamedType', name: 'boolean' } }, optional: false }
@@ -1237,6 +1355,8 @@ function typeName(type: TypeNode): string {
         case 'LiteralType': return String(type.value)
         case 'GenericType': return `${type.name}<${type.args.map(typeName).join(', ')}>`
         case 'ArrayType': return `${typeName(type.element)}[]`
+        case 'IndexedAccessType': return `${typeName(type.object)}[${typeName(type.index)}]`
+        case 'TypeOfType': return 'typeof<…>'
         case 'UnionType': return type.types.map(typeName).join(' | ')
         case 'IntersectionType': return type.types.map(typeName).join(' & ')
         case 'FunctionType': return 'function'

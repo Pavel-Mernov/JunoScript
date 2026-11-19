@@ -1,0 +1,282 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.Lexer = Lexer;
+const keywords = new Set([
+    'let', 'const', 'fun', 'type', 'return', 'if', 'else', 'for', 'of',
+    'while', 'true', 'false', 'null', 'readonly', 'static', 'as', 'in',
+    'import', 'from', 'export', 'default', 'constructor'
+]);
+function Lexer(source) {
+    return {
+        pos: 0,
+        source,
+        get current() {
+            return source[this.pos] ?? '';
+        },
+        get isAtEnd() {
+            return this.pos >= source.length;
+        },
+        tokenize() {
+            const tokens = [];
+            const indents = [0];
+            let line = 1;
+            let column = 1;
+            let lineStart = true;
+            const push = (type, value, l = line, c = column) => {
+                if (type === 'Number') {
+                    tokens.push({ type, value: value, line: l, column: c });
+                }
+                else if (type === 'BigInt') {
+                    tokens.push({ type, value: value, line: l, column: c });
+                }
+                else if (type === 'String') {
+                    tokens.push({ type, value: value, line: l, column: c });
+                }
+                else if (type === 'RegEx') {
+                    tokens.push({ type, value: value, line: l, column: c });
+                }
+                else if (type === 'Identifier' || type === 'Keyword') {
+                    tokens.push({ type, value: String(value), line: l, column: c });
+                }
+                else {
+                    tokens.push({ type, line: l, column: c });
+                }
+            };
+            const advance = () => {
+                const character = this.current;
+                this.pos++;
+                if (character === '\n') {
+                    line++;
+                    column = 1;
+                }
+                else {
+                    column++;
+                }
+                return character;
+            };
+            while (!this.isAtEnd) {
+                if (lineStart) {
+                    let width = 0;
+                    while (this.current === ' ' || this.current === '\t') {
+                        width += advance() === '\t' ? 4 : 1;
+                    }
+                    if (this.current === '\r')
+                        advance();
+                    if (this.current === '\n') {
+                        advance();
+                        push('Newline', undefined, line - 1, 1);
+                        continue;
+                    }
+                    if (this.current === '#') {
+                        while (!this.isAtEnd && source[this.pos] !== '\n')
+                            advance();
+                        continue;
+                    }
+                    const currentIndent = indents[indents.length - 1];
+                    if (width > currentIndent) {
+                        indents.push(width);
+                        push('Indent');
+                    }
+                    else if (width < currentIndent) {
+                        while (indents.length > 1 && width < indents[indents.length - 1]) {
+                            indents.pop();
+                            push('Dedent');
+                        }
+                        if (width !== indents[indents.length - 1]) {
+                            throw new SyntaxError(`Inconsistent indentation at ${line}:${column}`);
+                        }
+                    }
+                    lineStart = false;
+                }
+                const character = this.current;
+                const tokenLine = line;
+                const tokenColumn = column;
+                if (source.slice(this.pos, this.pos + 3) === '...') {
+                    advance();
+                    advance();
+                    advance();
+                    push('Ellipsis', undefined, tokenLine, tokenColumn);
+                    continue;
+                }
+                if (character === ' ' || character === '\t' || character === '\r') {
+                    advance();
+                    continue;
+                }
+                if (character === '\n') {
+                    advance();
+                    push('Newline', undefined, tokenLine, tokenColumn);
+                    lineStart = true;
+                    continue;
+                }
+                if (character === '#') {
+                    while (!this.isAtEnd && this.current !== '\n')
+                        advance();
+                    continue;
+                }
+                if (/[0-9]/.test(character)) {
+                    let raw = '';
+                    while (/[0-9]/.test(this.current))
+                        raw += advance();
+                    const isDecimal = this.current === '.' &&
+                        /[0-9]/.test(source[this.pos + 1] ?? '');
+                    if (isDecimal) {
+                        raw += advance();
+                        while (/[0-9]/.test(this.current))
+                            raw += advance();
+                    }
+                    if (!isDecimal && this.current === 'n') {
+                        advance();
+                        push('BigInt', BigInt(raw), tokenLine, tokenColumn);
+                    }
+                    else {
+                        push('Number', Number(raw), tokenLine, tokenColumn);
+                    }
+                    continue;
+                }
+                if (/[A-Za-z_$]/.test(character)) {
+                    let value = '';
+                    while (/[A-Za-z0-9_$]/.test(this.current))
+                        value += advance();
+                    push(keywords.has(value) ? 'Keyword' : 'Identifier', value, tokenLine, tokenColumn);
+                    continue;
+                }
+                if (character === '"' || character === "'" || character === '`') {
+                    const quote = advance();
+                    let value = '';
+                    let closed = false;
+                    while (!this.isAtEnd) {
+                        const current = advance();
+                        if (current === '\n' && quote !== '`') {
+                            throw new SyntaxError(`Unterminated string at ${tokenLine}:${tokenColumn}`);
+                        }
+                        if (current === quote) {
+                            closed = true;
+                            break;
+                        }
+                        if (current === '\\') {
+                            if (this.isAtEnd)
+                                break;
+                            const escaped = advance();
+                            value += escaped === '$' ? '\uE000' : ({ n: '\n', r: '\r', t: '\t', '0': '\0' }[escaped] ?? escaped);
+                        }
+                        else {
+                            value += current;
+                        }
+                    }
+                    if (!closed) {
+                        throw new SyntaxError(`Unterminated string at ${tokenLine}:${tokenColumn}`);
+                    }
+                    push('String', value, tokenLine, tokenColumn);
+                    continue;
+                }
+                // A slash starts a regular-expression literal only where an
+                // expression can begin; after a value it remains division.
+                if (character === '/') {
+                    const previous = tokens[tokens.length - 1];
+                    const endsExpression = previous && (['Number', 'BigInt', 'String', 'RegEx', 'Identifier', 'RightParen', 'RightBracket', 'RightBrace', 'Increment', 'Decrement'].includes(previous.type) ||
+                        previous.type === 'Keyword' && ['true', 'false', 'null'].includes(previous.value));
+                    if (!endsExpression && source[this.pos + 1] !== '=' && source[this.pos + 1] !== '/') {
+                        advance();
+                        let pattern = '';
+                        let escaped = false;
+                        let inClass = false;
+                        let closed = false;
+                        while (!this.isAtEnd) {
+                            const current = advance();
+                            if (current === '\n' || current === '\r')
+                                throw new SyntaxError(`Unterminated regular expression at ${tokenLine}:${tokenColumn}`);
+                            if (!escaped && current === '[')
+                                inClass = true;
+                            else if (!escaped && current === ']')
+                                inClass = false;
+                            else if (!escaped && current === '/' && !inClass) {
+                                closed = true;
+                                break;
+                            }
+                            pattern += current;
+                            escaped = !escaped && current === '\\';
+                            if (current !== '\\')
+                                escaped = false;
+                        }
+                        if (!closed)
+                            throw new SyntaxError(`Unterminated regular expression at ${tokenLine}:${tokenColumn}`);
+                        let flags = '';
+                        while (/[A-Za-z]/.test(this.current))
+                            flags += advance();
+                        try {
+                            new RegExp(pattern, flags);
+                        }
+                        catch (error) {
+                            throw new SyntaxError(`Invalid regular expression at ${tokenLine}:${tokenColumn}: ${error instanceof Error ? error.message : String(error)}`);
+                        }
+                        push('RegEx', { source: pattern, flags }, tokenLine, tokenColumn);
+                        continue;
+                    }
+                }
+                const pairs = {
+                    '++': 'Increment',
+                    '--': 'Decrement',
+                    '+=': 'PlusEqual',
+                    '-=': 'MinusEqual',
+                    '*=': 'MultiplyEqual',
+                    '/=': 'DivideEqual',
+                    '%=': 'PercentEqual',
+                    '|=': 'PipeEqual',
+                    '&=': 'AmpersandEqual',
+                    '==': 'EqualEqual',
+                    '!=': 'NotEqual',
+                    '<=': 'LessEqual',
+                    '>=': 'GreaterEqual',
+                    '??': 'Nullish',
+                    '=>': 'FatArrow',
+                    '->': 'Arrow'
+                };
+                const pair = character + (source[this.pos + 1] ?? '');
+                if (pairs[pair]) {
+                    advance();
+                    advance();
+                    push(pairs[pair], undefined, tokenLine, tokenColumn);
+                    continue;
+                }
+                const singles = {
+                    '+': 'Plus',
+                    '-': 'Minus',
+                    '*': 'Multiply',
+                    '/': 'Divide',
+                    '%': 'Percent',
+                    '=': 'Equal',
+                    '<': 'Less',
+                    '>': 'Greater',
+                    ':': 'Colon',
+                    ',': 'Comma',
+                    '.': 'Dot',
+                    '?': 'Question',
+                    '|': 'Pipe',
+                    '&': 'Ampersand',
+                    '!': 'Bang',
+                    '(': 'LeftParen',
+                    ')': 'RightParen',
+                    '[': 'LeftBracket',
+                    ']': 'RightBracket',
+                    '{': 'LeftBrace',
+                    '}': 'RightBrace'
+                };
+                if (!singles[character]) {
+                    throw new SyntaxError(`Unexpected character '${character}' at ${tokenLine}:${tokenColumn}`);
+                }
+                advance();
+                push(singles[character], undefined, tokenLine, tokenColumn);
+            }
+            if (source.length && !lineStart && tokens[tokens.length - 1]?.type !== 'Newline') {
+                push('Newline', undefined, line, column);
+            }
+            while (indents.length > 1) {
+                indents.pop();
+                push('Dedent');
+            }
+            push('EOF');
+            return tokens;
+        }
+    };
+}
+//# sourceMappingURL=lexer.js.map

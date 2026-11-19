@@ -1,8 +1,8 @@
 import { Lexer, Token, TokenType } from './lexer'
 
 export type Loc = { line: number; column: number }
-export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'LiteralType'; value: string | number | boolean; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; result: TypeNode }
-export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; accessor?: 'get' | 'set'; params?: Parameter[]; body?: Statement[] }
+export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'LiteralType'; value: string | number | boolean; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'IndexedAccessType'; object: TypeNode; index: TypeNode; loc?: Loc } | { kind: 'TypeOfType'; expression: Expression; loc?: Loc } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; result: TypeNode }
+export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; accessor?: 'get' | 'set'; indexType?: TypeNode; generics?: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params?: Parameter[]; body?: Statement[] }
 export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression; rest?: boolean }
 export type Expression =
     | { kind: 'Literal'; value: string | number | bigint | boolean | null; loc?: Loc }
@@ -23,11 +23,11 @@ export type Expression =
 export type Statement =
     | { kind: 'Variable'; name: string; loc?: Loc; mutable: boolean; type?: TypeNode; initializer?: Expression }
     | { kind: 'Destructure'; bindings: { name: string; loc?: Loc }[]; mutable: boolean; initializer: Expression }
-    | { kind: 'Import'; module: string; defaultImport?: string; defaultImportLoc?: Loc; namedImports: string[]; namedImportLocs?: Loc[]; importedTypes?: Record<string, TypeNode>; importedSymbols?: Record<string, { kind: string; value?: TypeNode; generics?: string[]; params?: Parameter[]; returnType?: TypeNode; type?: TypeNode; inheritedType?: TypeNode; overloads?: { params: Parameter[]; returnType: TypeNode }[]; methods?: { name: string; generics?: string[]; params: Parameter[]; returnType: TypeNode }[] }> }
+    | { kind: 'Import'; module: string; defaultImport?: string; defaultImportLoc?: Loc; namedImports: string[]; namedImportLocs?: Loc[]; importedTypes?: Record<string, TypeNode>; importedSymbols?: Record<string, { kind: string; value?: TypeNode; generics?: string[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params?: Parameter[]; returnType?: TypeNode; type?: TypeNode; inheritedType?: TypeNode; overloads?: { params: Parameter[]; returnType: TypeNode }[]; methods?: { name: string; generics?: string[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params: Parameter[]; returnType: TypeNode }[] }> }
     | { kind: 'Export'; declaration: Statement; default?: boolean }
-    | { kind: 'FunctionDeclaration'; name: string; loc?: Loc; generics?: string[]; genericLocs?: Loc[]; params: Parameter[]; returnType?: TypeNode; body: Statement[] }
-    | { kind: 'TypeDeclaration'; name: string; loc?: Loc; generics: string[]; genericLocs?: Loc[]; value: TypeNode }
-    | { kind: 'ConstructorDeclaration'; name: string; loc?: Loc; generics: string[]; genericLocs?: Loc[]; inheritedType: TypeNode; overloads: Extract<Expression, { kind: 'Function' }>[]; methods: Extract<Statement, { kind: 'FunctionDeclaration' }>[] }
+    | { kind: 'FunctionDeclaration'; name: string; loc?: Loc; generics?: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params: Parameter[]; returnType?: TypeNode; body: Statement[] }
+    | { kind: 'TypeDeclaration'; name: string; loc?: Loc; generics: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; value: TypeNode }
+    | { kind: 'ConstructorDeclaration'; name: string; loc?: Loc; generics: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; inheritedType: TypeNode; overloads: Extract<Expression, { kind: 'Function' }>[]; methods: Extract<Statement, { kind: 'FunctionDeclaration' }>[] }
     | { kind: 'Return'; value?: Expression } | { kind: 'ExpressionStatement'; expression: Expression }
     | { kind: 'If'; condition: Expression; consequent: Statement[]; alternate?: Statement[] }
     | { kind: 'ForOf'; binding: string; loc?: Loc; mutable: boolean; iterable: Expression; body: Statement[] }
@@ -58,6 +58,10 @@ export class Parser {
         }
         if (this.is('String')) {
             const token = this.take('String')
+            return { name: String(this.value(token)), loc: this.loc(token) }
+        }
+        if (this.is('Number')) {
+            const token = this.take('Number')
             return { name: String(this.value(token)), loc: this.loc(token) }
         }
         return this.identifier()
@@ -115,33 +119,32 @@ export class Parser {
             return { kind: 'Variable', name, loc, mutable, type, initializer }
         }
         if (this.match('Keyword', 'fun')) {
-            const { name, loc } = this.identifier(), params = this.parameters(), returnType = this.match('Colon') ? this.type() : undefined
+            const { name, loc } = this.identifier()
+            const genericParameters = this.match('Less') ? this.genericParameters() : []
+            const params = this.parameters(), returnType = this.match('Colon') ? this.type() : undefined
             this.take('Equal', "Expected '=' before function body")
-            return { kind: 'FunctionDeclaration', name, loc, params, returnType, body: this.block() }
+            return {
+                kind: 'FunctionDeclaration', name, loc,
+                generics: genericParameters.map(item => item.name),
+                genericLocs: genericParameters.map(item => item.loc),
+                genericConstraints: genericParameters.map(item => item.constraint),
+                genericDefaults: genericParameters.map(item => item.defaultType),
+                params, returnType, body: this.block()
+            }
         }
         if (this.match('Keyword', 'type')) {
             const { name, loc } = this.identifier()
-            let generics: string[] = [], genericLocs: Loc[] = []
-            if (this.match('Less')) {
-                const names = this.genericNames()
-                generics = names.map(item => item.name)
-                genericLocs = names.map(item => item.loc)
-            }
+            const genericParameters = this.match('Less') ? this.genericParameters() : []
             this.take('Equal', "Expected '=' in type declaration")
             const indented = this.match('Newline')
             if (indented && this.is('Indent') && this.tokens[this.pos + 1]?.type !== 'Pipe' && this.tokens[this.pos + 1]?.type !== 'Ampersand') this.pos++
             const value = this.type()
             if (indented) { this.separators(); if (this.is('Dedent')) this.take('Dedent') }
-            return { kind: 'TypeDeclaration', name, loc, generics, genericLocs, value }
+            return { kind: 'TypeDeclaration', name, loc, generics: genericParameters.map(item => item.name), genericLocs: genericParameters.map(item => item.loc), genericConstraints: genericParameters.map(item => item.constraint), genericDefaults: genericParameters.map(item => item.defaultType), value }
         }
         if (this.match('Keyword', 'constructor')) {
             const { name, loc } = this.identifier()
-            let generics: string[] = [], genericLocs: Loc[] = []
-            if (this.match('Less')) {
-                const names = this.genericNames()
-                generics = names.map(item => item.name)
-                genericLocs = names.map(item => item.loc)
-            }
+            const genericParameters = this.match('Less') ? this.genericParameters() : []
             this.take('Colon', "Expected ':' before inherited constructor type")
             const inheritedType = this.type()
             this.take('LeftBrace', "Expected '{' before constructor overloads")
@@ -153,16 +156,11 @@ export class Parser {
                 if (this.value(this.tokens[this.pos - 1]) !== 'fun') this.fail("Expected anonymous 'fun' constructor overload")
                 if (!this.is('LeftParen')) {
                     const method = this.propertyName()
-                    let methodGenerics: string[] = [], methodGenericLocs: Loc[] = []
-                    if (this.match('Less')) {
-                        const names = this.genericNames()
-                        methodGenerics = names.map(item => item.name)
-                        methodGenericLocs = names.map(item => item.loc)
-                    }
+                    const methodGenericParameters = this.match('Less') ? this.genericParameters() : []
                     const params = this.parameters()
                     const returnType = this.match('Colon') ? this.type() : undefined
                     this.take('Equal', "Expected '=' before constructor method body")
-                    methods.push({ kind: 'FunctionDeclaration', name: method.name, loc: method.loc, generics: methodGenerics, genericLocs: methodGenericLocs, params, returnType, body: this.block() })
+                    methods.push({ kind: 'FunctionDeclaration', name: method.name, loc: method.loc, generics: methodGenericParameters.map(item => item.name), genericLocs: methodGenericParameters.map(item => item.loc), genericConstraints: methodGenericParameters.map(item => item.constraint), genericDefaults: methodGenericParameters.map(item => item.defaultType), params, returnType, body: this.block() })
                     this.objectSeparators()
                     continue
                 }
@@ -174,7 +172,7 @@ export class Parser {
             }
             this.take('RightBrace')
             if (!overloads.length) this.fail('A constructor needs at least one anonymous function')
-            return { kind: 'ConstructorDeclaration', name, loc, generics, genericLocs, inheritedType, overloads, methods }
+            return { kind: 'ConstructorDeclaration', name, loc, generics: genericParameters.map(item => item.name), genericLocs: genericParameters.map(item => item.loc), genericConstraints: genericParameters.map(item => item.constraint), genericDefaults: genericParameters.map(item => item.defaultType), inheritedType, overloads, methods }
         }
         if (this.match('Keyword', 'return')) return { kind: 'Return', value: this.is('Newline') || this.is('Dedent') || this.is('EOF') ? undefined : this.expression() }
         if (this.is('Identifier') && assignmentOperators[this.tokens[this.pos + 1]?.type]) {
@@ -265,11 +263,19 @@ export class Parser {
         }
         this.take('RightParen'); return params
     }
-    private genericNames(): { name: string; loc: Loc }[] {
-        const names: { name: string; loc: Loc }[] = []
-        do { names.push(this.identifier()) } while (this.match('Comma'))
+    private genericParameters(): { name: string; loc: Loc; constraint?: TypeNode; defaultType?: TypeNode }[] {
+        const parameters: { name: string; loc: Loc; constraint?: TypeNode; defaultType?: TypeNode }[] = []
+        let defaultSeen = false
+        do {
+            const parameter = this.identifier()
+            const constraint = this.match('Identifier', 'is') ? this.type() : undefined
+            const defaultType = this.match('Equal') ? this.type() : undefined
+            if (defaultType) defaultSeen = true
+            else if (defaultSeen) this.fail('Required generic parameters must precede defaulted generic parameters')
+            parameters.push({ ...parameter, constraint, defaultType })
+        } while (this.match('Comma'))
         this.take('Greater')
-        return names
+        return parameters
     }
     private type(): TypeNode {
         while (this.match('Newline') || this.match('Indent')) {}
@@ -304,7 +310,15 @@ export class Parser {
     }
     private typeAtom(): TypeNode {
         let result: TypeNode
-        if (this.match('Minus')) {
+        if (this.is('Identifier', 'typeof') && this.tokens[this.pos + 1]?.type === 'Less') {
+            const token = this.take('Identifier')
+            this.take('Less')
+            const expression = this.expression(6)
+            const typeQueryExpression = (value: Expression): boolean => value.kind === 'Identifier' || value.kind === 'Member' && typeQueryExpression(value.object) || value.kind === 'Index' && typeQueryExpression(value.object) && (value.index.kind === 'Identifier' || value.index.kind === 'Literal')
+            if (!typeQueryExpression(expression)) this.fail('typeof<> only accepts an identifier, member, or indexed access')
+            this.take('Greater', "Expected '>' after typeof expression")
+            result = { kind: 'TypeOfType', expression, loc: this.loc(token) }
+        } else if (this.match('Minus')) {
             const minus = this.tokens[this.pos - 1]
             const number = this.take('Number', 'Expected a number after \'-\' in literal type')
             result = { kind: 'LiteralType', value: -(this.value(number) as number), loc: this.loc(minus) }
@@ -320,6 +334,17 @@ export class Parser {
         } else if (this.match('LeftBrace')) {
             const members: TypeMember[] = []; this.objectSeparators()
             while (!this.is('RightBrace') && !this.is('EOF')) {
+                if (this.match('LeftBracket')) {
+                    const key = this.identifier()
+                    this.take('Colon', "Expected ':' after index parameter")
+                    const indexType = this.type()
+                    this.take('RightBracket', "Expected ']' after index parameter type")
+                    this.take('Colon', "Expected ':' before indexed value type")
+                    const valueType = this.type()
+                    members.push({ name: key.name, loc: key.loc, type: valueType, indexType, optional: false, readonly: false, constant: false })
+                    this.objectSeparators()
+                    continue
+                }
                 const readonly = this.match('Keyword', 'readonly'), constant = this.match('Keyword', 'const')
                 const explicitFunction = this.match('Keyword', 'fun')
                 const accessor = this.is('Identifier') && ['get', 'set'].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === 'Identifier'
@@ -329,6 +354,7 @@ export class Parser {
                 const { name, loc } = anonymousFunction
                     ? { name: '', loc: this.loc(this.tokens[this.pos - 1]) }
                     : this.propertyName()
+                const genericParameters = !anonymousFunction && this.match('Less') ? this.genericParameters() : []
                 let optional = this.match('Question')
                 let params: Parameter[] | undefined, method = false, type: TypeNode, body: Statement[] | undefined
                 if (this.is('LeftParen')) {
@@ -356,7 +382,7 @@ export class Parser {
                 if (accessor === 'get' && params?.length) this.fail('A getter cannot have parameters')
                 if (accessor === 'set' && params?.length !== 1) this.fail('A setter must have exactly one parameter')
                 const accessorType = accessor === 'set' ? params?.[0]?.type ?? { kind: 'NamedType', name: 'any' } : type
-                members.push({ name, loc, optional, readonly, constant, type: accessorType, defaultValue, method, accessor, params, body }); this.objectSeparators()
+                members.push({ name, loc, optional, readonly, constant, type: accessorType, defaultValue, method, accessor, generics: genericParameters.map(item => item.name), genericLocs: genericParameters.map(item => item.loc), genericConstraints: genericParameters.map(item => item.constraint), genericDefaults: genericParameters.map(item => item.defaultType), params, body }); this.objectSeparators()
             }
             this.take('RightBrace'); result = { kind: 'ObjectType', members }
         } else if (this.match('LeftParen')) {
@@ -369,7 +395,15 @@ export class Parser {
             if (this.match('Less')) { args.push(this.type()); while (this.match('Comma')) args.push(this.type()); this.take('Greater') }
             result = args.length ? { kind: 'GenericType', name, args, loc } : { kind: 'NamedType', name, loc }
         }
-        while (this.match('LeftBracket')) { this.take('RightBracket'); result = { kind: 'ArrayType', element: result } }
+        while (this.match('LeftBracket')) {
+            const bracket = this.tokens[this.pos - 1]
+            if (this.match('RightBracket')) result = { kind: 'ArrayType', element: result }
+            else {
+                const index = this.type()
+                this.take('RightBracket', "Expected ']' after indexed access type")
+                result = { kind: 'IndexedAccessType', object: result, index, loc: this.loc(bracket) }
+            }
+        }
         return result
     }
     private expression(min = 0): Expression {
@@ -1008,11 +1042,41 @@ function typeFromNode(type: TypeNode, aliases: Map<string, TypeNode> = new Map()
         return primitive(type.name)
     }
     if (type.kind === 'ArrayType') return { kind: 'array', element: typeFromNode(type.element, aliases, resolving) }
+    if (type.kind === 'TypeOfType') return unknownType
+    if (type.kind === 'IndexedAccessType') {
+        const source = typeFromNode(type.object, aliases, resolving)
+        const keys = type.index.kind === 'UnionType' ? type.index.types : [type.index]
+        if (source.kind === 'array' && keys.every(key => key.kind === 'NamedType' && key.name === 'number' || key.kind === 'LiteralType' && typeof key.value === 'number')) return source.element
+        if (source.kind === 'object') {
+            const selected = keys.flatMap(key => key.kind === 'LiteralType' && (typeof key.value === 'string' || typeof key.value === 'number') ? [source.fields.get(String(key.value))] : [])
+                .filter((value): value is InferredType => Boolean(value))
+            return selected.length === 1 ? selected[0] : selected.length ? { kind: 'union', types: selected } : unknownType
+        }
+        return unknownType
+    }
     if (type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray')) {
         return { kind: 'array', element: type.args[0] ? typeFromNode(type.args[0], aliases, resolving) : unknownType }
     }
-    if (type.kind === 'GenericType' && ['Partial', 'Required', 'Readonly', 'Pick', 'Omit'].includes(type.name) && type.args[0]) {
+    if (type.kind === 'GenericType' && ['Partial', 'Required', 'Readonly', 'Pick', 'Omit', 'KeyOf', 'Exclude'].includes(type.name) && type.args[0]) {
+        if (type.name === 'Exclude') {
+            const source = typeFromNode(type.args[0], aliases, resolving)
+            const excluded = type.args[1] ? typeFromNode(type.args[1], aliases, resolving) : unknownType
+            const parts = source.kind === 'union' ? source.types : [source]
+            const remaining = parts.filter(part => !isAssignable(excluded, part))
+            return remaining.length === 1 ? remaining[0] : remaining.length ? { kind: 'union', types: remaining } : primitive('never')
+        }
         const source = typeFromNode(type.args[0], aliases, resolving)
+        if (type.name === 'KeyOf') {
+            if (source.kind === 'array') {
+                const names = ['length', 'indices', 'has', 'pick', 'omit', 'at', 'concat', 'copy', 'copyWithin', 'entries', 'enumerate', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'forEach', 'includes', 'indexOf', 'iterator', 'join', 'lastIndexOf', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toArray', 'toReversed', 'toSorted', 'toSpliced', 'toString', 'unshift', 'with']
+                return { kind: 'union', types: [primitive('number'), ...names.map(value => ({ kind: 'literal', value } as InferredType))] }
+            }
+            if (source.kind !== 'object') return unknownType
+            return { kind: 'union', types: [...source.fields.keys()].map(key => {
+                const numeric = Number(key)
+                return { kind: 'literal', value: key !== '' && Number.isFinite(numeric) && String(numeric) === key ? numeric : key }
+            }) }
+        }
         if (source.kind !== 'object') return unknownType
         let fields = [...source.fields]
         if (type.name === 'Pick' || type.name === 'Omit') {
@@ -1029,7 +1093,7 @@ function typeFromNode(type: TypeNode, aliases: Map<string, TypeNode> = new Map()
         if (type.name === 'Partial') return { kind: 'object', fields: new Map() }
         return { kind: 'object', fields: new Map(fields) }
     }
-    if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.filter(member => (!member.method || member.accessor === 'get') && member.accessor !== 'set' && !member.optional && member.defaultValue === undefined && !(member.type.kind === 'UnionType' && member.type.types.some(part => part.kind === 'NamedType' && part.name === 'null'))).map(member => [member.name, typeFromNode(member.type, aliases, resolving)])) }
+    if (type.kind === 'ObjectType') return { kind: 'object', fields: new Map(type.members.filter(member => !member.indexType && (!member.method || member.accessor === 'get') && member.accessor !== 'set' && !member.optional && member.defaultValue === undefined && !(member.type.kind === 'UnionType' && member.type.types.some(part => part.kind === 'NamedType' && part.name === 'null'))).map(member => [member.name, typeFromNode(member.type, aliases, resolving)])) }
     if (type.kind === 'FunctionType') return { kind: 'function' }
     if (type.kind === 'UnionType') return { kind: 'union', types: type.types.map(part => typeFromNode(part, aliases, resolving)) }
     return unknownType
@@ -1140,8 +1204,10 @@ function validateArithmeticTypes(statements: Statement[], variables = new Map<st
             case 'FunctionDeclaration':
                 {
                     const scope = new Map(variables)
+                    const functionAliases = new Map(aliases)
+                    for (const generic of statement.generics ?? []) functionAliases.set(generic, { kind: 'NamedType', name: 'any' })
                     const params = statement.params.map(param => {
-                        const declared = param.type ? typeFromNode(param.type, aliases) : undefined
+                        const declared = param.type ? typeFromNode(param.type, functionAliases) : undefined
                         const inferred = param.defaultValue ? inferExpressionType(param.defaultValue, scope) : unknownType
                         const type = declared ?? (param.rest ? { kind: 'array', element: inferred } as InferredType : inferred)
                         scope.set(param.name, type)
@@ -1149,7 +1215,7 @@ function validateArithmeticTypes(statements: Statement[], variables = new Map<st
                     })
                     validateArithmeticTypes(statement.body, scope)
                     const result = statement.returnType
-                        ? typeFromNode(statement.returnType, aliases)
+                        ? typeFromNode(statement.returnType, functionAliases)
                         : inferFunctionReturnType(statement.body, scope)
                     variables.set(statement.name, { kind: 'function', params, result })
                 }

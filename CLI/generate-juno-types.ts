@@ -22,6 +22,8 @@ function printType(type: TypeNode, generics: Set<string>): string {
         case 'LiteralType': return typeof type.value === 'string' ? JSON.stringify(type.value) : String(type.value)
         case 'GenericType': return `${type.name}<${type.args.map(argument => printType(argument, generics)).join(', ')}>`
         case 'ArrayType': return `Array<${printType(type.element, generics)}>`
+        case 'IndexedAccessType': return `${printType(type.object, generics)}[${printType(type.index, generics)}]`
+        case 'TypeOfType': return 'unknown'
         case 'UnionType': return `(${type.types.map(part => printType(part, generics)).join(' | ')})`
         case 'IntersectionType': return `(${type.types.map(part => printType(part, generics)).join(' & ')})`
         case 'FunctionType': return `(${type.params.map((param, index) => `arg${index}: ${printType(param, generics)}`).join(', ')}) => ${printType(type.result, generics)}`

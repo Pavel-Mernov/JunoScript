@@ -83,6 +83,43 @@ export function activate(context: vscode.ExtensionContext): void {
                 })
             }
         }),
+        vscode.languages.registerCompletionItemProvider(selector, {
+            provideCompletionItems(document, position) {
+                const linePrefix = document.lineAt(position.line).text.slice(0, position.character)
+                const match = /([A-Za-z_$][\w$]*)\s*\[\s*(?:(['"])([^'"]*)?)?$/.exec(linePrefix)
+                if (!match) return []
+                const objectName = match[1]
+                const quote = match[2]
+                const typed = match[3] ?? ''
+                const objectColumn = (match.index ?? 0) + match[0].indexOf(objectName)
+                let info = hoverAt(document.getText(), position.line + 1, objectColumn + 1, document.uri.fsPath)
+                if (!info?.typeDescription) {
+                    const line = document.lineAt(position.line).text
+                    const before = line.slice(0, match.index) + objectName
+                    const after = line.slice(position.character).replace(/^['"]?\s*\]/, '')
+                    const lines = document.getText().split(/\r?\n/)
+                    lines[position.line] = before + after
+                    info = hoverAt(lines.join('\n'), position.line + 1, objectColumn + 1, document.uri.fsPath)
+                }
+                if (!info?.typeDescription) return []
+                const fields = new Map<string, string>()
+                const fieldPattern = /^\s*(?:readonly\s+)?(?:"([^"]+)"|(-?\d+(?:\.\d+)?)|([A-Za-z_$][\w$]*))\??\s*(?::|\()/gm
+                for (let field = fieldPattern.exec(info.typeDescription); field; field = fieldPattern.exec(info.typeDescription)) {
+                    const name = field[1] ?? field[2] ?? field[3]
+                    if (name.startsWith('__') || fields.has(name)) continue
+                    fields.set(name, field[0].trim())
+                }
+                const replaceStart = new vscode.Position(position.line, position.character - typed.length)
+                const range = new vscode.Range(replaceStart, position)
+                return [...fields].filter(([name]) => name.startsWith(typed)).map(([name, detail]) => {
+                    const item = new vscode.CompletionItem(name, vscode.CompletionItemKind.Field)
+                    item.detail = detail
+                    item.insertText = quote ? name : `'${name}'`
+                    item.range = range
+                    return item
+                })
+            }
+        }, '[', "'", '"'),
         vscode.languages.registerCodeActionsProvider(selector, {
             provideCodeActions(document, _range, context) {
                 const result = analyze(document.getText(), document.uri.fsPath)

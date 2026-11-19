@@ -224,4 +224,16 @@ const overriddenBooleanObject = {
 console.log("default object boolean:", !!defaultBooleanObject, defaultBooleanObject ? "truthy" : "falsy")
 console.log("overridden object boolean:", !!overriddenBooleanObject, overriddenBooleanObject ? "truthy" : "falsy")
 
+const pickSource = { name: "Ada", age: 36, language: "Juno" }
+const pickedObject = pickSource.pick("name", "age")
+const omittedObject = pickSource.omit("age")
+console.log("object pick:", pickedObject.name, pickedObject.age, pickedObject.has("language"))
+console.log("object omit:", omittedObject.name, omittedObject.language, omittedObject.has("age"))
+
+const pickArraySource = [10, 20, 30, 40]
+const pickedArray = pickArraySource.pick(0, 2)
+const omittedArray = pickArraySource.omit(1, 3)
+console.log("array pick:", pickedArray)
+console.log("array omit:", omittedArray)
+
 console.log("=== Array and object index tests complete ===")

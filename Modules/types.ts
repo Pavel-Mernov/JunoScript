@@ -4,6 +4,7 @@ import type { TypeMember, TypeNode } from '../Lexer/parser'
 export type Partial<T> = { [P in keyof T]?: T[P] }
 export type Required<T> = { [P in keyof T]-?: T[P] }
 export type Readonly<T> = { readonly [P in keyof T]: T[P] }
+export type KeyOf<T extends object> = keyof T
 
 export type Pick<T, K extends keyof T> = { [P in K]: T[P] }
 export type Record<K extends keyof any, T> = { [P in K]: T }
@@ -60,6 +61,34 @@ function transformMembers(typeNode: TypeNode, transform: (members: TypeMember[])
     throw new TypeError(`Utility type requires an object type; received ${typeNode.kind}`)
 }
 
+function keyLiteral(name: string): TypeNode {
+    const numeric = Number(name)
+    return { kind: 'LiteralType', value: name !== '' && Number.isFinite(numeric) && String(numeric) === name ? numeric : name }
+}
+
+function keyType(typeNode: TypeNode): TypeNode {
+    if (typeNode.kind === 'ArrayType' || typeNode.kind === 'GenericType' && (typeNode.name === 'Array' || typeNode.name === 'ReadonlyArray')) {
+        const names = ['length', 'indices', 'has', 'pick', 'omit', 'at', 'concat', 'copy', 'copyWithin', 'entries', 'enumerate', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'forEach', 'includes', 'indexOf', 'iterator', 'join', 'lastIndexOf', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toArray', 'toReversed', 'toSorted', 'toSpliced', 'toString', 'unshift', 'with']
+        return { kind: 'UnionType', types: [{ kind: 'NamedType', name: 'number' }, ...names.map(name => ({ kind: 'LiteralType', value: name } as TypeNode))] }
+    }
+    if (typeNode.kind === 'ObjectType') {
+        const keys = typeNode.members.flatMap(member => member.indexType ? [member.indexType] : [keyLiteral(member.name)])
+        return keys.length === 1 ? keys[0] : { kind: 'UnionType', types: keys }
+    }
+    if (typeNode.kind === 'UnionType' || typeNode.kind === 'IntersectionType') {
+        const keys = typeNode.types.map(keyType)
+        return keys.length === 1 ? keys[0] : { kind: 'UnionType', types: keys }
+    }
+    throw new TypeError(`KeyOf requires an object or array type; received ${typeNode.kind}`)
+}
+
+function excludeType(source: TypeNode, excluded: TypeNode): TypeNode {
+    const excludedParts = excluded.kind === 'UnionType' ? excluded.types : [excluded]
+    const parts = source.kind === 'UnionType' ? source.types : [source]
+    const remaining = parts.filter(part => !excludedParts.some(item => JSON.stringify(item) === JSON.stringify(part)))
+    return remaining.length === 1 ? remaining[0] : remaining.length ? { kind: 'UnionType', types: remaining } : { kind: 'NamedType', name: 'never' }
+}
+
 function keysFrom(value: unknown): Set<string> {
     if (Array.isArray(value) && value.every(key => typeof key === 'string')) return new Set(value)
     const node = (value as RuntimeTypeInput | null)?.typeNode
@@ -78,6 +107,8 @@ function keysFrom(value: unknown): Set<string> {
 export const Partial = (input: unknown) => descriptor(transformMembers(typeNodeOf(input), members => members.map(member => ({ ...member, optional: true }))))
 export const Required = (input: unknown) => descriptor(transformMembers(typeNodeOf(input), members => members.map(member => ({ ...member, optional: false }))))
 export const Readonly = (input: unknown) => descriptor(transformMembers(typeNodeOf(input), members => members.map(member => ({ ...member, readonly: true }))))
+export const KeyOf = (input: unknown) => descriptor(keyType(typeNodeOf(input)))
+export const Exclude = (input: unknown, excluded: unknown) => descriptor(excludeType(typeNodeOf(input), typeNodeOf(excluded)))
 export const Pick = (input: unknown, keys: unknown) => {
     const selected = keysFrom(keys)
     return descriptor(transformMembers(typeNodeOf(input), members => members.filter(member => selected.has(member.name))))
@@ -87,5 +118,5 @@ export const Omit = (input: unknown, keys: unknown) => {
     return descriptor(transformMembers(typeNodeOf(input), members => members.filter(member => !removed.has(member.name))))
 }
 
-export const types = { Partial, Required, Readonly, Pick, Omit }
+export const types = { Partial, Required, Readonly, Pick, Omit, KeyOf, Exclude }
 export default types

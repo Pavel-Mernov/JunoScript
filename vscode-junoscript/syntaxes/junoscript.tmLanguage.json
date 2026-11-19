@@ -208,6 +208,14 @@
           "match": "\\b(if|else|for|of|while|return|in|as|from|import|export|default)\\b"
         },
         {
+          "name": "entity.name.type.operator.constraint.junoscript",
+          "match": "\\bis\\b"
+        },
+        {
+          "name": "entity.name.type.operator.query.junoscript",
+          "match": "\\btypeof\\b(?=\\s*<)"
+        },
+        {
           "name": "storage.modifier.junoscript",
           "match": "\\b(readonly|static)\\b"
         },

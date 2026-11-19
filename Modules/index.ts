@@ -8,6 +8,7 @@ export type {
     Exclude,
     Extract,
     InstanceType,
+    KeyOf,
     NonNullable,
     Omit,
     OmitThisParameter,
