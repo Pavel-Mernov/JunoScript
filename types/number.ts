@@ -16,7 +16,21 @@ const {
 } = globalThis.Number
 
 const NumberConstructor = Object.assign(
-    (value ?: any) : number => globalThis.Number(value),
+    (value ?: any) : number => {
+        if (value == null) {
+            return NaN;
+        }
+        if (value && typeof value === 'object') {
+            if ('valueOf' in value && typeof value.valueOf === 'function') {
+                const _valueOf = value.valueOf()
+
+                return globalThis.Number(_valueOf)
+            }
+            return NaN;
+        }
+
+        return globalThis.Number(value)
+    },
     {
         EPSILON,
         MAX_SAFE_INTEGER,

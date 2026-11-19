@@ -1,5 +1,5 @@
 import { console } from 'juno:node'
-import { Math, Boolean } from 'juno'
+import { Math, Boolean, Number, String } from 'juno'
 
 console.log("special numbers:", Math.NaN, Math.Infinity, -Math.Infinity)
 console.log("Boolean constructor:", Boolean(0), Boolean(Math.NaN), Boolean(''), Boolean('Juno'))
@@ -27,6 +27,52 @@ const typedBooleanObject: BooleanOverride = {
 }
 
 console.log("typed object boolean:", typedBooleanObject.toBoolean(), !!typedBooleanObject, typedBooleanObject ? "truthy" : "falsy")
+
+console.log("string + number:", "value=" + String(42), String(42) + " is the answer")
+console.log("string + boolean:", "enabled=" + String(true), String(false) + " value")
+console.log("number + boolean:", 10 + Number(true), Number(false) + 10)
+console.log("Number(null):", Number(null), Number.isNaN(Number(null)))
+console.log("number + Number(null):", 10 + Number(null), Number(null) + 10)
+
+type NumberValue = {
+    value: number
+    fun valueOf(): number
+}
+
+const numberValueObject: NumberValue = {
+    value: 32,
+    fun valueOf(): number =
+        return this.value
+}
+
+type StringValue = {
+    value: string
+    fun valueOf(): string
+}
+
+const stringValueObject: StringValue = {
+    value: "Juno",
+    fun valueOf(): string =
+        return this.value
+}
+
+console.log("number + Number(object):", 10 + Number(numberValueObject), Number(numberValueObject) + 10)
+console.log("number + object.valueOf():", 10 + numberValueObject.valueOf(), numberValueObject.valueOf() + 10)
+console.log("string + String(object):", "Hello, " + String(stringValueObject), String(stringValueObject) + "Script")
+console.log("string + object.valueOf():", "Hello, " + stringValueObject.valueOf(), stringValueObject.valueOf() + "Script")
+
+type StringableValue = {
+    value: string
+    fun toString(): string
+}
+
+const stringableObject: StringableValue = {
+    value: "JunoScript",
+    fun toString(): string =
+        return "Stringable(${this.value})"
+}
+
+console.log("string + object.toString():", "value=" + String(stringableObject), String(stringableObject) + "!")
 
 # const result1 = 7 + '1'
 

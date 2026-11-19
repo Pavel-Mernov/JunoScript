@@ -513,9 +513,7 @@ export class Interpreter {
                     || expression.callee.kind === 'Member' && (expression.callee.property === 'isType' || expression.callee.property === 'as')
                 if (passesRuntimeType && expression.typeArguments?.length) args.push(expression.typeArguments[0].kind === 'NamedType' ? expression.typeArguments[0].name : 'object')
                 if (typeof callee === 'function') {
-                    const nativeArgs = args.map(argument => (argument as any)?.__junoFunction
-                        ? (...values: unknown[]) => this.callFunction(argument as RuntimeFunction, values)
-                        : argument)
+                    const nativeArgs = args.map(argument => this.toNativeValue(argument))
                     return callee.apply(thisValue, nativeArgs) ?? null
                 }
                 if (callee?.__junoConstructor) {
@@ -577,6 +575,32 @@ export class Interpreter {
             if (error instanceof ReturnValue) return error.value
             throw error
         }
+    }
+
+    private toNativeValue(value: unknown): unknown {
+        if ((value as any)?.__junoFunction) {
+            return (...args: unknown[]) => this.callFunction(value as RuntimeFunction, args)
+        }
+        if (value === null || typeof value !== 'object') return value
+
+        const target = value as Record<PropertyKey, any>
+        const hasJunoMethod = Reflect.ownKeys(target).some(property => target[property]?.__junoFunction)
+        if (!hasJunoMethod) return value
+
+        const wrappers = new Map<PropertyKey, { method: RuntimeFunction; callable: (...args: unknown[]) => unknown }>()
+        return new Proxy(target, {
+            get: (object, property, receiver) => {
+                const member = Reflect.get(object, property, receiver)
+                if (!member?.__junoFunction) return member
+
+                const cached = wrappers.get(property)
+                if (cached && cached.method === member) return cached.callable
+
+                const callable = (...args: unknown[]) => this.callFunction(member as RuntimeFunction, args, object)
+                wrappers.set(property, { method: member, callable })
+                return callable
+            }
+        })
     }
 
     private declare(env: Environment, name: string, value: unknown, mutable: boolean, declaredType?: TypeNode): void {
