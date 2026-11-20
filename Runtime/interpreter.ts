@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { Expression, Parameter, Statement, TypeMember, TypeNode, parse } from '../Lexer/parser'
 import { resolveModule } from '../Modules'
+import { analyze } from '../vscode-junoscript/src/language.js'
 
 type Binding = { value: unknown; mutable: boolean; declaredType?: TypeNode }
 type TypeAlias = { value: TypeNode; generics: string[]; genericDefaults?: (TypeNode | undefined)[] }
@@ -1367,6 +1368,13 @@ function typeName(type: TypeNode): string {
 export function runFile(file: string): void {
     const path = resolve(file)
     const source = readFileSync(path, 'utf8')
+    const diagnostics = analyze(source, path)?.diagnostics ?? []
+    if (diagnostics.length) {
+        const details = diagnostics
+            .map(diagnostic => `${path}:${diagnostic.line}:${diagnostic.column} - ${diagnostic.message}`)
+            .join('\n')
+        throw new Error(`JunoScript diagnostics prevented execution:\n${details}`)
+    }
     const interpreter = new Interpreter()
     ;(interpreter as any).currentDirectory = resolve(path, '..')
     interpreter.run(source, path)

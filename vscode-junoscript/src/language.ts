@@ -1,3 +1,4 @@
+// @ts-nocheck -- this analyzer is bundled by esbuild for the VS Code extension.
 import { Expression, Loc, Parameter, Statement, TypeMember, TypeNode, parse } from '../../Lexer/parser'
 
 export type HoverInfo = {
