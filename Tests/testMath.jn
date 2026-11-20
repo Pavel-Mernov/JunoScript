@@ -1,5 +1,7 @@
-import { Math } from 'juno'
+import { Math, Number } from 'juno'
 import { console } from 'juno:node'
+import { Random } from 'juno:types'
+import { random } from '../types/random.ts'
 
 const math = Math
 
@@ -34,5 +36,20 @@ console.log("fround:", math.fround(1.337))
 # random() should return a value in [0, 1).
 const randomValue = math.random()
 console.log("random in [0, 1):", randomValue >= 0 & randomValue < 1)
+const importedRandomValue: number = random()
+console.log("imported random in [0, 1):", importedRandomValue >= 0 & importedRandomValue < 1)
+
+const randomDefault = Random.next()
+const randomToTen = Random.next(10)
+const randomRange = Random.next(-5, 5)
+const randomReverseRange = Random.next(5, -5)
+const randomInteger = Random.nextInt(2, 6)
+const randomReverseInteger = Random.nextInt(6, 2)
+console.log("Random.next() in [0, 1):", randomDefault >= 0 & randomDefault < 1)
+console.log("Random.next(10) in [0, 10):", randomToTen >= 0 & randomToTen < 10)
+console.log("Random.next(-5, 5) in [-5, 5):", randomRange >= -5 & randomRange < 5)
+console.log("Random.next(5, -5) in [-5, 5):", randomReverseRange >= -5 & randomReverseRange < 5)
+console.log("Random.nextInt(2, 6) integer in [2, 6):", Number.isInteger(randomInteger) & randomInteger >= 2 & randomInteger < 6)
+console.log("Random.nextInt(6, 2) integer in [2, 6):", Number.isInteger(randomReverseInteger) & randomReverseInteger >= 2 & randomReverseInteger < 6)
 
 console.log("=== Math library tests complete ===")

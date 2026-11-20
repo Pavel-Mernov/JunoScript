@@ -51,7 +51,7 @@ export class Interpreter {
                 const adaptedModule = this.adaptModule(module, env)
                 if (statement.defaultImport) this.declare(env, statement.defaultImport, adaptedModule, false)
                 for (const name of statement.namedImports) {
-                    if ((statement.module === 'juno' || statement.module === 'juno:types') && ['Iterable', 'Range', 'Array', 'Boolean', 'Number', 'String', 'Tuple'].includes(name)) {
+                    if ((statement.module === 'juno' || statement.module === 'juno:types') && ['Iterable', 'Range', 'Array', 'Boolean', 'Number', 'String', 'Tuple', 'Random'].includes(name)) {
                         const constructorModule = this.loadLocalModule(`juno/types/${name.toLowerCase()}`, env)
                         if (!(name in constructorModule)) throw new Error(`Module 'juno' has no export '${name}'`)
                         this.declare(env, name, constructorModule[name], false)

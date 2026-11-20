@@ -2521,6 +2521,22 @@ function hostDeclarations(source) {
     }) : [];
     result.set(match[1], { kind: "fun", params, returnType: hostType(match[3]) });
   }
+  const arrowFunctions = /export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?\(([^)]*)\)\s*(?::\s*([^=\n]+?))?\s*=>\s*([^\n;]+)/g;
+  for (const match of source.matchAll(arrowFunctions)) {
+    const params = match[2].trim() ? match[2].split(",").map((raw, index) => {
+      const part = raw.trim(), rest = part.startsWith("...");
+      const clean = rest ? part.slice(3) : part;
+      const separator = clean.indexOf(":");
+      const rawName = (separator < 0 ? clean : clean.slice(0, separator)).trim();
+      const optional = rawName.endsWith("?");
+      const name = rawName.replace(/\?$/, "") || `arg${index}`;
+      const type = hostType(separator < 0 ? void 0 : clean.slice(separator + 1));
+      return { name, type, rest, ...optional ? { defaultValue: { kind: "Literal", value: null } } : {} };
+    }) : [];
+    const body = match[4].trim();
+    const inferredReturnType = /^(?:globalThis\.)?Math\.(?:random|abs|ceil|floor|round|trunc|min|max|pow|sqrt|cbrt|hypot|exp|log|log2|log10|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|fround|imul|clz32)\s*\(/.test(body) || /^[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?$/.test(body) ? named("number") : /^(?:true|false)$/.test(body) ? named("boolean") : /^(?:["'`])/.test(body) ? named("string") : named("any");
+    result.set(match[1], { kind: "fun", params, returnType: match[3] ? hostType(match[3]) : inferredReturnType });
+  }
   for (const match of source.matchAll(/export\s+(?:const|let|var|class)\s+([A-Za-z_$][\w$]*)/g)) {
     if (!result.has(match[1])) result.set(match[1], { kind: "var", type: named("any") });
   }

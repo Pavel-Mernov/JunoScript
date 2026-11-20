@@ -1,0 +1,25 @@
+import { random } from './random.ts'
+import { Math } from 'juno'
+
+type RandomType = {
+
+    fun next(start: number?, end: number?) : number = 
+        const randomValue = random()
+
+        if start == null & end == null
+            return randomValue
+
+        if end == null
+            end = start
+            start = 0
+
+        return randomValue * Math.abs(end! - start!) + Math.min(start, end)
+
+    fun nextInt(start: number?, end: number?) : number = 
+        const randomValue = this.next(start, end)
+
+        return Math.floor(randomValue)
+        
+}
+
+export const Random: RandomType = RandomType()
