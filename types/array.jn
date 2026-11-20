@@ -10,6 +10,8 @@ export constructor Array<T> : Iterable<T> & T[] {
             get length(): number =
                 return _length
 
+            [index : number] : T
+
             get indices(): Range =
                 return Range(this.length)
 
@@ -21,7 +23,7 @@ export constructor Array<T> : Iterable<T> & T[] {
             fun toArray(): T[] =
                 return this.copy()
 
-            fun enumerate(): (number | T)[][] =
+            fun enumerate(): [number, T][] =
                 let entries: (number | T)[][] = []
                 for const index of this.indices
                     entries.push([index, this[index]])

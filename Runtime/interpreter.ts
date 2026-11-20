@@ -8,7 +8,7 @@ type Binding = { value: unknown; mutable: boolean; declaredType?: TypeNode }
 type TypeAlias = { value: TypeNode; generics: string[]; genericDefaults?: (TypeNode | undefined)[] }
 type Environment = { bindings: Map<string, Binding>; types: Map<string, TypeAlias>; parent?: Environment }
 type RuntimeFunction = { __junoFunction: true; params: Parameter[]; body: Statement[]; closure: Environment; thisValue?: unknown }
-type RuntimeConstructor = { __junoConstructor: true; inheritedType: TypeNode; overloads: RuntimeFunction[]; [name: string]: unknown }
+type RuntimeConstructor = { __junoConstructor: true; typeName: string; inheritedType: TypeNode; overloads: RuntimeFunction[]; [name: string]: unknown }
 class ReturnValue { constructor(readonly value: unknown) {} }
 
 export class Interpreter {
@@ -45,13 +45,13 @@ export class Interpreter {
     private execute(statement: Statement, env: Environment): void {
         switch (statement.kind) {
             case 'Import': {
-                const module = ['juno', 'juno:node', 'types'].includes(statement.module)
+                const module = ['juno', 'juno:node', 'juno:types', 'types'].includes(statement.module)
                     ? resolveModule(statement.module) as Record<string, unknown>
                     : this.loadLocalModule(statement.module, env)
                 const adaptedModule = this.adaptModule(module, env)
                 if (statement.defaultImport) this.declare(env, statement.defaultImport, adaptedModule, false)
                 for (const name of statement.namedImports) {
-                    if (statement.module === 'juno' && ['Range', 'Boolean', 'Number', 'String'].includes(name)) {
+                    if ((statement.module === 'juno' || statement.module === 'juno:types') && ['Iterable', 'Range', 'Array', 'Boolean', 'Number', 'String', 'Tuple'].includes(name)) {
                         const constructorModule = this.loadLocalModule(`juno/types/${name.toLowerCase()}`, env)
                         if (!(name in constructorModule)) throw new Error(`Module 'juno' has no export '${name}'`)
                         this.declare(env, name, constructorModule[name], false)
@@ -88,6 +88,19 @@ export class Interpreter {
                 for (const binding of statement.bindings) this.declare(env, binding.name, (value as any)[binding.name], statement.mutable)
                 return
             }
+            case 'ArrayDestructure': {
+                const source = this.evaluate(statement.initializer, env) as any
+                let values: unknown[]
+                if (Array.isArray(source)) values = [...source]
+                else if (source?.toArray?.__junoFunction) values = this.callFunction(source.toArray, [], source) as unknown[]
+                else if (typeof source?.toArray === 'function') values = source.toArray()
+                else throw new TypeError('Array destructuring requires an array, tuple, or value with toArray()')
+                for (const binding of statement.bindings) {
+                    if (!binding.name || binding.name === '_') continue
+                    this.declare(env, binding.name, binding.rest ? values.slice(binding.index) : values[binding.index] ?? null, statement.mutable)
+                }
+                return
+            }
             case 'TypeDeclaration': {
                 env.types.set(statement.name, { value: statement.value, generics: statement.generics, genericDefaults: statement.genericDefaults })
                 this.registerTypeDeclarations(statement.value, env)
@@ -99,7 +112,7 @@ export class Interpreter {
                 if (!statement.overloads.length) throw new TypeError(`Constructor '${statement.name}' needs at least one anonymous function`)
                 this.registerTypeDeclarations(statement.inheritedType, env)
                 const overloads = statement.overloads.map(overload => ({ __junoFunction: true as const, params: overload.params, body: overload.body, closure: env }))
-                const constructor: RuntimeConstructor = { __junoConstructor: true, inheritedType: statement.inheritedType, overloads }
+                const constructor: RuntimeConstructor = { __junoConstructor: true, typeName: statement.name, inheritedType: statement.inheritedType, overloads }
                 for (const method of statement.methods) constructor[method.name] = { __junoFunction: true, params: method.params, body: method.body, closure: env } satisfies RuntimeFunction
                 this.declare(env, statement.name, constructor, false)
                 return
@@ -219,7 +232,7 @@ export class Interpreter {
                     if (alias) (exported as any).__types ??= {}, (exported as any).__types[declaration.name] = alias
                 }
             } else if (statement.kind === 'Import') {
-                const dependency = ['juno', 'juno:node', 'types'].includes(statement.module)
+                const dependency = ['juno', 'juno:node', 'juno:types', 'types'].includes(statement.module)
                     ? resolveModule(statement.module) as Record<string, unknown>
                     : importedModule(statement.module, moduleEnv)
                 if (statement.defaultImport) this.declare(moduleEnv, statement.defaultImport, this.adaptModule(dependency, moduleEnv), false)
@@ -311,6 +324,7 @@ export class Interpreter {
                 object.toString = this.defaultToString()
                 this.installDefaultHas(object)
                 for (const property of expression.properties) {
+                    if (property.typeOnly) continue
                     if (property.spread) {
                         let source = this.evaluate(property.value, env)
                         if (source?.__junoTypeConstructor) source = this.applyTypeDefaults({}, { kind: 'NamedType', name: source.typeName }, env)
@@ -448,9 +462,12 @@ export class Interpreter {
                 return this.requireCondition(this.evaluate(expression.condition, env))
                     ? this.evaluate(expression.consequent, env)
                     : this.evaluate(expression.alternate, env)
+            case 'Is':
+                return this.matchesTypeNode(this.evaluate(expression.value, env), expression.type, env)
             case 'Member': {
                 const object = this.evaluate(expression.object, env)
-                return this.readMember(object, expression.property, expression.optional, expression.object, env)
+                const member = this.readMember(object, expression.property, expression.optional, expression.object, env)
+                return typeof member === 'function' ? member.bind(object) : member
             }
             case 'Index': {
                 const object = this.evaluate(expression.object, env)
@@ -473,6 +490,16 @@ export class Interpreter {
                 return (object as any)[index as any] ?? null
             }
             case 'Call': {
+                if (expression.callee.kind === 'Identifier' && expression.callee.name === 'Items' && expression.typeArguments?.length) {
+                    const values: (string | number)[] = []
+                    const collect = (type: TypeNode): void => {
+                        if (type.kind === 'UnionType') return type.types.forEach(collect)
+                        if (type.kind === 'LiteralType' && (typeof type.value === 'string' || typeof type.value === 'number')) { values.push(type.value); return }
+                        throw new TypeError(`Items<> only accepts string or number literal types; received '${typeName(type)}'`)
+                    }
+                    expression.typeArguments.forEach(type => collect(this.resolveAliasType(type, env)))
+                    return values
+                }
                 if (expression.callee.kind === 'Member' && expression.callee.property === 'as' && expression.typeArguments?.length) {
                     const value = this.evaluate(expression.callee.object, env)
                     if (value === null || value === undefined) throw new TypeError('Cannot cast null with as<T>()')
@@ -536,7 +563,8 @@ export class Interpreter {
                     if (!overload) throw new TypeError(`No constructor overload accepts ${args.length} argument(s)`)
                     const value = this.callFunction(overload, args)
                     if (!value || typeof value !== 'object') throw new TypeError('A constructor must return an object')
-                    return this.applyTypeDefaults(value, constructor.inheritedType, overload.closure)
+                    const result = this.applyTypeDefaults(value, constructor.inheritedType, overload.closure)
+                    return constructor.typeName === 'Tuple' ? Object.freeze(result) : result
                 }
                 if (callee?.__junoTypeConstructor) {
                     const input = args[0] ?? {}
@@ -650,6 +678,7 @@ export class Interpreter {
     }
 
     private installDefaultHas(value: object): void {
+        const interpreter = this
         if (!('has' in value)) Object.defineProperty(value, 'has', {
             enumerable: false,
             value: function(this: object, key: string) { return key in this }
@@ -661,6 +690,22 @@ export class Interpreter {
             }
             return result
         }
+        if (!('asReadonly' in value)) Object.defineProperty(value, 'asReadonly', {
+            enumerable: false,
+            value: function(this: any) {
+                const copy = Array.isArray(this) ? [...this] : { ...this }
+                interpreter.installDefaultHas(copy)
+                return Object.freeze(copy)
+            }
+        })
+        if (!('asMutable' in value)) Object.defineProperty(value, 'asMutable', {
+            enumerable: false,
+            value: function(this: any) {
+                const copy = Array.isArray(this) ? [...this] : { ...this }
+                interpreter.installDefaultHas(copy)
+                return copy
+            }
+        })
         if (!('pick' in value)) Object.defineProperty(value, 'pick', {
             enumerable: false,
             value: function(this: any, ...keys: (string | number)[]) {
@@ -914,6 +959,21 @@ export class Interpreter {
         }
         if (type.kind === 'ArrayType') return { ...type, element: this.resolveAliasType(type.element, env, resolving) }
         if (type.kind === 'TypeOfType') return this.resolveAliasType(this.inferRuntimeValueType(this.evaluate(type.expression, env)), env, resolving)
+        if (type.kind === 'ConditionalType') {
+            const check = this.resolveAliasType(type.check, env, resolving)
+            const target = this.resolveAliasType(type.target, env, resolving)
+            const assignable = (source: TypeNode, destination: TypeNode): boolean => {
+                if (source.kind === 'UnionType') return source.types.every(part => assignable(part, destination))
+                if (destination.kind === 'UnionType') return destination.types.some(part => assignable(source, part))
+                if (destination.kind === 'NamedType' && (destination.name === 'any' || destination.name === 'unknown')) return true
+                if (source.kind === 'LiteralType' && destination.kind === 'NamedType') return typeof source.value === destination.name
+                if (source.kind === 'LiteralType' && destination.kind === 'LiteralType') return source.value === destination.value
+                if (source.kind === 'NamedType' && destination.kind === 'NamedType') return source.name === destination.name
+                if (source.kind === 'ArrayType' && destination.kind === 'ArrayType') return assignable(source.element, destination.element)
+                return false
+            }
+            return this.resolveAliasType(assignable(check, target) ? type.consequent : type.alternate, env, resolving)
+        }
         if (type.kind === 'IndexedAccessType') return this.indexedType(type.object, type.index, env) ?? { kind: 'NamedType', name: 'any' }
         if (type.kind === 'ObjectType') return { ...type, members: type.members.map(member => ({
             ...member,
@@ -933,6 +993,7 @@ export class Interpreter {
             if (node.kind === 'UnionType' || node.kind === 'IntersectionType') return { ...node, types: node.types.map(replace) }
             if (node.kind === 'ArrayType') return { ...node, element: replace(node.element) }
             if (node.kind === 'IndexedAccessType') return { ...node, object: replace(node.object), index: replace(node.index) }
+            if (node.kind === 'ConditionalType') return { ...node, check: replace(node.check), target: replace(node.target), consequent: replace(node.consequent), alternate: replace(node.alternate) }
             if (node.kind === 'FunctionType') return { ...node, params: node.params.map(replace), result: replace(node.result) }
             if (node.kind === 'ObjectType') return { ...node, members: node.members.map(member => ({ ...member, type: replace(member.type), indexType: member.indexType ? replace(member.indexType) : undefined })) }
             return node
@@ -1001,7 +1062,7 @@ export class Interpreter {
     }
 
     private matchesTypeNode(value: unknown, type: TypeNode, env: Environment, resolving = new Set<string>()): boolean {
-        if (type.kind === 'TypeOfType' || type.kind === 'IndexedAccessType') {
+        if (type.kind === 'TypeOfType' || type.kind === 'IndexedAccessType' || type.kind === 'ConditionalType') {
             const resolved = this.resolveAliasType(type, env, resolving)
             return this.matchesTypeNode(value, resolved, env, resolving)
         }
@@ -1152,6 +1213,9 @@ export class Interpreter {
     }
 
     private findTypeMember(type: TypeNode, name: string, env: Environment, resolving = new Set<string>()): { type: TypeNode; optional: boolean } | null {
+        if ((name === 'asReadonly' || name === 'asMutable') && !(type.kind === 'LiteralType' && type.value === null) && !(type.kind === 'NamedType' && type.name === 'null')) {
+            return { type: { kind: 'FunctionType', params: [], result: type }, optional: false }
+        }
         if (type.kind === 'NamedType') {
             if (resolving.has(type.name)) return null
             for (let current: Environment | undefined = env; current; current = current.parent) {
@@ -1358,6 +1422,7 @@ function typeName(type: TypeNode): string {
         case 'ArrayType': return `${typeName(type.element)}[]`
         case 'IndexedAccessType': return `${typeName(type.object)}[${typeName(type.index)}]`
         case 'TypeOfType': return 'typeof<…>'
+        case 'ConditionalType': return `${typeName(type.check)} is ${typeName(type.target)} ? ${typeName(type.consequent)} : ${typeName(type.alternate)}`
         case 'UnionType': return type.types.map(typeName).join(' | ')
         case 'IntersectionType': return type.types.map(typeName).join(' & ')
         case 'FunctionType': return 'function'

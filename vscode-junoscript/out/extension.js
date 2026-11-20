@@ -398,7 +398,7 @@ var Parser = class _Parser {
     if (this.match("Keyword", "export")) {
       const isDefault = this.match("Keyword", "default");
       const declaration = this.statement();
-      if (!["Import", "Variable", "Destructure", "FunctionDeclaration", "TypeDeclaration", "ConstructorDeclaration"].includes(declaration.kind)) this.fail("export must precede a declaration");
+      if (!["Import", "Variable", "Destructure", "ArrayDestructure", "FunctionDeclaration", "TypeDeclaration", "ConstructorDeclaration"].includes(declaration.kind)) this.fail("export must precede a declaration");
       return { kind: "Export", declaration, default: isDefault };
     }
     if (this.match("Keyword", "let") || this.match("Keyword", "const")) {
@@ -419,6 +419,25 @@ var Parser = class _Parser {
         this.take("RightBrace");
         this.take("Equal", "Expected '=' after object destructuring");
         return { kind: "Destructure", bindings, mutable, initializer: this.expression() };
+      }
+      if (this.match("LeftBracket")) {
+        const bindings = [];
+        let index = 0;
+        while (!this.is("RightBracket")) {
+          if (this.match("Comma")) {
+            index++;
+            continue;
+          }
+          const rest = this.match("Ellipsis");
+          const binding = this.identifier();
+          bindings.push({ ...binding, index, rest });
+          if (rest && !this.is("RightBracket")) this.fail("A rest binding must be the last element");
+          if (!rest) index++;
+          if (!this.match("Comma") && !this.is("RightBracket")) this.fail("Expected ',' or ']' in array destructuring");
+        }
+        this.take("RightBracket");
+        this.take("Equal", "Expected '=' after array destructuring");
+        return { kind: "ArrayDestructure", bindings, mutable, initializer: this.expression() };
       }
       const { name, loc } = this.identifier();
       const type = this.match("Colon") ? this.type() : void 0;
@@ -584,7 +603,7 @@ var Parser = class _Parser {
       const { name, loc } = this.identifier(), type = this.match("Colon") ? this.type() : void 0, defaultValue = this.match("Equal") ? this.expression() : void 0;
       if (rest && defaultValue !== void 0) this.fail("A rest parameter cannot have a default value");
       if (rest && !type) this.fail("A rest parameter must have an array type");
-      if (rest && type && type.kind !== "ArrayType" && !(type.kind === "GenericType" && (type.name === "Array" || type.name === "ReadonlyArray"))) this.fail("A rest parameter must have an array type");
+      if (rest && type && type.kind !== "NamedType" && type.kind !== "ArrayType" && !(type.kind === "GenericType" && (type.name === "Array" || type.name === "ReadonlyArray"))) this.fail("A rest parameter must have an array type or an array-constrained generic type");
       if (!rest && defaultValue !== void 0) optionalSeen = true;
       else if (!rest && optionalSeen) this.fail("Parameters with default values must follow parameters without default values");
       params.push({ name, loc, type, defaultValue, rest });
@@ -608,7 +627,7 @@ var Parser = class _Parser {
     this.take("Greater");
     return parameters;
   }
-  type() {
+  type(stopAtConditionalQuestion = false) {
     while (this.match("Newline") || this.match("Indent")) {
     }
     if (this.is("Pipe") || this.is("Ampersand")) {
@@ -627,7 +646,7 @@ var Parser = class _Parser {
     }
     const optional = () => {
       let value = this.typeAtom();
-      if (this.match("Question")) value = { kind: "UnionType", types: [value, { kind: "NamedType", name: "null" }] };
+      if (!stopAtConditionalQuestion && this.match("Question")) value = { kind: "UnionType", types: [value, { kind: "NamedType", name: "null" }] };
       return value;
     };
     let left = optional();
@@ -641,6 +660,17 @@ var Parser = class _Parser {
       }
       const right = optional(), kind = operator === "Pipe" ? "UnionType" : "IntersectionType";
       left = left.kind === kind ? { ...left, types: [...left.types, right] } : { kind, types: [left, right] };
+    }
+    if (this.match("Identifier", "is")) {
+      const token = this.tokens[this.pos - 1];
+      const target = this.type(true);
+      if (left.kind !== "NamedType" || target.kind !== "NamedType") this.fail("'is' type operands must be type names");
+      if (this.match("Question")) {
+        const consequent = this.type();
+        this.take("Colon", "Expected ':' in conditional type");
+        return { kind: "ConditionalType", check: left, target, consequent, alternate: this.type(), loc: this.loc(token) };
+      }
+      return { kind: "ConditionalType", check: left, target, consequent: { kind: "LiteralType", value: true }, alternate: { kind: "LiteralType", value: false }, loc: this.loc(token) };
     }
     return left;
   }
@@ -728,6 +758,13 @@ var Parser = class _Parser {
       if (this.match("Arrow") || this.match("FatArrow")) result = { kind: "FunctionType", params: args, result: this.type() };
       else if (args.length === 1) result = args[0];
       else this.fail("Expected function return type after -> or =>");
+    } else if (this.match("LeftBracket")) {
+      const elements = [];
+      if (!this.is("RightBracket")) do {
+        elements.push(this.type());
+      } while (this.match("Comma") && !this.is("RightBracket"));
+      this.take("RightBracket", "Expected ']' after tuple type");
+      result = { kind: "GenericType", name: "Tuple", args: elements };
     } else if (this.match("Keyword", "null")) {
       result = { kind: "NamedType", name: "null", loc: this.loc(this.tokens[this.pos - 1]) };
     } else {
@@ -1097,6 +1134,17 @@ var Parser = class _Parser {
       const properties = [];
       this.objectSeparators();
       while (!this.is("RightBrace") && !this.is("EOF")) {
+        if (this.match("LeftBracket")) {
+          const key = this.identifier();
+          this.take("Colon", "Expected ':' after index parameter");
+          const indexType = this.type();
+          this.take("RightBracket", "Expected ']' after index parameter type");
+          this.take("Colon", "Expected ':' before indexed value type");
+          const declaredType = this.type();
+          properties.push({ key: key.name, keyLoc: key.loc, value: { kind: "Literal", value: null }, typeOnly: true, indexType, declaredType });
+          this.objectSeparators();
+          continue;
+        }
         if (this.match("Ellipsis")) {
           const value2 = this.expression();
           properties.push({ key: "", keyLoc: "loc" in value2 ? value2.loc : void 0, value: value2, spread: true });
@@ -1167,13 +1215,16 @@ function inferredTypeNode(expression) {
     case "Object":
       return { kind: "ObjectType", members: expression.properties.flatMap((property) => property.accessor === "set" ? [] : [{
         name: property.key,
-        type: property.accessor === "get" && property.value.kind === "Function" ? property.value.returnType ?? { kind: "NamedType", name: "any" } : inferredTypeNode(property.value),
+        type: property.typeOnly ? property.declaredType ?? { kind: "NamedType", name: "any" } : property.accessor === "get" && property.value.kind === "Function" ? property.value.returnType ?? { kind: "NamedType", name: "any" } : inferredTypeNode(property.value),
         optional: false,
         readonly: false,
-        constant: false
+        constant: false,
+        indexType: property.indexType
       }]) };
     case "Conditional":
       return inferredTypeNode(expression.consequent);
+    case "Is":
+      return { kind: "NamedType", name: "boolean" };
     default:
       return { kind: "NamedType", name: "any" };
   }
@@ -1216,6 +1267,8 @@ function inferExpressionType(expression, variables) {
       return inferExpressionType(expression.operand, variables);
     case "Conditional":
       return commonType([inferExpressionType(expression.consequent, variables), inferExpressionType(expression.alternate, variables)]);
+    case "Is":
+      return primitive("boolean");
     case "Member": {
       const object = inferExpressionType(expression.object, variables);
       return object.kind === "object" ? object.fields.get(expression.property) ?? unknownType : unknownType;
@@ -1614,6 +1667,7 @@ function validateDeclarations(statements, initialNames = /* @__PURE__ */ new Set
     const declarations = [];
     if (statement.kind === "Import") declarations.push(...statement.defaultImport ? [statement.defaultImport] : [], ...statement.namedImports);
     else if (statement.kind === "Variable" || statement.kind === "FunctionDeclaration" || statement.kind === "TypeDeclaration") declarations.push(statement.name);
+    else if (statement.kind === "Destructure" || statement.kind === "ArrayDestructure") declarations.push(...statement.bindings.flatMap((binding) => binding.name && binding.name !== "_" ? [binding.name] : []));
     for (const name of declarations) {
       if (names.has(name)) throw new SyntaxError(`Duplicate declaration '${name}' in the same scope`);
       names.add(name);
@@ -1681,7 +1735,7 @@ function typeUtilitiesType() {
   };
 }
 function moduleType(module2) {
-  if (module2 === "types") return typeUtilitiesType();
+  if (module2 === "juno:types" || module2 === "types") return typeUtilitiesType();
   return { kind: "ObjectType", members: [field("console", consoleType(), true), ...module2 === "juno" ? [field("Math", mathType(), true), field("types", typeUtilitiesType(), true)] : []] };
 }
 function globals() {
@@ -1712,6 +1766,8 @@ function printType(type) {
       return `${printType(type.object)}[${printType(type.index)}]`;
     case "TypeOfType":
       return `typeof<\u2026>`;
+    case "ConditionalType":
+      return `${printType(type.check)} is ${printType(type.target)} ? ${printType(type.consequent)} : ${printType(type.alternate)}`;
     case "UnionType":
       return type.types.map(printType).join(" | ");
     case "IntersectionType":
@@ -1782,7 +1838,8 @@ function printSymbol(name, symbol) {
       return { code: `import ${name} from '${symbol.module}'`, docs: symbol.docs };
     case "constructor": {
       const generics = printGenerics(symbol.generics, symbol.genericConstraints, symbol.genericDefaults);
-      const overloads = symbol.overloads.map((item) => `constructor ${name}${generics}(${item.params.map(printParam).join(", ")}): ${name}${generics}`);
+      const resultType = symbol.generics.length ? `${name}<${symbol.generics.join(", ")}>` : name;
+      const overloads = symbol.overloads.map((item) => `constructor ${name}${generics}(${item.params.map(printParam).join(", ")}): ${resultType}`);
       const methods = symbol.methods.map((method2) => `${name}.${method2.name}${printGenerics(method2.generics, method2.genericConstraints, method2.genericDefaults)}(${method2.params.map(printParam).join(", ")}): ${printType(method2.returnType)}`);
       return { code: [...overloads, ...methods].join("\n"), docs: symbol.docs };
     }
@@ -1796,6 +1853,7 @@ function instantiate(type, generics, args, defaults = []) {
     if (node.kind === "UnionType" || node.kind === "IntersectionType") return { ...node, types: node.types.map(replace) };
     if (node.kind === "ArrayType") return { ...node, element: replace(node.element) };
     if (node.kind === "IndexedAccessType") return { ...node, object: replace(node.object), index: replace(node.index) };
+    if (node.kind === "ConditionalType") return { ...node, check: replace(node.check), target: replace(node.target), consequent: replace(node.consequent), alternate: replace(node.alternate) };
     if (node.kind === "FunctionType") return { ...node, params: node.params.map(replace), result: replace(node.result) };
     if (node.kind === "ObjectType") return { ...node, members: node.members.map((member) => ({ ...member, type: replace(member.type), indexType: member.indexType ? replace(member.indexType) : void 0, params: member.params?.map((param) => ({ ...param, type: param.type ? replace(param.type) : void 0 })) })) };
     return node;
@@ -1874,6 +1932,12 @@ function resolveType(type, env) {
     return env.get("Array")?.kind === "constructor" ? { kind: "GenericType", name: "Array", args: [element] } : { ...type, element };
   }
   if (type.kind === "TypeOfType") return resolveType(inferExpression(type.expression, env), env);
+  if (type.kind === "ConditionalType") {
+    const check = resolveType(type.check, env);
+    const target = resolveType(type.target, env);
+    if (check.kind === "UnionType") return unionOf(check.types.map((part) => isAssignableTo(target, part, env) ? resolveType(type.consequent, env) : resolveType(type.alternate, env)));
+    return resolveType(isAssignableTo(target, check, env) ? type.consequent : type.alternate, env);
+  }
   if (type.kind === "IndexedAccessType") return indexedAccessType(type.object, type.index, env) ?? named("any");
   if (type.kind === "ObjectType") return { ...type, members: type.members.flatMap((member) => {
     const indexType = member.indexType ? resolveType(member.indexType, env) : void 0;
@@ -1905,8 +1969,22 @@ function indexKeyParts(type, env) {
   const resolved = resolveType(type, env);
   return resolved.kind === "UnionType" ? resolved.types.flatMap((part) => indexKeyParts(part, env)) : [resolved];
 }
+function tupleShape(elements, readonly = true) {
+  const element = elements.length ? unionOf(elements) : named("never");
+  return { kind: "ObjectType", members: [
+    ...elements.map((type, index) => ({ name: String(index), type, optional: false, readonly, constant: false })),
+    { name: "index", indexType: named("number"), type: element, optional: false, readonly, constant: false },
+    { name: "length", type: { kind: "LiteralType", value: elements.length }, optional: false, readonly: true, constant: false },
+    { name: "toArray", type: arrayOf(element), optional: false, readonly, constant: false, method: true, params: [] }
+  ] };
+}
 function indexedAccessType(objectType, keyType, env) {
-  const object = removeNull(resolveType(objectType, env));
+  let object = removeNull(resolveType(objectType, env));
+  if (object.kind === "GenericType" && object.name === "Tuple" && object.args[0]?.kind !== "ObjectType") object = tupleShape(object.args);
+  if (object.kind === "GenericType") {
+    const constructor = env.get(object.name);
+    if (constructor?.kind === "constructor") object = removeNull(resolveType(instantiate(constructor.inheritedType, constructor.generics, object.args, constructor.genericDefaults), env));
+  }
   const keys = indexKeyParts(keyType, env);
   const result = [];
   const addMember = (owner, key) => {
@@ -1917,6 +1995,7 @@ function indexedAccessType(objectType, keyType, env) {
   };
   const collect = (owner) => {
     if (owner.kind === "UnionType") return owner.types.every(collect);
+    if (owner.kind === "IntersectionType") return owner.types.some(collect);
     const arrayLike = owner.kind === "ArrayType" || owner.kind === "GenericType" && (owner.name === "Array" || owner.name === "ReadonlyArray");
     const element = owner.kind === "ArrayType" ? owner.element : owner.kind === "GenericType" ? owner.args[0] ?? named("any") : void 0;
     if (arrayLike) return keys.every((key) => {
@@ -1937,6 +2016,11 @@ function indexedAccessType(objectType, keyType, env) {
         return false;
       }
       if (isNamedType(key, "number")) {
+        const signature2 = owner.members.find((member) => member.indexType && isAssignableTo(member.indexType, key, env));
+        if (signature2) {
+          result.push(signature2.type);
+          return true;
+        }
         const numeric = owner.members.filter((member) => member.name !== "" && Number.isFinite(Number(member.name)) && String(Number(member.name)) === member.name);
         if (!numeric.length) return false;
         result.push(...numeric.map((member) => member.type));
@@ -1952,6 +2036,24 @@ function indexedAccessType(objectType, keyType, env) {
     return false;
   };
   return collect(object) && result.length ? unionOf(result) : void 0;
+}
+function arrayDestructureRestType(sourceType, start, env) {
+  if (sourceType.kind === "GenericType" && sourceType.name === "Tuple" && sourceType.args[0]?.kind !== "ObjectType") {
+    return tupleShape(sourceType.args.slice(start), false);
+  }
+  if (sourceType.kind === "GenericType" && sourceType.name === "Tuple" && sourceType.args[0]?.kind === "ObjectType") {
+    const tuple = sourceType.args[0];
+    const entries = tuple.members.filter((member) => member.name !== "" && Number.isInteger(Number(member.name)) && Number(member.name) >= start).sort((left, right) => Number(left.name) - Number(right.name));
+    const element2 = entries.length ? unionOf(entries.map((member) => member.type)) : named("never");
+    return { kind: "ObjectType", members: [
+      ...entries.map((member, index) => ({ ...member, name: String(index), readonly: false })),
+      { name: "index", indexType: named("number"), type: element2, optional: false, readonly: false, constant: false },
+      { name: "length", type: { kind: "LiteralType", value: entries.length }, optional: false, readonly: true, constant: false },
+      { name: "toArray", type: arrayOf(element2), optional: false, readonly: false, constant: false, method: true, params: [] }
+    ] };
+  }
+  const element = iterableElementType(sourceType, env);
+  return arrayOf(element);
 }
 function callableType(type, env) {
   const resolved = resolveType(type, env);
@@ -1969,6 +2071,16 @@ function callableType(type, env) {
   return void 0;
 }
 function lookupMember(type, name, env) {
+  if (type.kind === "GenericType" && type.name === "Tuple" && type.args[0]?.kind !== "ObjectType") return lookupMember(tupleShape(type.args), name, env);
+  if (name === "asReadonly" || name === "asMutable") {
+    const rawElement = type.kind === "ArrayType" ? type.element : type.kind === "GenericType" && (type.name === "Array" || type.name === "ReadonlyArray") ? type.args[0] ?? named("any") : void 0;
+    if (rawElement) return {
+      kind: "fun",
+      params: [],
+      returnType: { kind: "GenericType", name: name === "asReadonly" ? "ReadonlyArray" : "Array", args: [rawElement] },
+      ownerType: type
+    };
+  }
   if (type.kind === "NamedType") {
     const constructor = env.get(type.name);
     if (constructor?.kind === "constructor") {
@@ -1997,15 +2109,38 @@ function lookupMember(type, name, env) {
     }
   }
   const resolved = resolveType(type, env);
+  if (resolved.kind === "GenericType" && resolved.name === "ReadonlyArray" && ["copyWithin", "fill", "pop", "push", "reverse", "shift", "sort", "splice", "unshift"].includes(name)) return void 0;
   if (name === "isType") return { kind: "fun", params: [], returnType: named("boolean") };
+  if (name === "asReadonly" || name === "asMutable") {
+    let result = resolved;
+    if (resolved.kind === "ArrayType") result = name === "asReadonly" ? { kind: "GenericType", name: "ReadonlyArray", args: [resolved.element] } : resolved;
+    else if (resolved.kind === "GenericType" && (resolved.name === "Array" || resolved.name === "ReadonlyArray")) {
+      result = { kind: "GenericType", name: name === "asReadonly" ? "ReadonlyArray" : "Array", args: resolved.args };
+    } else if (resolved.kind === "ObjectType") {
+      result = { ...resolved, members: resolved.members.map((member) => ({ ...member, readonly: name === "asReadonly" })) };
+    }
+    return { kind: "fun", params: [], returnType: result, ownerType: resolved };
+  }
   if ((name === "pick" || name === "omit") && (resolved.kind === "ObjectType" || resolved.kind === "ArrayType" || resolved.kind === "GenericType" && (resolved.name === "Array" || resolved.name === "ReadonlyArray"))) {
     const keys = resolveType({ kind: "GenericType", name: "KeyOf", args: [resolved] }, env);
+    const selectedKeys = name === "pick" ? named("T") : { kind: "GenericType", name: "Exclude", args: [{ kind: "GenericType", name: "KeyOf", args: [resolved] }, named("T")] };
+    const result = {
+      kind: "ObjectType",
+      members: [{
+        name: "key",
+        indexType: selectedKeys,
+        type: { kind: "IndexedAccessType", object: resolved, index: named("key") },
+        optional: false,
+        readonly: false,
+        constant: false
+      }]
+    };
     return {
       kind: "fun",
       generics: ["T"],
       genericConstraints: [keys],
       params: [{ name: "keys", type: arrayOf(named("T")), rest: true }],
-      returnType: named("any"),
+      returnType: result,
       ownerType: resolved
     };
   }
@@ -2329,6 +2464,11 @@ function isAssignableTo(expected, actual, env) {
     return target.name === (typeof value.value === "string" ? "string" : typeof value.value);
   }
   if (target.kind === "ArrayType" && value.kind === "ArrayType") return isAssignableTo(target.element, value.element, env);
+  if (target.kind === "ArrayType" && value.kind === "GenericType" && value.name === "Tuple") return value.args.every((element) => isAssignableTo(target.element, element, env));
+  if (target.kind === "ArrayType" && value.kind === "ObjectType") {
+    const numeric = value.members.filter((member) => member.indexType && isAssignableTo(member.indexType, named("number"), env) || member.name !== "" && Number.isFinite(Number(member.name)) && String(Number(member.name)) === member.name);
+    return numeric.length > 0 && numeric.every((member) => isAssignableTo(target.element, member.type, env));
+  }
   if (target.kind === "FunctionType") {
     const callable = callableType(value, env);
     return Boolean(callable && target.params.length === callable.params.length && target.params.every((item, index) => isAssignableTo(item, callable.params[index], env)) && isAssignableTo(target.result, callable.result, env));
@@ -2477,10 +2617,10 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
   if (!filePath) return result;
   for (const statement of statements) {
     const importedStatement = statement.kind === "Import" ? statement : statement.kind === "Export" && statement.declaration.kind === "Import" ? statement.declaration : void 0;
-    if (!importedStatement || !importedStatement.module.startsWith(".") && importedStatement.module !== "juno/types" && !importedStatement.module.startsWith("juno/types/")) continue;
+    if (!importedStatement || !importedStatement.module.startsWith(".") && importedStatement.module !== "juno:types" && importedStatement.module !== "juno/types" && !importedStatement.module.startsWith("juno/types/")) continue;
     let base;
-    if (importedStatement.module === "juno/types" || importedStatement.module.startsWith("juno/types/")) {
-      const relativeModule = importedStatement.module === "juno/types" ? "index" : importedStatement.module.slice("juno/types/".length);
+    if (importedStatement.module === "juno:types" || importedStatement.module === "juno/types" || importedStatement.module.startsWith("juno/types/")) {
+      const relativeModule = importedStatement.module === "juno:types" || importedStatement.module === "juno/types" ? "index" : importedStatement.module.slice("juno/types/".length);
       let directory = path.dirname(path.resolve(filePath));
       let found;
       while (true) {
@@ -2639,6 +2779,20 @@ function inferGenericArguments(generics, params, args, env) {
   params.forEach((param, index) => {
     if (param.rest) {
       const restType = parameterType(param);
+      if (restType.kind === "NamedType" && generics.includes(restType.name)) {
+        const elements = args.slice(index).map((arg2) => inferExpression(arg2, env));
+        const element2 = elements.length ? unionOf(elements) : named("any");
+        inferred.set(restType.name, {
+          kind: "ObjectType",
+          members: [
+            ...elements.map((type, itemIndex) => ({ name: String(itemIndex), type, optional: false, readonly: true, constant: false })),
+            { name: "index", indexType: named("number"), type: element2, optional: false, readonly: true, constant: false },
+            { name: "length", type: { kind: "LiteralType", value: elements.length }, optional: false, readonly: true, constant: false },
+            { name: "toArray", type: arrayOf(element2), optional: false, readonly: true, constant: false, method: true, params: [] }
+          ]
+        });
+        return;
+      }
       const element = restType.kind === "ArrayType" ? restType.element : restType.kind === "GenericType" && restType.name === "Array" ? restType.args[0] : void 0;
       if (element && args.length > index) {
         const actuals = args.slice(index).map((arg2) => inferGenericExpression(arg2, env));
@@ -2703,6 +2857,7 @@ function removeNull(type) {
 }
 function iterableElementType(type, env) {
   const resolved = resolveType(type, env);
+  if (resolved.kind === "GenericType" && resolved.name === "Tuple" && resolved.args[0]?.kind !== "ObjectType") return unionOf(resolved.args);
   if (resolved.kind === "ArrayType") return resolved.element;
   if (resolved.kind === "GenericType" && (resolved.name === "Array" || resolved.name === "ReadonlyArray")) {
     return resolved.args[0] ?? named("any");
@@ -2733,6 +2888,15 @@ function iterableElementType(type, env) {
   return named("any");
 }
 function spreadElementType(type, env) {
+  if (type.kind === "NamedType") {
+    const symbol = env.get(type.name);
+    if (symbol?.kind === "type") {
+      const constraint = resolveType(symbol.value, env);
+      if (constraint.kind === "ArrayType" || constraint.kind === "GenericType" && (constraint.name === "Array" || constraint.name === "ReadonlyArray")) {
+        return { kind: "IndexedAccessType", object: type, index: named("number") };
+      }
+    }
+  }
   const resolved = resolveType(type, env);
   if (isNamedType(resolved, "any")) return named("any");
   if (isNamedType(resolved, "string")) return named("string");
@@ -2864,6 +3028,15 @@ function inferExpression(expression, env) {
       return spreadElementType(inferExpression(expression.value, env), env) ?? errorType();
     case "Object": {
       const members = expression.properties.flatMap((property) => {
+        if (property.typeOnly && property.indexType && property.declaredType) return [{
+          name: property.key,
+          loc: property.keyLoc,
+          indexType: property.indexType,
+          type: property.declaredType,
+          optional: false,
+          readonly: Boolean(property.readonly),
+          constant: false
+        }];
         if (property.spread) {
           const spread = resolveType(inferExpression(property.value, env), env);
           const members2 = (type) => {
@@ -2908,6 +3081,8 @@ function inferExpression(expression, env) {
       return expression.operator === "postfix!" ? removeNull(inferExpression(expression.operand, env)) : expression.operator.endsWith("++") || expression.operator.endsWith("--") ? inferExpression(expression.operand, env) : expression.operator === "-" ? named("number") : named("boolean");
     case "Conditional":
       return unionOf([inferExpression(expression.consequent, env), inferExpression(expression.alternate, env)]);
+    case "Is":
+      return named("boolean");
     case "Binary": {
       const left = inferExpression(expression.left, env);
       const right = inferExpression(expression.right, env);
@@ -2924,7 +3099,12 @@ function inferExpression(expression, env) {
       const resolvedObjectType = resolveType(nonNullObjectType, env);
       const member = lookupMember(nonNullObjectType, expression.property, env);
       if (!member) return resolvedObjectType.kind === "ObjectType" ? named("null") : named("any");
-      const memberType = isFunctionSymbol(member) ? { kind: "FunctionType", params: member.params.map(parameterType), result: member.returnType } : member;
+      const memberType = isFunctionSymbol(member) ? (() => {
+        const genericArguments = member.generics?.map((name, index) => member.genericConstraints?.[index] ?? named(name));
+        const parameters = genericArguments ? member.params.map((param) => instantiate(parameterType(param), member.generics, genericArguments)) : member.params.map(parameterType);
+        const result = genericArguments ? instantiate(member.returnType, member.generics, genericArguments) : member.returnType;
+        return { kind: "FunctionType", params: parameters, result };
+      })() : member;
       return expression.optional ? unionOf([memberType, named("null")]) : memberType;
     }
     case "Index": {
@@ -3085,12 +3265,16 @@ function compactType(type, depth = 0) {
       return typeof type.value === "string" ? JSON.stringify(type.value) : String(type.value);
     case "GenericType":
       return `${type.name}<${type.args.map((argument) => compactType(argument, depth)).join(", ")}>`;
-    case "ArrayType":
-      return `${compactType(type.element, depth)}[]`;
+    case "ArrayType": {
+      const element = compactType(type.element, depth);
+      return `${type.element.kind === "UnionType" || type.element.kind === "IntersectionType" || type.element.kind === "FunctionType" ? `(${element})` : element}[]`;
+    }
     case "IndexedAccessType":
       return `${compactType(type.object, depth)}[${compactType(type.index, depth)}]`;
     case "TypeOfType":
       return "typeof<\u2026>";
+    case "ConditionalType":
+      return `${compactType(type.check, depth)} extends ${compactType(type.target, depth)} ? ${compactType(type.consequent, depth)} : ${compactType(type.alternate, depth)}`;
     case "UnionType":
       return type.types.map((part) => compactType(part, depth)).join(" | ");
     case "IntersectionType":
@@ -3122,7 +3306,11 @@ function symbolTypeDescription(name, symbol, env) {
   if (symbol.kind === "constructor") return typeDescription(named(name), env);
   if (symbol.kind === "var") return typeDescription(symbol.type, env);
   if (symbol.kind === "type") return typeDescription(symbol.value, env);
-  if (symbol.kind === "fun") return typeDescription(functionType(symbol.params, symbol.returnType), env);
+  if (symbol.kind === "fun") {
+    const generics = symbol.generics?.length ? `<${symbol.generics.map((generic, index) => `${generic}${symbol.genericConstraints?.[index] ? ` extends ${compactType(symbol.genericConstraints[index])}` : ""}`).join(", ")}>` : "";
+    const params = symbol.params.map((param, index) => `${param.rest ? "..." : ""}${param.name || `arg${index}`}: ${compactType(parameterType(param))}`).join(", ");
+    return `${generics}(${params}) => ${compactType(symbol.returnType)}`;
+  }
   return void 0;
 }
 function lengthOf(name, loc) {
@@ -3257,7 +3445,7 @@ var Analyzer = class {
   statement(statement, env) {
     switch (statement.kind) {
       case "Import": {
-        const imported = statement.module === "juno:node" ? "Node.js helpers for JunoScript (`console.args`, `console.read`, `console.readLines`)." : statement.module === "types" ? "Runtime type utilities for transforming Juno type declarations." : "Standard JunoScript module. `console` mirrors the host console.";
+        const imported = statement.module === "juno:node" ? "Node.js helpers for JunoScript (`console.args`, `console.read`, `console.readLines`)." : statement.module === "juno:types" || statement.module === "types" ? "Runtime type utilities for transforming Juno type declarations." : "Standard JunoScript module. `console` mirrors the host console.";
         if (statement.defaultImport) {
           const symbol = { kind: "module", module: statement.module, docs: imported };
           this.bind(env, statement.defaultImport, symbol);
@@ -3267,8 +3455,9 @@ var Analyzer = class {
         statement.namedImports.forEach((name, index) => {
           const importedAlias = statement.importedTypes?.[name];
           const importedSymbol = statement.importedSymbols?.[name];
-          const type = importedAlias ? resolveType(importedAlias, env) : importedSymbol?.kind === "var" ? importedSymbol.type ?? named("any") : name === "console" ? consoleType() : name === "Math" && statement.module === "juno" ? mathType() : name === "types" && statement.module === "juno" ? typeUtilitiesType() : statement.module === "types" && ["Partial", "Required", "Readonly", "Pick", "Omit", "KeyOf", "Exclude"].includes(name) ? typeUtilitiesType().kind === "ObjectType" ? typeUtilitiesType().members.find((member) => member.name === name)?.type ?? named("any") : named("any") : named("any");
-          const symbol = importedSymbol?.kind === "fun" ? { kind: "fun", generics: importedSymbol.generics, genericConstraints: importedSymbol.genericConstraints, genericDefaults: importedSymbol.genericDefaults, params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named("any"), docs: imported } : importedSymbol?.kind === "constructor" && importedSymbol.inheritedType && importedSymbol.overloads ? { kind: "constructor", generics: importedSymbol.generics ?? [], genericConstraints: importedSymbol.genericConstraints, genericDefaults: importedSymbol.genericDefaults, inheritedType: importedSymbol.inheritedType, overloads: importedSymbol.overloads, methods: (importedSymbol.methods ?? []).map((method2) => ({ ...method2, generics: method2.generics ?? [] })), docs: imported } : {
+          const itemsImport = name === "Items" && (statement.module === "juno:types" || statement.module === "types");
+          const type = importedAlias ? resolveType(importedAlias, env) : importedSymbol?.kind === "var" ? importedSymbol.type ?? named("any") : name === "console" ? consoleType() : name === "Math" && statement.module === "juno" ? mathType() : name === "types" && statement.module === "juno" ? typeUtilitiesType() : (statement.module === "juno:types" || statement.module === "types") && ["Partial", "Required", "Readonly", "Pick", "Omit", "KeyOf", "Exclude"].includes(name) ? typeUtilitiesType().kind === "ObjectType" ? typeUtilitiesType().members.find((member) => member.name === name)?.type ?? named("any") : named("any") : named("any");
+          const symbol = itemsImport ? { kind: "fun", generics: ["T"], genericConstraints: [{ kind: "UnionType", types: [named("string"), named("number")] }], params: [], returnType: arrayOf(named("T")), docs: "Creates an array from a union of string or number literal types." } : importedSymbol?.kind === "fun" ? { kind: "fun", generics: importedSymbol.generics, genericConstraints: importedSymbol.genericConstraints, genericDefaults: importedSymbol.genericDefaults, params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named("any"), docs: imported } : importedSymbol?.kind === "constructor" && importedSymbol.inheritedType && importedSymbol.overloads ? { kind: "constructor", generics: importedSymbol.generics ?? [], genericConstraints: importedSymbol.genericConstraints, genericDefaults: importedSymbol.genericDefaults, inheritedType: importedSymbol.inheritedType, overloads: importedSymbol.overloads, methods: (importedSymbol.methods ?? []).map((method2) => ({ ...method2, generics: method2.generics ?? [] })), docs: imported } : {
             kind: importedAlias || importedSymbol?.kind === "type" ? "type" : "var",
             mutable: false,
             ...importedAlias || importedSymbol?.kind === "type" ? { generics: importedSymbol?.generics ?? [], genericConstraints: importedSymbol?.genericConstraints, genericDefaults: importedSymbol?.genericDefaults, value: importedAlias ?? importedSymbol?.value ?? named("any") } : { type },
@@ -3289,10 +3478,10 @@ var Analyzer = class {
         this.walkType(statement.value, env);
         const resolved = resolveType(statement.value, env);
         const printed = {
-          code: `type ${statement.name}${printGenerics(statement.generics, statement.genericConstraints, statement.genericDefaults)}${statement.generics.length ? "" : `
+          code: `type ${statement.name}${printGenerics(statement.generics, statement.genericConstraints, statement.genericDefaults)} = ${printType(statement.value)}${statement.generics.length ? "" : `
 (infer) ${printType(resolved)}`}`
         };
-        this.addHover(statement.name, statement.loc, printed.code, void 0, typeDescription(resolved, env));
+        this.addHover(statement.name, statement.loc, printed.code, void 0, statement.generics.length ? compactType(statement.value) : typeDescription(resolved, env));
         statement.generics.forEach((name, index) => {
           this.addHover(name, statement.genericLocs?.[index], `(type parameter) ${name}`);
           const constraint = statement.genericConstraints?.[index];
@@ -3344,14 +3533,26 @@ var Analyzer = class {
         } else if (statement.type && statement.initializer && !isAssignableTo(statement.type, inferExpression(statement.initializer, env), env)) {
           this.addDiagnostic(statement.initializer.loc, `Type '${printType(inferExpression(statement.initializer, env))}' is not assignable to type '${printType(statement.type)}'.`);
         }
-        const symbol = { kind: "var", mutable: statement.mutable, type: statement.type ?? type };
+        const keyConstraint = statement.initializer?.kind === "Member" && (statement.initializer.property === "pick" || statement.initializer.property === "omit") ? resolveType({ kind: "GenericType", name: "KeyOf", args: [inferExpression(statement.initializer.object, env)] }, env) : void 0;
+        const symbol = { kind: "var", mutable: statement.mutable, type: statement.type ?? type, keyConstraint };
         this.bind(env, statement.name, symbol);
         const printed = printSymbol(statement.name, symbol);
+        let description = symbolTypeDescription(statement.name, symbol, env);
+        if (statement.initializer?.kind === "Member" && (statement.initializer.property === "pick" || statement.initializer.property === "omit")) {
+          const owner = expressionReference(statement.initializer.object);
+          const key = statement.initializer.property === "pick" ? "T" : `Exclude<KeyOf<typeof<${owner}>>, T>`;
+          printed.code = `const ${statement.name}: <T is KeyOf<typeof<${owner}>>>(T[]) -> {
+    [key: ${key}]: typeof<${owner}[key]>
+}`;
+          description = `<T extends KeyOf<typeof<${owner}>>>(arg0: T[]) => {
+  [key: ${key}]: typeof<${owner}[key]>;
+}`;
+        }
         if (statement.type && isNamedType(resolveType(statement.type, env), "any") && statement.initializer) {
           printed.code += `
 (infer) ${printType(inferExpression(statement.initializer, env))}`;
         }
-        this.addHover(statement.name, statement.loc, printed.code, void 0, symbolTypeDescription(statement.name, symbol, env));
+        this.addHover(statement.name, statement.loc, printed.code, void 0, description);
         this.addTypeHint(statement.loc, statement.name, Boolean(statement.type), type);
         if (statement.type) this.walkType(statement.type, env);
         return;
@@ -3367,6 +3568,19 @@ var Analyzer = class {
           this.addHover(binding.name, binding.loc, printSymbol(binding.name, symbol).code);
           this.addTypeHint(binding.loc, binding.name, false, type);
           if (!member) this.addDiagnostic(binding.loc, `Property '${binding.name}' does not exist on type '${printType(source)}'.`);
+        }
+        return;
+      }
+      case "ArrayDestructure": {
+        this.walkExpression(statement.initializer, env);
+        const source = inferExpression(statement.initializer, env);
+        for (const binding of statement.bindings) {
+          if (!binding.name || binding.name === "_") continue;
+          const type = binding.rest ? arrayDestructureRestType(source, binding.index, env) : indexedAccessType(source, { kind: "LiteralType", value: binding.index }, env) ?? named("any");
+          const symbol = { kind: "var", mutable: statement.mutable, type };
+          this.bind(env, binding.name, symbol);
+          this.addHover(binding.name, binding.loc, `${statement.mutable ? "let" : "const"} ${binding.name}: ${printType(type)}`, void 0, typeDescription(type, env));
+          this.addTypeHint(binding.loc, binding.name, false, type);
         }
         return;
       }
@@ -3392,7 +3606,7 @@ var Analyzer = class {
         });
         this.bind(env, statement.name, symbol);
         const printed = printSymbol(statement.name, symbol);
-        this.addHover(statement.name, statement.loc, printed.code);
+        this.addHover(statement.name, statement.loc, printed.code, void 0, symbolTypeDescription(statement.name, symbol, env));
         (statement.generics ?? []).forEach((name, index) => {
           this.addHover(name, statement.genericLocs?.[index], `(type parameter) ${name}`);
           const constraint = statement.genericConstraints?.[index];
@@ -3421,7 +3635,13 @@ var Analyzer = class {
       case "ConstructorDeclaration": {
         this.walkType(statement.inheritedType, env);
         const constructorEnv = (params) => {
-          const local = bindInferredParameters(params, env);
+          const genericEnv = new Map(env);
+          statement.generics.forEach((name, index) => genericEnv.set(name, {
+            kind: "type",
+            generics: [],
+            value: statement.genericConstraints?.[index] ?? statement.genericDefaults?.[index] ?? named("any")
+          }));
+          const local = bindInferredParameters(params, genericEnv);
           if (statement.inheritedType.kind === "GenericType") {
             local.set(statement.inheritedType.name, { kind: "type", generics: [], value: resolveType(statement.inheritedType, env) });
           }
@@ -3447,7 +3667,8 @@ var Analyzer = class {
           }
           this.statements(overload.body, local);
           const actual = overloads[index].returnType;
-          if (statement.name !== "Array" && !isAssignableTo(statement.inheritedType, actual, env)) {
+          const returnsSelf = actual.kind === "NamedType" && actual.name === statement.name || actual.kind === "GenericType" && actual.name === statement.name;
+          if (statement.name !== "Array" && !returnsSelf && !isAssignableTo(statement.inheritedType, actual, env)) {
             this.addDiagnostic(statement.loc, `Constructor overload returns '${printType(actual)}', which is not assignable to inherited type '${printType(statement.inheritedType)}'.`);
           }
         });
@@ -3569,6 +3790,12 @@ var Analyzer = class {
 (infer) ${printType(inferred)}`, void 0, typeDescription(inferred, env));
         return;
       }
+      case "ConditionalType":
+        this.walkType(type.check, env);
+        this.walkType(type.target, env);
+        this.walkType(type.consequent, env);
+        this.walkType(type.alternate, env);
+        return;
       case "FunctionType":
         type.params.forEach((param) => this.walkType(param, env));
         this.walkType(type.result, env);
@@ -3689,8 +3916,18 @@ var Analyzer = class {
         return;
       case "MemberAssignment":
         this.walkExpression(expression.object, env, thisType);
+        if (expression.index?.kind === "Literal") {
+          const objectType = inferExpression(expression.object, env);
+          const readonlyArray = objectType.kind === "GenericType" && objectType.name === "ReadonlyArray";
+          const resolved = objectType.kind === "GenericType" && env.get(objectType.name)?.kind === "constructor" ? resolveType(instantiate(env.get(objectType.name).inheritedType, env.get(objectType.name).generics, objectType.args), env) : resolveType(objectType, env);
+          const readonlyMember = resolved.kind === "ObjectType" ? resolved.members.find((member) => member.name === String(expression.index.value) && member.readonly) : resolved.kind === "IntersectionType" ? resolved.types.flatMap((part) => part.kind === "ObjectType" ? part.members : []).find((member) => member.name === String(expression.index.value) && member.readonly) : void 0;
+          if (readonlyArray || readonlyMember) this.addDiagnostic(expression.loc, `Cannot assign to readonly index '${String(expression.index.value)}'.`);
+        }
         if (expression.property) {
           const objectType = inferExpression(expression.object, env);
+          const resolvedObject = resolveType(objectType, env);
+          const readonlyProperty = resolvedObject.kind === "ObjectType" ? resolvedObject.members.find((item) => item.name === expression.property && item.readonly) : void 0;
+          if (readonlyProperty) this.addDiagnostic(expression.propertyLoc ?? expression.loc, `Cannot assign to readonly property '${expression.property}'.`);
           const setter = lookupAccessor(objectType, expression.property, "set", env);
           const member = setter ?? lookupMember(objectType, expression.property, env);
           const code = setter ? `(setter) ${setter.name}(${(setter.params ?? []).map(printParam).join(", ")})` : isFunctionSymbol(member) ? `(method) ${expression.property}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}` : `(property) ${expression.property}: ${printType(member && !isFunctionSymbol(member) ? member : named("any"))}`;
@@ -3703,6 +3940,11 @@ var Analyzer = class {
         const methodEnv = new Map(env);
         this.bind(methodEnv, "this", { kind: "var", mutable: false, type: objectType });
         for (const property of expression.properties) {
+          if (property.typeOnly) {
+            this.walkType(property.indexType, env);
+            this.walkType(property.declaredType, env);
+            continue;
+          }
           if (property.spread) {
             this.walkExpression(property.value, env, thisType);
             continue;
@@ -3796,6 +4038,13 @@ var Analyzer = class {
           this.addHover(expression.property, expression.loc, signature, arrayMethodDescription(nonNullObjectType, expression.property, env));
         } else if (member) {
           this.addHover(expression.property, expression.loc, `(property) ${expression.property}: ${printType(member)}`);
+        } else if (nonNullObjectType.kind === "GenericType" && (env.get(nonNullObjectType.name)?.kind === "constructor" || nonNullObjectType.name === "ReadonlyArray")) {
+          if (expression.loc) this.diagnostics.push({
+            line: expression.loc.line,
+            column: expression.loc.column,
+            length: expression.property.length,
+            message: `Property '${expression.property}' does not exist on type '${printType(nonNullObjectType)}'.`
+          });
         } else if (resolvedObjectType.kind === "UnionType") {
           const missingPart = resolvedObjectType.types.find((part) => !lookupMember(part, expression.property, env));
           if (missingPart && expression.loc) this.diagnostics.push({
@@ -3847,6 +4096,20 @@ var Analyzer = class {
           }
         }
         const directType = expression.callee.kind === "Identifier" ? env.get(expression.callee.name) : void 0;
+        if (directType?.kind === "var" && directType.keyConstraint) {
+          for (const argument of expression.args) {
+            const argumentType = inferGenericExpression(argument.kind === "Spread" ? argument.value : argument, env);
+            if (!isAssignableTo(directType.keyConstraint, argumentType, env)) {
+              const loc = expressionStart(argument);
+              if (loc) this.diagnostics.push({
+                line: loc.line,
+                column: loc.column,
+                length: argument.kind === "Literal" && typeof argument.value === "string" ? argument.value.length + 2 : 1,
+                message: `Type '${printType(argumentType)}' does not satisfy constraint '${printType(directType.keyConstraint)}'.`
+              });
+            }
+          }
+        }
         if (directType?.kind === "type" && directType.generics.length) {
           const inferredType = inferExpression(expression, env);
           const typeArguments = inferredType.kind === "GenericType" ? inferredType.args : [];
@@ -3947,6 +4210,10 @@ var Analyzer = class {
         this.walkExpression(expression.consequent, env, thisType);
         this.walkExpression(expression.alternate, env, thisType);
         return;
+      case "Is":
+        this.walkExpression(expression.value, env, thisType);
+        this.walkType(expression.type, env);
+        return;
     }
   }
   walkFunction(expression, env, contextualType) {
@@ -4007,6 +4274,15 @@ function expressionStart(expression) {
     case "Function":
       return expression.params[0]?.loc;
   }
+}
+function expressionReference(expression) {
+  if (expression.kind === "Identifier") return expression.name;
+  if (expression.kind === "Member") return `${expressionReference(expression.object)}${expression.optional ? "?." : "."}${expression.property}`;
+  if (expression.kind === "Index") {
+    const index = expression.index.kind === "Identifier" ? expression.index.name : expression.index.kind === "Literal" ? JSON.stringify(expression.index.value) : "\u2026";
+    return `${expressionReference(expression.object)}[${index}]`;
+  }
+  return "object";
 }
 function analyze(source, filePath) {
   try {

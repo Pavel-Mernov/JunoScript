@@ -24,6 +24,7 @@ function printType(type: TypeNode, generics: Set<string>): string {
         case 'ArrayType': return `Array<${printType(type.element, generics)}>`
         case 'IndexedAccessType': return `${printType(type.object, generics)}[${printType(type.index, generics)}]`
         case 'TypeOfType': return 'unknown'
+        case 'ConditionalType': return `${printType(type.check, generics)} extends ${printType(type.target, generics)} ? ${printType(type.consequent, generics)} : ${printType(type.alternate, generics)}`
         case 'UnionType': return `(${type.types.map(part => printType(part, generics)).join(' | ')})`
         case 'IntersectionType': return `(${type.types.map(part => printType(part, generics)).join(' & ')})`
         case 'FunctionType': return `(${type.params.map((param, index) => `arg${index}: ${printType(param, generics)}`).join(', ')}) => ${printType(type.result, generics)}`

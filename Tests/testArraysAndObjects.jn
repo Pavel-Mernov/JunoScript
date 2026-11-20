@@ -1,6 +1,5 @@
-import { Array } from 'juno/types'
+import { Array, Range, Tuple } from 'juno:types'
 import { console } from 'juno'
-import { Range } from 'juno/types'
 
 console.log("=== Array and object index tests ===")
 
@@ -108,6 +107,10 @@ console.log('copyWithin', array.copyWithin(0, 2, 4).toArray())
 console.log('splice', array.splice(1, 2, 7, 8), array.toArray())
 console.log('sort', array.sort((left, right) => left - right).toArray())
 console.log('enumerate', array.enumerate())
+const enumerated = array.enumerate()
+const [firstEntry] = enumerated
+const [entryIndex, entryValue] = firstEntry
+console.log('enumerate tuple types', entryIndex, entryValue)
 
 const fromNumbers = Array.from([10, 20, 30])
 const fromStrings = Array.from(['a', 'b', 'c'])
@@ -235,5 +238,44 @@ const pickedArray = pickArraySource.pick(0, 2)
 const omittedArray = pickArraySource.omit(1, 3)
 console.log("array pick:", pickedArray)
 console.log("array omit:", omittedArray)
+
+console.log("=== Readonly and mutable copy tests ===")
+
+const readonlyArrayCopy = [1, 2, 3].asReadonly()
+const mutableArrayCopy = readonlyArrayCopy.asMutable()
+mutableArrayCopy.push(4)
+console.log("readonly array copy:", readonlyArrayCopy)
+console.log("mutable array copy:", mutableArrayCopy)
+
+const readonlyObjectCopy = { name: "Ada", age: 36 }.asReadonly()
+const mutableObjectCopy = readonlyObjectCopy.asMutable()
+mutableObjectCopy.name = "Grace"
+mutableObjectCopy.age = 37
+console.log("readonly object copy:", readonlyObjectCopy)
+console.log("mutable object copy:", mutableObjectCopy)
+
+const typedTuple = Tuple("first", 2, true)
+const tupleString = typedTuple[0]
+const tupleNumber = typedTuple[1]
+const tupleBoolean = typedTuple[2]
+console.log("typed readonly tuple:", tupleString, tupleNumber, tupleBoolean, typedTuple.length)
+
+const [arrayFirst, , arrayThird, ...arrayRest] = [10, 20, 30, 40, 50]
+console.log("array destructuring:", arrayFirst, arrayThird, arrayRest)
+
+let [mutableFirst, ...mutableRest] = [1, 2, 3]
+mutableFirst = 10
+mutableRest.push(4)
+console.log("mutable array destructuring:", mutableFirst, mutableRest)
+
+const [destructuredText, destructuredNumber,] = typedTuple
+const [_, ...tupleRest] = typedTuple
+console.log("tuple destructuring:", destructuredText, destructuredNumber, tupleRest)
+
+# Negative readonly checks. Uncomment one at a time to inspect diagnostics.
+# readonlyArrayCopy.push(4)
+# readonlyObjectCopy.name = "Changed"
+# typedTuple.push("extra")
+# typedTuple[0] = "changed"
 
 console.log("=== Array and object index tests complete ===")

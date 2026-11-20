@@ -30,13 +30,14 @@ export type { Iterable } from './juno-types'
 export const modules = {
     juno,
     'juno:node': junoNode,
+    'juno:types': types,
     types
 } as const
 
 export type ModuleName = keyof typeof modules
 
 export function resolveModule(name: string): (typeof modules)[ModuleName] {
-    if (name !== 'juno' && name !== 'juno:node' && name !== 'types') {
+    if (name !== 'juno' && name !== 'juno:node' && name !== 'juno:types' && name !== 'types') {
         throw new Error(`Unknown JunoScript module '${name}'`)
     }
     return modules[name]

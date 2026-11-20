@@ -1,5 +1,5 @@
 import { console } from 'juno:node'
-import { KeyOf, Exclude } from 'types'
+import { KeyOf, Exclude } from 'juno:types'
 
 fun identity<T is string | number = string>(value: T): T =
     return value
@@ -128,3 +128,17 @@ console.log('Box indexed inference:', val, isType<T>(val), isType<ValueFromType>
 const pickedBox = b.pick('value')
 const omittedBox = b.omit('value')
 console.log('pick/omit inference:', pickedBox.value, omittedBox.has('value'))
+
+const person = {
+    name: 'Paul',
+    lastName: 'Mernov'
+}
+
+const omitFunction = person.omit
+
+console.log('omit function result:', omitFunction('name'))
+
+const pickFunction = person.pick
+
+console.log('pick function result:', pickFunction('name'))
+console.log('pick function result:', pickFunction('f'))

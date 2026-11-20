@@ -1,0 +1,11 @@
+import { Iterable } from './iterable'
+import { Range } from './range'
+import { Array } from './array'
+import { Items, Omit, Readonly } from 'juno:types'
+
+type OmitFields = 'push' | 'pop' | 'shift' | 'unshift' | 'reverse' | 'sort' | 'fill' | 'slice' | 'splice' | 'copyWithin'
+
+export constructor Tuple<T is any[]> : Readonly<T> & Omit<Array<T[number]>, OmitFields> {
+    fun (...items : T): Tuple<T> = 
+        return Array.of(...items).omit(...Items<OmitFields>()).asReadonly()
+}

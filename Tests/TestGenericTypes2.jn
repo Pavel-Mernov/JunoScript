@@ -1,4 +1,4 @@
-import { Partial, Required, Readonly, Pick, Omit } from 'types'
+import { Partial, Required, Readonly, Pick, Omit } from 'juno:types'
 import { console } from 'juno:node'
 
 type User = {

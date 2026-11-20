@@ -34,7 +34,7 @@ export type SemanticTokenInfo = {
 }
 
 type SymbolInfo =
-    | { kind: 'var'; mutable: boolean; type: TypeNode; docs?: string }
+    | { kind: 'var'; mutable: boolean; type: TypeNode; docs?: string; keyConstraint?: TypeNode }
     | { kind: 'fun'; generics?: string[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params: Parameter[]; returnType: TypeNode; docs?: string }
     | { kind: 'type'; generics: string[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; value: TypeNode; docs?: string }
     | { kind: 'constructor'; generics: string[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; inheritedType: TypeNode; overloads: { params: Parameter[]; returnType: TypeNode }[]; methods: { name: string; generics: string[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params: Parameter[]; returnType: TypeNode }[]; docs?: string }
@@ -94,8 +94,8 @@ function typeUtilitiesType(): TypeNode {
     }
 }
 
-function moduleType(module: 'juno' | 'juno:node' | 'types'): TypeNode {
-    if (module === 'types') return typeUtilitiesType()
+function moduleType(module: 'juno' | 'juno:node' | 'juno:types' | 'types'): TypeNode {
+    if (module === 'juno:types' || module === 'types') return typeUtilitiesType()
     return { kind: 'ObjectType', members: [field('console', consoleType(), true), ...(module === 'juno' ? [field('Math', mathType(), true), field('types', typeUtilitiesType(), true)] : [])] }
 }
 
@@ -123,6 +123,7 @@ export function printType(type: TypeNode): string {
         case 'GenericType': return `${type.name}<${type.args.map(printType).join(', ')}>`
         case 'IndexedAccessType': return `${printType(type.object)}[${printType(type.index)}]`
         case 'TypeOfType': return `typeof<…>`
+        case 'ConditionalType': return `${printType(type.check)} is ${printType(type.target)} ? ${printType(type.consequent)} : ${printType(type.alternate)}`
         case 'UnionType': return type.types.map(printType).join(' | ')
         case 'IntersectionType': return type.types.map(printType).join(' & ')
         case 'ArrayType': {
@@ -200,7 +201,8 @@ function printSymbol(name: string, symbol: SymbolInfo): { code: string; docs?: s
         case 'module': return { code: `import ${name} from '${symbol.module}'`, docs: symbol.docs }
         case 'constructor': {
             const generics = printGenerics(symbol.generics, symbol.genericConstraints, symbol.genericDefaults)
-            const overloads = symbol.overloads.map(item => `constructor ${name}${generics}(${item.params.map(printParam).join(', ')}): ${name}${generics}`)
+            const resultType = symbol.generics.length ? `${name}<${symbol.generics.join(', ')}>` : name
+            const overloads = symbol.overloads.map(item => `constructor ${name}${generics}(${item.params.map(printParam).join(', ')}): ${resultType}`)
             const methods = symbol.methods.map(method => `${name}.${method.name}${printGenerics(method.generics, method.genericConstraints, method.genericDefaults)}(${method.params.map(printParam).join(', ')}): ${printType(method.returnType)}`)
             return { code: [...overloads, ...methods].join('\n'), docs: symbol.docs }
         }
@@ -215,6 +217,7 @@ function instantiate(type: TypeNode, generics: string[], args: TypeNode[], defau
         if (node.kind === 'UnionType' || node.kind === 'IntersectionType') return { ...node, types: node.types.map(replace) }
         if (node.kind === 'ArrayType') return { ...node, element: replace(node.element) }
         if (node.kind === 'IndexedAccessType') return { ...node, object: replace(node.object), index: replace(node.index) }
+        if (node.kind === 'ConditionalType') return { ...node, check: replace(node.check), target: replace(node.target), consequent: replace(node.consequent), alternate: replace(node.alternate) }
         if (node.kind === 'FunctionType') return { ...node, params: node.params.map(replace), result: replace(node.result) }
         if (node.kind === 'ObjectType') return { ...node, members: node.members.map(member => ({ ...member, type: replace(member.type), indexType: member.indexType ? replace(member.indexType) : undefined, params: member.params?.map(param => ({ ...param, type: param.type ? replace(param.type) : undefined })) })) }
         return node
@@ -294,6 +297,12 @@ function resolveType(type: TypeNode, env: Env): TypeNode {
         return env.get('Array')?.kind === 'constructor' ? { kind: 'GenericType', name: 'Array', args: [element] } : { ...type, element }
     }
     if (type.kind === 'TypeOfType') return resolveType(inferExpression(type.expression, env), env)
+    if (type.kind === 'ConditionalType') {
+        const check = resolveType(type.check, env)
+        const target = resolveType(type.target, env)
+        if (check.kind === 'UnionType') return unionOf(check.types.map(part => isAssignableTo(target, part, env) ? resolveType(type.consequent, env) : resolveType(type.alternate, env)))
+        return resolveType(isAssignableTo(target, check, env) ? type.consequent : type.alternate, env)
+    }
     if (type.kind === 'IndexedAccessType') return indexedAccessType(type.object, type.index, env) ?? named('any')
     if (type.kind === 'ObjectType') return { ...type, members: type.members.flatMap(member => {
         const indexType = member.indexType ? resolveType(member.indexType, env) : undefined
@@ -330,8 +339,23 @@ function indexKeyParts(type: TypeNode, env: Env): TypeNode[] {
     return resolved.kind === 'UnionType' ? resolved.types.flatMap(part => indexKeyParts(part, env)) : [resolved]
 }
 
+function tupleShape(elements: TypeNode[], readonly = true): TypeNode {
+    const element = elements.length ? unionOf(elements) : named('never')
+    return { kind: 'ObjectType', members: [
+        ...elements.map((type, index): TypeMember => ({ name: String(index), type, optional: false, readonly, constant: false })),
+        { name: 'index', indexType: named('number'), type: element, optional: false, readonly, constant: false },
+        { name: 'length', type: { kind: 'LiteralType', value: elements.length }, optional: false, readonly: true, constant: false },
+        { name: 'toArray', type: arrayOf(element), optional: false, readonly, constant: false, method: true, params: [] }
+    ] }
+}
+
 function indexedAccessType(objectType: TypeNode, keyType: TypeNode, env: Env): TypeNode | undefined {
-    const object = removeNull(resolveType(objectType, env))
+    let object = removeNull(resolveType(objectType, env))
+    if (object.kind === 'GenericType' && object.name === 'Tuple' && object.args[0]?.kind !== 'ObjectType') object = tupleShape(object.args)
+    if (object.kind === 'GenericType') {
+        const constructor = env.get(object.name)
+        if (constructor?.kind === 'constructor') object = removeNull(resolveType(instantiate(constructor.inheritedType, constructor.generics, object.args, constructor.genericDefaults), env))
+    }
     const keys = indexKeyParts(keyType, env)
     const result: TypeNode[] = []
     const addMember = (owner: TypeNode, key: string): boolean => {
@@ -342,6 +366,7 @@ function indexedAccessType(objectType: TypeNode, keyType: TypeNode, env: Env): T
     }
     const collect = (owner: TypeNode): boolean => {
         if (owner.kind === 'UnionType') return owner.types.every(collect)
+        if (owner.kind === 'IntersectionType') return owner.types.some(collect)
         const arrayLike = owner.kind === 'ArrayType' || owner.kind === 'GenericType' && (owner.name === 'Array' || owner.name === 'ReadonlyArray')
         const element = owner.kind === 'ArrayType' ? owner.element : owner.kind === 'GenericType' ? owner.args[0] ?? named('any') : undefined
         if (arrayLike) return keys.every(key => {
@@ -359,6 +384,8 @@ function indexedAccessType(objectType: TypeNode, keyType: TypeNode, env: Env): T
                 return false
             }
             if (isNamedType(key, 'number')) {
+                const signature = owner.members.find(member => member.indexType && isAssignableTo(member.indexType, key, env))
+                if (signature) { result.push(signature.type); return true }
                 const numeric = owner.members.filter(member => member.name !== '' && Number.isFinite(Number(member.name)) && String(Number(member.name)) === member.name)
                 if (!numeric.length) return false
                 result.push(...numeric.map(member => member.type))
@@ -371,6 +398,27 @@ function indexedAccessType(objectType: TypeNode, keyType: TypeNode, env: Env): T
         return false
     }
     return collect(object) && result.length ? unionOf(result) : undefined
+}
+
+function arrayDestructureRestType(sourceType: TypeNode, start: number, env: Env): TypeNode {
+    if (sourceType.kind === 'GenericType' && sourceType.name === 'Tuple' && sourceType.args[0]?.kind !== 'ObjectType') {
+        return tupleShape(sourceType.args.slice(start), false)
+    }
+    if (sourceType.kind === 'GenericType' && sourceType.name === 'Tuple' && sourceType.args[0]?.kind === 'ObjectType') {
+        const tuple = sourceType.args[0]
+        const entries = tuple.members
+            .filter(member => member.name !== '' && Number.isInteger(Number(member.name)) && Number(member.name) >= start)
+            .sort((left, right) => Number(left.name) - Number(right.name))
+        const element = entries.length ? unionOf(entries.map(member => member.type)) : named('never')
+        return { kind: 'ObjectType', members: [
+            ...entries.map((member, index): TypeMember => ({ ...member, name: String(index), readonly: false })),
+            { name: 'index', indexType: named('number'), type: element, optional: false, readonly: false, constant: false },
+            { name: 'length', type: { kind: 'LiteralType', value: entries.length }, optional: false, readonly: true, constant: false },
+            { name: 'toArray', type: arrayOf(element), optional: false, readonly: false, constant: false, method: true, params: [] }
+        ] }
+    }
+    const element = iterableElementType(sourceType, env)
+    return arrayOf(element)
 }
 
 function callableType(type: TypeNode, env: Env): Extract<TypeNode, { kind: 'FunctionType' }> | undefined {
@@ -390,6 +438,19 @@ function callableType(type: TypeNode, env: Env): Extract<TypeNode, { kind: 'Func
 }
 
 function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | FunctionSymbol | undefined {
+    if (type.kind === 'GenericType' && type.name === 'Tuple' && type.args[0]?.kind !== 'ObjectType') return lookupMember(tupleShape(type.args), name, env)
+    if (name === 'asReadonly' || name === 'asMutable') {
+        const rawElement = type.kind === 'ArrayType'
+            ? type.element
+            : type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray')
+                ? type.args[0] ?? named('any')
+                : undefined
+        if (rawElement) return {
+            kind: 'fun', params: [],
+            returnType: { kind: 'GenericType', name: name === 'asReadonly' ? 'ReadonlyArray' : 'Array', args: [rawElement] },
+            ownerType: type
+        }
+    }
     if (type.kind === 'NamedType') {
         const constructor = env.get(type.name)
         if (constructor?.kind === 'constructor') {
@@ -418,13 +479,35 @@ function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | Functi
         }
     }
     const resolved = resolveType(type, env)
+    if (resolved.kind === 'GenericType' && resolved.name === 'ReadonlyArray' && ['copyWithin', 'fill', 'pop', 'push', 'reverse', 'shift', 'sort', 'splice', 'unshift'].includes(name)) return undefined
     if (name === 'isType') return { kind: 'fun', params: [], returnType: named('boolean') }
+    if (name === 'asReadonly' || name === 'asMutable') {
+        let result: TypeNode = resolved
+        if (resolved.kind === 'ArrayType') result = name === 'asReadonly' ? { kind: 'GenericType', name: 'ReadonlyArray', args: [resolved.element] } : resolved
+        else if (resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray')) {
+            result = { kind: 'GenericType', name: name === 'asReadonly' ? 'ReadonlyArray' : 'Array', args: resolved.args }
+        } else if (resolved.kind === 'ObjectType') {
+            result = { ...resolved, members: resolved.members.map(member => ({ ...member, readonly: name === 'asReadonly' })) }
+        }
+        return { kind: 'fun', params: [], returnType: result, ownerType: resolved }
+    }
     if ((name === 'pick' || name === 'omit') && (resolved.kind === 'ObjectType' || resolved.kind === 'ArrayType' || resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray'))) {
         const keys = resolveType({ kind: 'GenericType', name: 'KeyOf', args: [resolved] }, env)
+        const selectedKeys: TypeNode = name === 'pick'
+            ? named('T')
+            : { kind: 'GenericType', name: 'Exclude', args: [{ kind: 'GenericType', name: 'KeyOf', args: [resolved] }, named('T')] }
+        const result: TypeNode = {
+            kind: 'ObjectType',
+            members: [{
+                name: 'key', indexType: selectedKeys,
+                type: { kind: 'IndexedAccessType', object: resolved, index: named('key') },
+                optional: false, readonly: false, constant: false
+            }]
+        }
         return {
             kind: 'fun', generics: ['T'], genericConstraints: [keys],
             params: [{ name: 'keys', type: arrayOf(named('T')), rest: true }],
-            returnType: named('any'), ownerType: resolved
+            returnType: result, ownerType: resolved
         }
     }
     if (isNamedType(resolved, 'string')) {
@@ -706,6 +789,12 @@ function isAssignableTo(expected: TypeNode, actual: TypeNode, env: Env): boolean
         return target.name === (typeof value.value === 'string' ? 'string' : typeof value.value)
     }
     if (target.kind === 'ArrayType' && value.kind === 'ArrayType') return isAssignableTo(target.element, value.element, env)
+    if (target.kind === 'ArrayType' && value.kind === 'GenericType' && value.name === 'Tuple') return value.args.every(element => isAssignableTo(target.element, element, env))
+    if (target.kind === 'ArrayType' && value.kind === 'ObjectType') {
+        const numeric = value.members.filter(member => member.indexType && isAssignableTo(member.indexType, named('number'), env)
+            || member.name !== '' && Number.isFinite(Number(member.name)) && String(Number(member.name)) === member.name)
+        return numeric.length > 0 && numeric.every(member => isAssignableTo(target.element, member.type, env))
+    }
     if (target.kind === 'FunctionType') {
         const callable = callableType(value, env)
         return Boolean(callable
@@ -857,10 +946,10 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
     if (!filePath) return result
     for (const statement of statements) {
         const importedStatement = statement.kind === 'Import' ? statement : statement.kind === 'Export' && statement.declaration.kind === 'Import' ? statement.declaration : undefined
-        if (!importedStatement || (!importedStatement.module.startsWith('.') && importedStatement.module !== 'juno/types' && !importedStatement.module.startsWith('juno/types/'))) continue
+        if (!importedStatement || (!importedStatement.module.startsWith('.') && importedStatement.module !== 'juno:types' && importedStatement.module !== 'juno/types' && !importedStatement.module.startsWith('juno/types/'))) continue
         let base: string
-        if (importedStatement.module === 'juno/types' || importedStatement.module.startsWith('juno/types/')) {
-            const relativeModule = importedStatement.module === 'juno/types' ? 'index' : importedStatement.module.slice('juno/types/'.length)
+        if (importedStatement.module === 'juno:types' || importedStatement.module === 'juno/types' || importedStatement.module.startsWith('juno/types/')) {
+            const relativeModule = importedStatement.module === 'juno:types' || importedStatement.module === 'juno/types' ? 'index' : importedStatement.module.slice('juno/types/'.length)
             let directory = path.dirname(path.resolve(filePath))
             let found: string | undefined
             while (true) {
@@ -1009,6 +1098,20 @@ function inferGenericArguments(generics: string[], params: Parameter[], args: Ex
     params.forEach((param, index) => {
         if (param.rest) {
             const restType = parameterType(param)
+            if (restType.kind === 'NamedType' && generics.includes(restType.name)) {
+                const elements = args.slice(index).map(arg => inferExpression(arg, env))
+                const element = elements.length ? unionOf(elements) : named('any')
+                inferred.set(restType.name, {
+                    kind: 'ObjectType',
+                    members: [
+                        ...elements.map((type, itemIndex): TypeMember => ({ name: String(itemIndex), type, optional: false, readonly: true, constant: false })),
+                        { name: 'index', indexType: named('number'), type: element, optional: false, readonly: true, constant: false },
+                        { name: 'length', type: { kind: 'LiteralType', value: elements.length }, optional: false, readonly: true, constant: false },
+                        { name: 'toArray', type: arrayOf(element), optional: false, readonly: true, constant: false, method: true, params: [] }
+                    ]
+                })
+                return
+            }
             const element = restType.kind === 'ArrayType' ? restType.element : restType.kind === 'GenericType' && restType.name === 'Array' ? restType.args[0] : undefined
             if (element && args.length > index) {
                 const actuals = args.slice(index).map(arg => inferGenericExpression(arg, env))
@@ -1084,6 +1187,7 @@ function removeNull(type: TypeNode): TypeNode {
 
 function iterableElementType(type: TypeNode, env: Env): TypeNode {
     const resolved = resolveType(type, env)
+    if (resolved.kind === 'GenericType' && resolved.name === 'Tuple' && resolved.args[0]?.kind !== 'ObjectType') return unionOf(resolved.args)
     if (resolved.kind === 'ArrayType') return resolved.element
     if (resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray')) {
         return resolved.args[0] ?? named('any')
@@ -1117,6 +1221,15 @@ function iterableElementType(type: TypeNode, env: Env): TypeNode {
 }
 
 function spreadElementType(type: TypeNode, env: Env): TypeNode | undefined {
+    if (type.kind === 'NamedType') {
+        const symbol = env.get(type.name)
+        if (symbol?.kind === 'type') {
+            const constraint = resolveType(symbol.value, env)
+            if (constraint.kind === 'ArrayType' || constraint.kind === 'GenericType' && (constraint.name === 'Array' || constraint.name === 'ReadonlyArray')) {
+                return { kind: 'IndexedAccessType', object: type, index: named('number') }
+            }
+        }
+    }
     const resolved = resolveType(type, env)
     if (isNamedType(resolved, 'any')) return named('any')
     if (isNamedType(resolved, 'string')) return named('string')
@@ -1258,6 +1371,10 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             // Build the object's shape before inferring methods so `this` inside a
             // method can resolve both fields and other methods on the object.
             const members: TypeMember[] = expression.properties.flatMap(property => {
+                if (property.typeOnly && property.indexType && property.declaredType) return [{
+                    name: property.key, loc: property.keyLoc, indexType: property.indexType, type: property.declaredType,
+                    optional: false, readonly: Boolean(property.readonly), constant: false
+                }]
                 if (property.spread) {
                     const spread = resolveType(inferExpression(property.value, env), env)
                     const members = (type: TypeNode): TypeMember[] => {
@@ -1303,6 +1420,7 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
         case 'Unary': return expression.operator === 'postfix!' ? removeNull(inferExpression(expression.operand, env)) : expression.operator.endsWith('++') || expression.operator.endsWith('--') ? inferExpression(expression.operand, env) : expression.operator === '-' ? named('number') : named('boolean')
         case 'Conditional':
             return unionOf([inferExpression(expression.consequent, env), inferExpression(expression.alternate, env)])
+        case 'Is': return named('boolean')
         case 'Binary': {
             const left = inferExpression(expression.left, env)
             const right = inferExpression(expression.right, env)
@@ -1320,7 +1438,16 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             const member = lookupMember(nonNullObjectType, expression.property, env)
             if (!member) return resolvedObjectType.kind === 'ObjectType' ? named('null') : named('any')
             const memberType = isFunctionSymbol(member)
-                ? { kind: 'FunctionType', params: member.params.map(parameterType), result: member.returnType } as TypeNode
+                ? (() => {
+                    const genericArguments = member.generics?.map((name, index) => member.genericConstraints?.[index] ?? named(name))
+                    const parameters = genericArguments
+                        ? member.params.map(param => instantiate(parameterType(param), member.generics!, genericArguments))
+                        : member.params.map(parameterType)
+                    const result = genericArguments
+                        ? instantiate(member.returnType, member.generics!, genericArguments)
+                        : member.returnType
+                    return { kind: 'FunctionType', params: parameters, result } as TypeNode
+                })()
                 : member
             return expression.optional ? unionOf([memberType, named('null')]) : memberType
         }
@@ -1495,9 +1622,13 @@ function compactType(type: TypeNode, depth = 0): string {
         case 'NamedType': return type.name
         case 'LiteralType': return typeof type.value === 'string' ? JSON.stringify(type.value) : String(type.value)
         case 'GenericType': return `${type.name}<${type.args.map(argument => compactType(argument, depth)).join(', ')}>`
-        case 'ArrayType': return `${compactType(type.element, depth)}[]`
+        case 'ArrayType': {
+            const element = compactType(type.element, depth)
+            return `${type.element.kind === 'UnionType' || type.element.kind === 'IntersectionType' || type.element.kind === 'FunctionType' ? `(${element})` : element}[]`
+        }
         case 'IndexedAccessType': return `${compactType(type.object, depth)}[${compactType(type.index, depth)}]`
         case 'TypeOfType': return 'typeof<…>'
+        case 'ConditionalType': return `${compactType(type.check, depth)} extends ${compactType(type.target, depth)} ? ${compactType(type.consequent, depth)} : ${compactType(type.alternate, depth)}`
         case 'UnionType': return type.types.map(part => compactType(part, depth)).join(' | ')
         case 'IntersectionType': return type.types.map(part => compactType(part, depth)).join(' & ')
         case 'FunctionType': return `(${type.params.map((parameter, index) => `arg${index}: ${compactType(parameter, depth)}`).join(', ')}) => ${compactType(type.result, depth)}`
@@ -1526,7 +1657,13 @@ function symbolTypeDescription(name: string, symbol: SymbolInfo, env: Env): stri
     if (symbol.kind === 'constructor') return typeDescription(named(name), env)
     if (symbol.kind === 'var') return typeDescription(symbol.type, env)
     if (symbol.kind === 'type') return typeDescription(symbol.value, env)
-    if (symbol.kind === 'fun') return typeDescription(functionType(symbol.params, symbol.returnType), env)
+    if (symbol.kind === 'fun') {
+        const generics = symbol.generics?.length
+            ? `<${symbol.generics.map((generic, index) => `${generic}${symbol.genericConstraints?.[index] ? ` extends ${compactType(symbol.genericConstraints[index]!)}` : ''}`).join(', ')}>`
+            : ''
+        const params = symbol.params.map((param, index) => `${param.rest ? '...' : ''}${param.name || `arg${index}`}: ${compactType(parameterType(param))}`).join(', ')
+        return `${generics}(${params}) => ${compactType(symbol.returnType)}`
+    }
     return undefined
 }
 
@@ -1701,7 +1838,7 @@ class Analyzer {
             case 'Import': {
                 const imported = statement.module === 'juno:node'
                     ? 'Node.js helpers for JunoScript (`console.args`, `console.read`, `console.readLines`).'
-                    : statement.module === 'types' ? 'Runtime type utilities for transforming Juno type declarations.' : 'Standard JunoScript module. `console` mirrors the host console.'
+                    : statement.module === 'juno:types' || statement.module === 'types' ? 'Runtime type utilities for transforming Juno type declarations.' : 'Standard JunoScript module. `console` mirrors the host console.'
                 if (statement.defaultImport) {
                     const symbol: SymbolInfo = { kind: 'module', module: statement.module, docs: imported }
                     this.bind(env, statement.defaultImport, symbol)
@@ -1711,12 +1848,15 @@ class Analyzer {
                 statement.namedImports.forEach((name, index) => {
                     const importedAlias = statement.importedTypes?.[name]
                     const importedSymbol = statement.importedSymbols?.[name]
+                    const itemsImport = name === 'Items' && (statement.module === 'juno:types' || statement.module === 'types')
                     const type = importedAlias ? resolveType(importedAlias, env) : importedSymbol?.kind === 'var' ? importedSymbol.type ?? named('any') : name === 'console' ? consoleType()
                         : name === 'Math' && statement.module === 'juno' ? mathType()
                         : name === 'types' && statement.module === 'juno' ? typeUtilitiesType()
-                        : statement.module === 'types' && ['Partial', 'Required', 'Readonly', 'Pick', 'Omit', 'KeyOf', 'Exclude'].includes(name) ? typeUtilitiesType().kind === 'ObjectType' ? typeUtilitiesType().members.find(member => member.name === name)?.type ?? named('any') : named('any')
+                        : (statement.module === 'juno:types' || statement.module === 'types') && ['Partial', 'Required', 'Readonly', 'Pick', 'Omit', 'KeyOf', 'Exclude'].includes(name) ? typeUtilitiesType().kind === 'ObjectType' ? typeUtilitiesType().members.find(member => member.name === name)?.type ?? named('any') : named('any')
                         : named('any')
-                    const symbol: SymbolInfo = importedSymbol?.kind === 'fun'
+                    const symbol: SymbolInfo = itemsImport
+                        ? { kind: 'fun', generics: ['T'], genericConstraints: [{ kind: 'UnionType', types: [named('string'), named('number')] }], params: [], returnType: arrayOf(named('T')), docs: 'Creates an array from a union of string or number literal types.' }
+                        : importedSymbol?.kind === 'fun'
                         ? { kind: 'fun', generics: importedSymbol.generics, genericConstraints: importedSymbol.genericConstraints, genericDefaults: importedSymbol.genericDefaults, params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named('any'), docs: imported }
                         : importedSymbol?.kind === 'constructor' && importedSymbol.inheritedType && importedSymbol.overloads
                             ? { kind: 'constructor', generics: importedSymbol.generics ?? [], genericConstraints: importedSymbol.genericConstraints, genericDefaults: importedSymbol.genericDefaults, inheritedType: importedSymbol.inheritedType, overloads: importedSymbol.overloads, methods: (importedSymbol.methods ?? []).map(method => ({ ...method, generics: method.generics ?? [] })), docs: imported }
@@ -1742,9 +1882,9 @@ class Analyzer {
                 this.walkType(statement.value, env)
                 const resolved = resolveType(statement.value, env)
                 const printed = {
-                    code: `type ${statement.name}${printGenerics(statement.generics, statement.genericConstraints, statement.genericDefaults)}${statement.generics.length ? '' : `\n(infer) ${printType(resolved)}`}`
+                    code: `type ${statement.name}${printGenerics(statement.generics, statement.genericConstraints, statement.genericDefaults)} = ${printType(statement.value)}${statement.generics.length ? '' : `\n(infer) ${printType(resolved)}`}`
                 }
-                this.addHover(statement.name, statement.loc, printed.code, undefined, typeDescription(resolved, env))
+                this.addHover(statement.name, statement.loc, printed.code, undefined, statement.generics.length ? compactType(statement.value) : typeDescription(resolved, env))
                 statement.generics.forEach((name, index) => {
                     this.addHover(name, statement.genericLocs?.[index], `(type parameter) ${name}`)
                     const constraint = statement.genericConstraints?.[index]
@@ -1797,13 +1937,25 @@ class Analyzer {
                 } else if (statement.type && statement.initializer && !isAssignableTo(statement.type, inferExpression(statement.initializer, env), env)) {
                     this.addDiagnostic(statement.initializer.loc, `Type '${printType(inferExpression(statement.initializer, env))}' is not assignable to type '${printType(statement.type)}'.`)
                 }
-                const symbol: SymbolInfo = { kind: 'var', mutable: statement.mutable, type: statement.type ?? type }
+                const keyConstraint = statement.initializer?.kind === 'Member' && (statement.initializer.property === 'pick' || statement.initializer.property === 'omit')
+                    ? resolveType({ kind: 'GenericType', name: 'KeyOf', args: [inferExpression(statement.initializer.object, env)] }, env)
+                    : undefined
+                const symbol: SymbolInfo = { kind: 'var', mutable: statement.mutable, type: statement.type ?? type, keyConstraint }
                 this.bind(env, statement.name, symbol)
                 const printed = printSymbol(statement.name, symbol)
+                let description = symbolTypeDescription(statement.name, symbol, env)
+                if (statement.initializer?.kind === 'Member' && (statement.initializer.property === 'pick' || statement.initializer.property === 'omit')) {
+                    const owner = expressionReference(statement.initializer.object)
+                    const key = statement.initializer.property === 'pick'
+                        ? 'T'
+                        : `Exclude<KeyOf<typeof<${owner}>>, T>`
+                    printed.code = `const ${statement.name}: <T is KeyOf<typeof<${owner}>>>(T[]) -> {\n    [key: ${key}]: typeof<${owner}[key]>\n}`
+                    description = `<T extends KeyOf<typeof<${owner}>>>(arg0: T[]) => {\n  [key: ${key}]: typeof<${owner}[key]>;\n}`
+                }
                 if (statement.type && isNamedType(resolveType(statement.type, env), 'any') && statement.initializer) {
                     printed.code += `\n(infer) ${printType(inferExpression(statement.initializer, env))}`
                 }
-                this.addHover(statement.name, statement.loc, printed.code, undefined, symbolTypeDescription(statement.name, symbol, env))
+                this.addHover(statement.name, statement.loc, printed.code, undefined, description)
                 this.addTypeHint(statement.loc, statement.name, Boolean(statement.type), type)
                 if (statement.type) this.walkType(statement.type, env)
                 return
@@ -1819,6 +1971,21 @@ class Analyzer {
                     this.addHover(binding.name, binding.loc, printSymbol(binding.name, symbol).code)
                     this.addTypeHint(binding.loc, binding.name, false, type)
                     if (!member) this.addDiagnostic(binding.loc, `Property '${binding.name}' does not exist on type '${printType(source)}'.`)
+                }
+                return
+            }
+            case 'ArrayDestructure': {
+                this.walkExpression(statement.initializer, env)
+                const source = inferExpression(statement.initializer, env)
+                for (const binding of statement.bindings) {
+                    if (!binding.name || binding.name === '_') continue
+                    const type = binding.rest
+                        ? arrayDestructureRestType(source, binding.index, env)
+                        : indexedAccessType(source, { kind: 'LiteralType', value: binding.index }, env) ?? named('any')
+                    const symbol: SymbolInfo = { kind: 'var', mutable: statement.mutable, type }
+                    this.bind(env, binding.name, symbol)
+                    this.addHover(binding.name, binding.loc, `${statement.mutable ? 'let' : 'const'} ${binding.name}: ${printType(type)}`, undefined, typeDescription(type, env))
+                    this.addTypeHint(binding.loc, binding.name, false, type)
                 }
                 return
             }
@@ -1838,7 +2005,7 @@ class Analyzer {
                 })
                 this.bind(env, statement.name, symbol)
                 const printed = printSymbol(statement.name, symbol)
-                this.addHover(statement.name, statement.loc, printed.code)
+                this.addHover(statement.name, statement.loc, printed.code, undefined, symbolTypeDescription(statement.name, symbol, env))
                 ;(statement.generics ?? []).forEach((name, index) => {
                     this.addHover(name, statement.genericLocs?.[index], `(type parameter) ${name}`)
                     const constraint = statement.genericConstraints?.[index]
@@ -1867,7 +2034,11 @@ class Analyzer {
             case 'ConstructorDeclaration': {
                 this.walkType(statement.inheritedType, env)
                 const constructorEnv = (params: Parameter[]): Env => {
-                    const local = bindInferredParameters(params, env)
+                    const genericEnv = new Map(env)
+                    statement.generics.forEach((name, index) => genericEnv.set(name, {
+                        kind: 'type', generics: [], value: statement.genericConstraints?.[index] ?? statement.genericDefaults?.[index] ?? named('any')
+                    }))
+                    const local = bindInferredParameters(params, genericEnv)
                     if (statement.inheritedType.kind === 'GenericType') {
                         local.set(statement.inheritedType.name, { kind: 'type', generics: [], value: resolveType(statement.inheritedType, env) })
                     }
@@ -1893,7 +2064,8 @@ class Analyzer {
                     }
                     this.statements(overload.body, local)
                     const actual = overloads[index].returnType
-                    if (statement.name !== 'Array' && !isAssignableTo(statement.inheritedType, actual, env)) {
+                    const returnsSelf = actual.kind === 'NamedType' && actual.name === statement.name || actual.kind === 'GenericType' && actual.name === statement.name
+                    if (statement.name !== 'Array' && !returnsSelf && !isAssignableTo(statement.inheritedType, actual, env)) {
                         this.addDiagnostic(statement.loc, `Constructor overload returns '${printType(actual)}', which is not assignable to inherited type '${printType(statement.inheritedType)}'.`)
                     }
                 })
@@ -2012,6 +2184,12 @@ class Analyzer {
                 this.addHover('typeof', type.loc, `type typeof<…>\n(infer) ${printType(inferred)}`, undefined, typeDescription(inferred, env))
                 return
             }
+            case 'ConditionalType':
+                this.walkType(type.check, env)
+                this.walkType(type.target, env)
+                this.walkType(type.consequent, env)
+                this.walkType(type.alternate, env)
+                return
             case 'FunctionType':
                 type.params.forEach(param => this.walkType(param, env))
                 this.walkType(type.result, env)
@@ -2140,8 +2318,26 @@ class Analyzer {
                 return
             case 'MemberAssignment':
                 this.walkExpression(expression.object, env, thisType)
+                if (expression.index?.kind === 'Literal') {
+                    const objectType = inferExpression(expression.object, env)
+                    const readonlyArray = objectType.kind === 'GenericType' && objectType.name === 'ReadonlyArray'
+                    const resolved = objectType.kind === 'GenericType' && env.get(objectType.name)?.kind === 'constructor'
+                        ? resolveType(instantiate((env.get(objectType.name) as Extract<SymbolInfo, { kind: 'constructor' }>).inheritedType, (env.get(objectType.name) as Extract<SymbolInfo, { kind: 'constructor' }>).generics, objectType.args), env)
+                        : resolveType(objectType, env)
+                    const readonlyMember = resolved.kind === 'ObjectType'
+                        ? resolved.members.find(member => member.name === String(expression.index!.value) && member.readonly)
+                        : resolved.kind === 'IntersectionType'
+                            ? resolved.types.flatMap(part => part.kind === 'ObjectType' ? part.members : []).find(member => member.name === String(expression.index!.value) && member.readonly)
+                            : undefined
+                    if (readonlyArray || readonlyMember) this.addDiagnostic(expression.loc, `Cannot assign to readonly index '${String(expression.index.value)}'.`)
+                }
                 if (expression.property) {
                     const objectType = inferExpression(expression.object, env)
+                    const resolvedObject = resolveType(objectType, env)
+                    const readonlyProperty = resolvedObject.kind === 'ObjectType'
+                        ? resolvedObject.members.find(item => item.name === expression.property && item.readonly)
+                        : undefined
+                    if (readonlyProperty) this.addDiagnostic(expression.propertyLoc ?? expression.loc, `Cannot assign to readonly property '${expression.property}'.`)
                     const setter = lookupAccessor(objectType, expression.property, 'set', env)
                     const member = setter ?? lookupMember(objectType, expression.property, env)
                     const code = setter
@@ -2158,6 +2354,11 @@ class Analyzer {
                 const methodEnv = new Map(env)
                 this.bind(methodEnv, 'this', { kind: 'var', mutable: false, type: objectType })
                 for (const property of expression.properties) {
+                    if (property.typeOnly) {
+                        this.walkType(property.indexType!, env)
+                        this.walkType(property.declaredType!, env)
+                        continue
+                    }
                     if (property.spread) {
                         this.walkExpression(property.value, env, thisType)
                         continue
@@ -2258,6 +2459,13 @@ class Analyzer {
                     this.addHover(expression.property, expression.loc, signature, arrayMethodDescription(nonNullObjectType, expression.property, env))
                 } else if (member) {
                     this.addHover(expression.property, expression.loc, `(property) ${expression.property}: ${printType(member)}`)
+                } else if (nonNullObjectType.kind === 'GenericType' && (env.get(nonNullObjectType.name)?.kind === 'constructor' || nonNullObjectType.name === 'ReadonlyArray')) {
+                    if (expression.loc) this.diagnostics.push({
+                        line: expression.loc.line,
+                        column: expression.loc.column,
+                        length: expression.property.length,
+                        message: `Property '${expression.property}' does not exist on type '${printType(nonNullObjectType)}'.`
+                    })
                 } else if (resolvedObjectType.kind === 'UnionType') {
                     const missingPart = resolvedObjectType.types.find(part => !lookupMember(part, expression.property, env))
                     if (missingPart && expression.loc) this.diagnostics.push({
@@ -2307,6 +2515,20 @@ class Analyzer {
                     }
                 }
                 const directType = expression.callee.kind === 'Identifier' ? env.get(expression.callee.name) : undefined
+                if (directType?.kind === 'var' && directType.keyConstraint) {
+                    for (const argument of expression.args) {
+                        const argumentType = inferGenericExpression(argument.kind === 'Spread' ? argument.value : argument, env)
+                        if (!isAssignableTo(directType.keyConstraint, argumentType, env)) {
+                            const loc = expressionStart(argument)
+                            if (loc) this.diagnostics.push({
+                                line: loc.line,
+                                column: loc.column,
+                                length: argument.kind === 'Literal' && typeof argument.value === 'string' ? argument.value.length + 2 : 1,
+                                message: `Type '${printType(argumentType)}' does not satisfy constraint '${printType(directType.keyConstraint)}'.`
+                            })
+                        }
+                    }
+                }
                 if (directType?.kind === 'type' && directType.generics.length) {
                     const inferredType = inferExpression(expression, env)
                     const typeArguments = inferredType.kind === 'GenericType' ? inferredType.args : []
@@ -2416,6 +2638,10 @@ class Analyzer {
             this.walkExpression(expression.consequent, env, thisType)
             this.walkExpression(expression.alternate, env, thisType)
             return
+        case 'Is':
+            this.walkExpression(expression.value, env, thisType)
+            this.walkType(expression.type, env)
+            return
         }
     }
 
@@ -2480,6 +2706,20 @@ function expressionStart(expression: Expression): Loc | undefined {
         case 'Function':
             return expression.params[0]?.loc
     }
+}
+
+function expressionReference(expression: Expression): string {
+    if (expression.kind === 'Identifier') return expression.name
+    if (expression.kind === 'Member') return `${expressionReference(expression.object)}${expression.optional ? '?.' : '.'}${expression.property}`
+    if (expression.kind === 'Index') {
+        const index = expression.index.kind === 'Identifier'
+            ? expression.index.name
+            : expression.index.kind === 'Literal'
+                ? JSON.stringify(expression.index.value)
+                : '…'
+        return `${expressionReference(expression.object)}[${index}]`
+    }
+    return 'object'
 }
 
 export function analyze(source: string, filePath?: string): { hovers: HoverInfo[]; hints: InlayHintInfo[]; diagnostics: DiagnosticInfo[]; semanticTokens: SemanticTokenInfo[] } | undefined {

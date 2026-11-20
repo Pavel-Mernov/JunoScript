@@ -118,5 +118,8 @@ export const Omit = (input: unknown, keys: unknown) => {
     return descriptor(transformMembers(typeNodeOf(input), members => members.filter(member => !removed.has(member.name))))
 }
 
-export const types = { Partial, Required, Readonly, Pick, Omit, KeyOf, Exclude }
+// The interpreter materializes Items<T>() from its compile-time literal type argument.
+export const Items = () => [] as (string | number)[]
+
+export const types = { Partial, Required, Readonly, Pick, Omit, KeyOf, Exclude, Items }
 export default types

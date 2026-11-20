@@ -1,7 +1,7 @@
 import { Lexer, Token, TokenType } from './lexer'
 
 export type Loc = { line: number; column: number }
-export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'LiteralType'; value: string | number | boolean; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'IndexedAccessType'; object: TypeNode; index: TypeNode; loc?: Loc } | { kind: 'TypeOfType'; expression: Expression; loc?: Loc } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; result: TypeNode }
+export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'LiteralType'; value: string | number | boolean; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'IndexedAccessType'; object: TypeNode; index: TypeNode; loc?: Loc } | { kind: 'TypeOfType'; expression: Expression; loc?: Loc } | { kind: 'ConditionalType'; check: TypeNode; target: TypeNode; consequent: TypeNode; alternate: TypeNode; loc?: Loc } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; result: TypeNode }
 export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; accessor?: 'get' | 'set'; indexType?: TypeNode; generics?: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params?: Parameter[]; body?: Statement[] }
 export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression; rest?: boolean }
 export type Expression =
@@ -10,12 +10,13 @@ export type Expression =
     | { kind: 'Template'; parts: (string | Expression)[]; loc?: Loc }
     | { kind: 'Identifier'; name: string; loc?: Loc } | { kind: 'Array'; elements: Expression[]; loc?: Loc }
     | { kind: 'Spread'; value: Expression; loc?: Loc }
-      | { kind: 'Object'; properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set'; spread?: boolean; readonly?: boolean }[]; loc?: Loc }
+      | { kind: 'Object'; properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set'; spread?: boolean; readonly?: boolean; typeOnly?: boolean; indexType?: TypeNode; declaredType?: TypeNode }[]; loc?: Loc }
     | { kind: 'Unary'; operator: string; operand: Expression; loc?: Loc }
     | { kind: 'Assignment'; name: string; loc?: Loc; operatorLoc?: Loc; operator?: string; value: Expression }
     | { kind: 'MemberAssignment'; object: Expression; property?: string; propertyLoc?: Loc; index?: Expression; loc?: Loc; operator?: string; value: Expression }
     | { kind: 'Binary'; operator: string; left: Expression; right: Expression; loc?: Loc }
     | { kind: 'Conditional'; condition: Expression; consequent: Expression; alternate: Expression; loc?: Loc }
+    | { kind: 'Is'; value: Expression; type: TypeNode; loc?: Loc }
     | { kind: 'Member'; object: Expression; property: string; optional: boolean; loc?: Loc }
     | { kind: 'Index'; object: Expression; index: Expression; loc?: Loc }
     | { kind: 'Call'; callee: Expression; args: Expression[]; typeArguments?: TypeNode[] }
@@ -23,6 +24,7 @@ export type Expression =
 export type Statement =
     | { kind: 'Variable'; name: string; loc?: Loc; mutable: boolean; type?: TypeNode; initializer?: Expression }
     | { kind: 'Destructure'; bindings: { name: string; loc?: Loc }[]; mutable: boolean; initializer: Expression }
+    | { kind: 'ArrayDestructure'; bindings: { name?: string; loc?: Loc; index: number; rest?: boolean }[]; mutable: boolean; initializer: Expression }
     | { kind: 'Import'; module: string; defaultImport?: string; defaultImportLoc?: Loc; namedImports: string[]; namedImportLocs?: Loc[]; importedTypes?: Record<string, TypeNode>; importedSymbols?: Record<string, { kind: string; value?: TypeNode; generics?: string[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params?: Parameter[]; returnType?: TypeNode; type?: TypeNode; inheritedType?: TypeNode; overloads?: { params: Parameter[]; returnType: TypeNode }[]; methods?: { name: string; generics?: string[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params: Parameter[]; returnType: TypeNode }[] }> }
     | { kind: 'Export'; declaration: Statement; default?: boolean }
     | { kind: 'FunctionDeclaration'; name: string; loc?: Loc; generics?: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params: Parameter[]; returnType?: TypeNode; body: Statement[] }
@@ -87,7 +89,7 @@ export class Parser {
         if (this.match('Keyword', 'export')) {
             const isDefault = this.match('Keyword', 'default')
             const declaration = this.statement()
-            if (!['Import', 'Variable', 'Destructure', 'FunctionDeclaration', 'TypeDeclaration', 'ConstructorDeclaration'].includes(declaration.kind)) this.fail('export must precede a declaration')
+            if (!['Import', 'Variable', 'Destructure', 'ArrayDestructure', 'FunctionDeclaration', 'TypeDeclaration', 'ConstructorDeclaration'].includes(declaration.kind)) this.fail('export must precede a declaration')
             return { kind: 'Export', declaration, default: isDefault }
         }
         if (this.match('Keyword', 'let') || this.match('Keyword', 'const')) {
@@ -105,6 +107,22 @@ export class Parser {
                 this.take('RightBrace')
                 this.take('Equal', "Expected '=' after object destructuring")
                 return { kind: 'Destructure', bindings, mutable, initializer: this.expression() }
+            }
+            if (this.match('LeftBracket')) {
+                const bindings: { name?: string; loc?: Loc; index: number; rest?: boolean }[] = []
+                let index = 0
+                while (!this.is('RightBracket')) {
+                    if (this.match('Comma')) { index++; continue }
+                    const rest = this.match('Ellipsis')
+                    const binding = this.identifier()
+                    bindings.push({ ...binding, index, rest })
+                    if (rest && !this.is('RightBracket')) this.fail('A rest binding must be the last element')
+                    if (!rest) index++
+                    if (!this.match('Comma') && !this.is('RightBracket')) this.fail("Expected ',' or ']' in array destructuring")
+                }
+                this.take('RightBracket')
+                this.take('Equal', "Expected '=' after array destructuring")
+                return { kind: 'ArrayDestructure', bindings, mutable, initializer: this.expression() }
             }
             const { name, loc } = this.identifier()
             const type = this.match('Colon') ? this.type() : undefined
@@ -254,7 +272,7 @@ export class Parser {
             const { name, loc } = this.identifier(), type = this.match('Colon') ? this.type() : undefined, defaultValue = this.match('Equal') ? this.expression() : undefined
             if (rest && defaultValue !== undefined) this.fail('A rest parameter cannot have a default value')
             if (rest && !type) this.fail('A rest parameter must have an array type')
-            if (rest && type && type.kind !== 'ArrayType' && !(type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) this.fail('A rest parameter must have an array type')
+            if (rest && type && type.kind !== 'NamedType' && type.kind !== 'ArrayType' && !(type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))) this.fail('A rest parameter must have an array type or an array-constrained generic type')
             if (!rest && defaultValue !== undefined) optionalSeen = true
             else if (!rest && optionalSeen) this.fail('Parameters with default values must follow parameters without default values')
             params.push({ name, loc, type, defaultValue, rest })
@@ -277,7 +295,7 @@ export class Parser {
         this.take('Greater')
         return parameters
     }
-    private type(): TypeNode {
+    private type(stopAtConditionalQuestion = false): TypeNode {
         while (this.match('Newline') || this.match('Indent')) {}
         if (this.is('Pipe') || this.is('Ampersand')) {
             const operator = this.current.type
@@ -293,7 +311,7 @@ export class Parser {
         }
         const optional = () => {
             let value = this.typeAtom()
-            if (this.match('Question')) value = { kind: 'UnionType', types: [value, { kind: 'NamedType', name: 'null' }] }
+            if (!stopAtConditionalQuestion && this.match('Question')) value = { kind: 'UnionType', types: [value, { kind: 'NamedType', name: 'null' }] }
             return value
         }
         let left = optional()
@@ -305,6 +323,17 @@ export class Parser {
             while (this.match('Newline') || this.match('Indent')) {}
             const right = optional(), kind = operator === 'Pipe' ? 'UnionType' : 'IntersectionType'
             left = left.kind === kind ? { ...left, types: [...left.types, right] } : { kind, types: [left, right] }
+        }
+        if (this.match('Identifier', 'is')) {
+            const token = this.tokens[this.pos - 1]
+            const target = this.type(true)
+            if (left.kind !== 'NamedType' || target.kind !== 'NamedType') this.fail("'is' type operands must be type names")
+            if (this.match('Question')) {
+                const consequent = this.type()
+                this.take('Colon', "Expected ':' in conditional type")
+                return { kind: 'ConditionalType', check: left, target, consequent, alternate: this.type(), loc: this.loc(token) }
+            }
+            return { kind: 'ConditionalType', check: left, target, consequent: { kind: 'LiteralType', value: true }, alternate: { kind: 'LiteralType', value: false }, loc: this.loc(token) }
         }
         return left
     }
@@ -388,6 +417,11 @@ export class Parser {
         } else if (this.match('LeftParen')) {
             const args: TypeNode[] = []; if (!this.is('RightParen')) do { args.push(this.type()) } while (this.match('Comma'))
             this.take('RightParen'); if (this.match('Arrow') || this.match('FatArrow')) result = { kind: 'FunctionType', params: args, result: this.type() }; else if (args.length === 1) result = args[0]; else this.fail('Expected function return type after -> or =>')
+        } else if (this.match('LeftBracket')) {
+            const elements: TypeNode[] = []
+            if (!this.is('RightBracket')) do { elements.push(this.type()) } while (this.match('Comma') && !this.is('RightBracket'))
+            this.take('RightBracket', "Expected ']' after tuple type")
+            result = { kind: 'GenericType', name: 'Tuple', args: elements }
         } else if (this.match('Keyword', 'null')) {
             result = { kind: 'NamedType', name: 'null', loc: this.loc(this.tokens[this.pos - 1]) }
         } else {
@@ -672,8 +706,19 @@ export class Parser {
         }
         if (this.match('LeftBrace')) {
             const token = this.tokens[this.pos - 1]
-            const properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set'; spread?: boolean; readonly?: boolean }[] = []; this.objectSeparators()
+            const properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set'; spread?: boolean; readonly?: boolean; typeOnly?: boolean; indexType?: TypeNode; declaredType?: TypeNode }[] = []; this.objectSeparators()
             while (!this.is('RightBrace') && !this.is('EOF')) {
+                if (this.match('LeftBracket')) {
+                    const key = this.identifier()
+                    this.take('Colon', "Expected ':' after index parameter")
+                    const indexType = this.type()
+                    this.take('RightBracket', "Expected ']' after index parameter type")
+                    this.take('Colon', "Expected ':' before indexed value type")
+                    const declaredType = this.type()
+                    properties.push({ key: key.name, keyLoc: key.loc, value: { kind: 'Literal', value: null }, typeOnly: true, indexType, declaredType })
+                    this.objectSeparators()
+                    continue
+                }
                 if (this.match('Ellipsis')) {
                     const value = this.expression()
                     properties.push({ key: '', keyLoc: 'loc' in value ? value.loc : undefined, value, spread: true })
@@ -749,12 +794,14 @@ function inferredTypeNode(expression: Expression): TypeNode {
         }
         case 'Object': return { kind: 'ObjectType', members: expression.properties.flatMap(property => property.accessor === 'set' ? [] : [{
             name: property.key,
-            type: property.accessor === 'get' && property.value.kind === 'Function' ? property.value.returnType ?? { kind: 'NamedType', name: 'any' } : inferredTypeNode(property.value),
+            type: property.typeOnly ? property.declaredType ?? { kind: 'NamedType', name: 'any' } : property.accessor === 'get' && property.value.kind === 'Function' ? property.value.returnType ?? { kind: 'NamedType', name: 'any' } : inferredTypeNode(property.value),
             optional: false,
             readonly: false,
-            constant: false
+            constant: false,
+            indexType: property.indexType
         }]) }
         case 'Conditional': return inferredTypeNode(expression.consequent)
+        case 'Is': return { kind: 'NamedType', name: 'boolean' }
         default: return { kind: 'NamedType', name: 'any' }
     }
 }
@@ -808,6 +855,8 @@ function inferExpressionType(
 
         case 'Conditional':
             return commonType([inferExpressionType(expression.consequent, variables), inferExpressionType(expression.alternate, variables)])
+
+        case 'Is': return primitive('boolean')
 
         case 'Member': {
             const object = inferExpressionType(expression.object, variables)
@@ -1283,6 +1332,7 @@ function validateDeclarations(statements: Statement[], initialNames: Set<string>
         const declarations: string[] = []
         if (statement.kind === 'Import') declarations.push(...(statement.defaultImport ? [statement.defaultImport] : []), ...statement.namedImports)
         else if (statement.kind === 'Variable' || statement.kind === 'FunctionDeclaration' || statement.kind === 'TypeDeclaration') declarations.push(statement.name)
+        else if (statement.kind === 'Destructure' || statement.kind === 'ArrayDestructure') declarations.push(...statement.bindings.flatMap(binding => binding.name && binding.name !== '_' ? [binding.name] : []))
         for (const name of declarations) {
             if (names.has(name)) throw new SyntaxError(`Duplicate declaration '${name}' in the same scope`)
             names.add(name)
