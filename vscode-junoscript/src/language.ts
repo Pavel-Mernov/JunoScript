@@ -1,5 +1,5 @@
 // @ts-nocheck -- this analyzer is bundled by esbuild for the VS Code extension.
-import { Expression, Loc, Parameter, Statement, TypeMember, TypeNode, parse } from '../../Lexer/parser'
+import { Expression, Loc, MatchPattern, Parameter, Statement, TypeMember, TypeNode, parse } from '../../Lexer/parser'
 
 export type HoverInfo = {
     line: number
@@ -1403,6 +1403,10 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
                     const members = (type: TypeNode): TypeMember[] => {
                         const resolved = resolveType(type, env)
                         if (resolved.kind === 'ObjectType') return resolved.members
+                        if (resolved.kind === 'NamedType') {
+                            const constructor = env.get(resolved.name)
+                            if (constructor?.kind === 'constructor') return members(constructor.inheritedType)
+                        }
                         if (resolved.kind === 'IntersectionType' || resolved.kind === 'UnionType') return resolved.types.flatMap(members)
                         return []
                     }
@@ -1572,6 +1576,11 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             }
             return named('any')
         }
+        case 'Match': {
+            const results = expression.cases.map(item => inferFunctionReturnType(item.body, matchCaseEnv(expression, item.pattern, env)))
+            if (!expression.cases.some(item => !item.pattern)) results.push(named('null'))
+            return unionOf(results)
+        }
         case 'Function': return { kind: 'FunctionType', params: expression.params.map(parameterType), result: expression.returnType ?? (expression.expressionBody ? inferExpression(expression.expressionBody, env) : inferFunctionReturnType(expression.body, env, expression.params)) }
     }
 }
@@ -1583,8 +1592,12 @@ function inferFunctionReturnType(statements: Statement[], outer: Env, params: Pa
             if (statement.kind === 'Return') {
                 returns.push(statement.value ? inferExpression(statement.value, env) : named('null'))
             } else if (statement.kind === 'If') {
-                collect(statement.consequent, new Map(env))
-                if (statement.alternate) collect(statement.alternate, new Map(env))
+                collect(statement.consequent, narrowedConditionEnvironment(statement.condition, env, true))
+                const falseEnv = narrowedConditionEnvironment(statement.condition, env, false)
+                if (statement.alternate) collect(statement.alternate, falseEnv)
+                else if (statementsDefinitelyReturn(statement.consequent)) {
+                    for (const [name, symbol] of falseEnv) if (env.has(name)) env.set(name, symbol)
+                }
                 const guard = negatedMemberTypeGuard(statement.condition)
                 if (!statement.alternate && guard && statement.consequent.some(item => item.kind === 'ExpressionStatement' && item.expression.kind === 'Assignment' && item.expression.name === guard.name)) {
                     const symbol = env.get(guard.name)
@@ -1608,6 +1621,40 @@ function inferFunctionReturnType(statements: Statement[], outer: Env, params: Pa
     return returns.length ? unionOf(returns) : named('null')
 }
 
+function statementsDefinitelyReturn(statements: Statement[]): boolean {
+    return statements.some(statement => statement.kind === 'Return'
+        || statement.kind === 'If' && Boolean(statement.alternate)
+            && statementsDefinitelyReturn(statement.consequent)
+            && statementsDefinitelyReturn(statement.alternate!))
+}
+
+function narrowedConditionEnvironment(condition: Expression, env: Env, whenTruthy: boolean): Env {
+    const narrowed = new Map(env)
+    if (condition.kind === 'Call' && condition.typeArguments?.[0]) {
+        const identifier = condition.callee.kind === 'Member'
+            && condition.callee.property === 'isType'
+            && condition.callee.object.kind === 'Identifier'
+                ? condition.callee.object
+                : condition.callee.kind === 'Identifier'
+                    && condition.callee.name === 'isType'
+                    && condition.args[0]?.kind === 'Identifier'
+                        ? condition.args[0]
+                        : undefined
+        const narrowedTo = condition.typeArguments[0]
+        const symbol = identifier ? narrowed.get(identifier.name) : undefined
+        if (identifier && symbol?.kind === 'var') {
+            if (whenTruthy) narrowed.set(identifier.name, { ...symbol, type: narrowedTo })
+            else {
+                const flattenUnion = (type: TypeNode): TypeNode[] => type.kind === 'UnionType' ? type.types.flatMap(flattenUnion) : [type]
+                const parts = flattenUnion(symbol.type)
+                const remaining = parts.filter(part => !isAssignableTo(narrowedTo, part, env))
+                narrowed.set(identifier.name, { ...symbol, type: remaining.length ? unionOf(remaining) : named('never') })
+            }
+        }
+    }
+    return narrowed
+}
+
 function negatedMemberTypeGuard(condition: Expression): { name: string; type: TypeNode } | undefined {
     if (condition.kind !== 'Unary' || condition.operator !== '!' || condition.operand.kind !== 'Call') return undefined
     const call = condition.operand
@@ -1627,12 +1674,55 @@ function functionType(params: Parameter[], returnType?: TypeNode): TypeNode {
     return { kind: 'FunctionType', params: params.map(parameterType), result: returnType ?? named('any') }
 }
 
+function matchIdentifierType(name: string, nullable: boolean | undefined, env: Env): TypeNode {
+    const symbol = env.get(name)
+    const base = ['string', 'number', 'boolean', 'bigint', 'symbol', 'object', 'unknown', 'any', 'null'].includes(name)
+        || symbol?.kind === 'type' || symbol?.kind === 'constructor'
+            ? named(name)
+            : symbol?.kind === 'var' ? symbol.type : named('any')
+    return nullable ? unionOf([base, named('null')]) : base
+}
+
+function matchPatternType(pattern: MatchPattern, env: Env): TypeNode {
+    if (pattern.kind === 'PatternLiteral') return pattern.value === null ? named('null') : typeof pattern.value === 'bigint' ? named('bigint') : { kind: 'LiteralType', value: pattern.value }
+    if (pattern.kind === 'PatternIdentifier') return pattern.name === '_' ? named('any') : matchIdentifierType(pattern.name, pattern.nullable, env)
+    if (pattern.kind === 'PatternUnion') return unionOf(pattern.patterns.map(part => matchPatternType(part, env)))
+    return { kind: 'ObjectType', members: pattern.properties.map(property => field(property.name, property.pattern ? matchPatternType(property.pattern, env) : named('any'))) }
+}
+
+function matchPatternBindings(pattern: MatchPattern, subject: TypeNode, env: Env): Map<string, TypeNode> {
+    if (pattern.kind === 'PatternUnion') {
+        const parts = pattern.patterns.map(part => matchPatternBindings(part, subject, env))
+        const names = new Set(parts.flatMap(part => [...part.keys()]))
+        return new Map([...names].map(name => [name, unionOf(parts.map(part => part.get(name) ?? named('null')))]))
+    }
+    if (pattern.kind !== 'PatternObject') return new Map()
+    const bindings = new Map<string, TypeNode>()
+    for (const property of pattern.properties) {
+        const member = lookupMember(subject, property.name, env)
+        const contextual = member && !isFunctionSymbol(member) ? member : named('null')
+        bindings.set(property.name, property.pattern ? matchPatternType(property.pattern, env) : contextual)
+    }
+    return bindings
+}
+
+function matchCaseEnv(expression: Extract<Expression, { kind: 'Match' }>, pattern: MatchPattern | undefined, env: Env): Env {
+    const local = new Map(env)
+    if (!pattern) return local
+    const subject = inferExpression(expression.value, env)
+    if (expression.value.kind === 'Identifier') {
+        const symbol = local.get(expression.value.name)
+        if (symbol?.kind === 'var') local.set(expression.value.name, { ...symbol, type: matchPatternType(pattern, env) })
+    }
+    for (const [name, type] of matchPatternBindings(pattern, subject, env)) local.set(name, { kind: 'var', mutable: false, type })
+    return local
+}
+
 function expandedHoverType(type: TypeNode, env: Env): TypeNode {
     if (type.kind === 'NamedType') {
         const symbol = env.get(type.name)
         if (symbol?.kind === 'constructor') {
-            const results = symbol.overloads.map(overload => overload.returnType)
-            return resolveType({ kind: 'IntersectionType', types: [symbol.inheritedType, ...(results.length ? results : [symbol.inheritedType])] }, env)
+            return resolveType(symbol.inheritedType, env)
         }
     }
     return resolveType(type, env)
@@ -1786,22 +1876,7 @@ class Analyzer {
     }
 
     private narrowedConditionEnv(condition: Expression, env: Env, whenTruthy: boolean): Env {
-        const narrowed = new Map(env)
-        if (condition.kind === 'Call' && whenTruthy && condition.typeArguments?.[0]) {
-            const identifier = condition.callee.kind === 'Member'
-                && condition.callee.property === 'isType'
-                && condition.callee.object.kind === 'Identifier'
-                    ? condition.callee.object
-                    : condition.callee.kind === 'Identifier'
-                        && condition.callee.name === 'isType'
-                        && condition.args[0]?.kind === 'Identifier'
-                            ? condition.args[0]
-                            : undefined
-            if (identifier) {
-                const symbol = narrowed.get(identifier.name)
-                if (symbol?.kind === 'var') narrowed.set(identifier.name, { ...symbol, type: condition.typeArguments[0] })
-            }
-        }
+        const narrowed = narrowedConditionEnvironment(condition, env, whenTruthy)
         if (condition.kind === 'Call'
             && condition.callee.kind === 'Member'
             && condition.callee.property === 'has'
@@ -2061,6 +2136,7 @@ class Analyzer {
                     statement.generics.forEach((name, index) => genericEnv.set(name, {
                         kind: 'type', generics: [], value: statement.genericConstraints?.[index] ?? statement.genericDefaults?.[index] ?? named('any')
                     }))
+                    genericEnv.set(statement.name, { kind: 'type', generics: statement.generics, value: statement.inheritedType })
                     const local = bindInferredParameters(params, genericEnv)
                     if (statement.inheritedType.kind === 'GenericType') {
                         local.set(statement.inheritedType.name, { kind: 'type', generics: [], value: resolveType(statement.inheritedType, env) })
@@ -2111,6 +2187,8 @@ class Analyzer {
             case 'Return':
                 this.walkExpression(statement.value, env)
                 return
+            case 'Break':
+                return
             case 'ExpressionStatement':
                 if (statement.expression.kind === 'Assignment') {
                     const symbol = env.get(statement.expression.name)
@@ -2126,6 +2204,10 @@ class Analyzer {
                 if (isNullable(inferExpression(statement.condition, env), env)) this.addDiagnostic(expressionStart(statement.condition), 'Nullable value cannot be used as a condition; use ! or ?? to handle null.')
                 this.statements(statement.consequent, this.narrowedConditionEnv(statement.condition, env, true))
                 if (statement.alternate) this.statements(statement.alternate, this.narrowedConditionEnv(statement.condition, env, false))
+                else if (statementsDefinitelyReturn(statement.consequent)) {
+                    const continuation = this.narrowedConditionEnv(statement.condition, env, false)
+                    for (const [name, symbol] of continuation) if (env.has(name)) env.set(name, symbol)
+                }
                 const guard = negatedMemberTypeGuard(statement.condition)
                 if (!statement.alternate && guard && statement.consequent.some(item => item.kind === 'ExpressionStatement' && item.expression.kind === 'Assignment' && item.expression.name === guard.name)) {
                     const symbol = env.get(guard.name)
@@ -2660,6 +2742,20 @@ class Analyzer {
             this.walkExpression(expression.condition, env, thisType)
             this.walkExpression(expression.consequent, env, thisType)
             this.walkExpression(expression.alternate, env, thisType)
+            return
+        case 'Match':
+            this.walkExpression(expression.value, env, thisType)
+            for (const item of expression.cases) {
+                const local = matchCaseEnv(expression, item.pattern, env)
+                if (item.guard) this.walkExpression(item.guard, local, thisType)
+                this.statements(item.body, local)
+                for (const [name, symbol] of local) if (!env.has(name) && symbol.kind === 'var') {
+                    const property = item.pattern?.kind === 'PatternObject'
+                        ? item.pattern.properties.find(candidate => candidate.name === name)
+                        : undefined
+                    this.addHover(name, property?.loc, `const ${name}: ${printType(symbol.type)}`, undefined, typeDescription(symbol.type, local))
+                }
+            }
             return
         case 'Is':
             this.walkExpression(expression.value, env, thisType)

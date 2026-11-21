@@ -1,10 +1,15 @@
-import { Iterable, Range, Array } from 'juno/types'
+import { Iterable, Range, Array, Error, Result, ok } from 'juno/types'
 import { console } from 'juno'
 
 const textIndices = "abc".indices
 const arrayIndices = [10, 20].indices
 const filled = Array<number>(3, { fill: (element, index) => index })
+const successful: Result<number> = ok(42)
+fun createTestError(): Error =
+    return Error('Juno types test')
+const failed: Result<null, Error> = Error.result(createTestError())
 
 console.log(textIndices.toArray())
 console.log(arrayIndices.toArray())
 console.log(filled)
+console.log(successful, failed)

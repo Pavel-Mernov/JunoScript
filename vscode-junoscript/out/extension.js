@@ -43,11 +43,15 @@ var keywords = /* @__PURE__ */ new Set([
   "fun",
   "type",
   "return",
+  "break",
   "if",
   "else",
   "for",
   "of",
   "while",
+  "match",
+  "case",
+  "when",
   "true",
   "false",
   "null",
@@ -456,6 +460,7 @@ var Parser = class _Parser {
       const genericParameters = this.match("Less") ? this.genericParameters() : [];
       const params = this.parameters(), returnType = this.match("Colon") ? this.type() : void 0;
       this.take("Equal", "Expected '=' before function body");
+      const body = this.is("Keyword", "match") ? [{ kind: "Return", value: this.expression() }] : this.block();
       return {
         kind: "FunctionDeclaration",
         name,
@@ -466,7 +471,7 @@ var Parser = class _Parser {
         genericDefaults: genericParameters.map((item) => item.defaultType),
         params,
         returnType,
-        body: this.block()
+        body
       };
     }
     if (this.match("Keyword", "type")) {
@@ -515,6 +520,7 @@ var Parser = class _Parser {
       return { kind: "ConstructorDeclaration", name, loc, generics: genericParameters.map((item) => item.name), genericLocs: genericParameters.map((item) => item.loc), genericConstraints: genericParameters.map((item) => item.constraint), genericDefaults: genericParameters.map((item) => item.defaultType), inheritedType, overloads, methods };
     }
     if (this.match("Keyword", "return")) return { kind: "Return", value: this.is("Newline") || this.is("Dedent") || this.is("EOF") ? void 0 : this.expression() };
+    if (this.match("Keyword", "break")) return { kind: "Break", loc: this.loc(this.tokens[this.pos - 1]) };
     if (this.is("Identifier") && assignmentOperators[this.tokens[this.pos + 1]?.type]) {
       const { name, loc } = this.identifier(), operatorToken = this.current, operator = assignmentOperators[operatorToken.type];
       this.pos++;
@@ -590,6 +596,61 @@ var Parser = class _Parser {
     }
     this.take("Dedent");
     return body;
+  }
+  matchPattern() {
+    const patterns = [this.matchPatternAtom()];
+    while (this.match("Pipe")) patterns.push(this.matchPatternAtom());
+    return patterns.length === 1 ? patterns[0] : { kind: "PatternUnion", patterns, loc: patterns[0].loc };
+  }
+  matchPatternAtom() {
+    if (this.match("String") || this.match("Number") || this.match("BigInt")) {
+      const token2 = this.tokens[this.pos - 1];
+      return { kind: "PatternLiteral", value: this.value(token2), loc: this.loc(token2) };
+    }
+    if (this.match("Keyword", "true") || this.match("Keyword", "false") || this.match("Keyword", "null")) {
+      const token2 = this.tokens[this.pos - 1];
+      const value = this.value(token2);
+      return { kind: "PatternLiteral", value: value === "true" ? true : value === "false" ? false : null, loc: this.loc(token2) };
+    }
+    if (this.match("LeftBrace")) {
+      const start = this.tokens[this.pos - 1];
+      const properties = [];
+      this.objectSeparators();
+      while (!this.is("RightBrace")) {
+        const property = this.propertyName();
+        const pattern = this.match("Colon") ? this.matchPatternAtom() : void 0;
+        properties.push({ name: property.name, pattern, loc: property.loc });
+        this.parenthesisSeparators();
+        if (this.match("Comma")) this.objectSeparators();
+        else if (!this.is("RightBrace")) this.fail("Expected ',' or '}' in match object pattern");
+      }
+      this.take("RightBrace");
+      return { kind: "PatternObject", properties, loc: this.loc(start) };
+    }
+    const token = this.take("Identifier", "Expected a literal, type, variable, or object pattern");
+    return { kind: "PatternIdentifier", name: String(this.value(token)), nullable: this.match("Question"), loc: this.loc(token) };
+  }
+  matchExpression(token) {
+    const value = this.expression();
+    this.take("Newline", "Expected a newline after match value");
+    this.take("Indent", "Expected indented match cases");
+    const cases = [];
+    this.separators();
+    while (!this.is("Dedent") && !this.is("EOF")) {
+      if (this.match("Keyword", "case")) {
+        const caseToken = this.tokens[this.pos - 1];
+        const pattern = this.matchPattern();
+        const guard = this.match("Keyword", "when") ? this.expression() : void 0;
+        cases.push({ pattern, guard, body: this.block(), loc: this.loc(caseToken) });
+      } else if (this.match("Keyword", "default")) {
+        const defaultToken = this.tokens[this.pos - 1];
+        if (cases.some((item) => !item.pattern)) this.fail("A match expression can only have one default case");
+        cases.push({ body: this.block(), loc: this.loc(defaultToken) });
+      } else this.fail("Expected 'case' or 'default' in match expression");
+      this.separators();
+    }
+    this.take("Dedent");
+    return { kind: "Match", value, cases, loc: this.loc(token) };
   }
   parameters() {
     this.take("LeftParen");
@@ -960,6 +1021,13 @@ var Parser = class _Parser {
             shiftExpression(node.consequent);
             shiftExpression(node.alternate);
             break;
+          case "Match":
+            shiftExpression(node.value);
+            node.cases.forEach((item) => {
+              if (item.guard) shiftExpression(item.guard);
+              item.body.forEach(shiftStatement);
+            });
+            break;
           case "Member":
             shiftExpression(node.object);
             break;
@@ -993,6 +1061,9 @@ var Parser = class _Parser {
           case "Return":
             if (statement.value) shiftExpression(statement.value);
             break;
+          case "Break":
+            statement.loc = shiftLoc(statement.loc);
+            break;
           case "If":
             shiftExpression(statement.condition);
             statement.consequent.forEach(shiftStatement);
@@ -1023,6 +1094,7 @@ var Parser = class _Parser {
     return { kind: "Template", parts, loc };
   }
   prefix() {
+    if (this.match("Keyword", "match")) return this.matchExpression(this.tokens[this.pos - 1]);
     if (this.match("Increment") || this.match("Decrement")) {
       const token = this.tokens[this.pos - 1];
       const operand = this.expression(8);
@@ -1267,6 +1339,11 @@ function inferExpressionType(expression, variables) {
       return inferExpressionType(expression.operand, variables);
     case "Conditional":
       return commonType([inferExpressionType(expression.consequent, variables), inferExpressionType(expression.alternate, variables)]);
+    case "Match": {
+      const results = expression.cases.map((item) => inferFunctionReturnType(item.body, new Map(variables)));
+      if (!expression.cases.some((item) => !item.pattern)) results.push(primitive("null"));
+      return commonType(results);
+    }
     case "Is":
       return primitive("boolean");
     case "Member": {
@@ -1656,10 +1733,77 @@ function parse(source, options = {}) {
     item.importedTypes = Object.fromEntries([...types].filter(([name]) => item.namedImports.includes(name)));
   }
   if (options.validate !== false) {
+    validateBreakStatements(statements);
     validateDeclarations(statements);
     validateArithmeticTypes(statements);
   }
   return statements;
+}
+function validateBreakStatements(statements, loopDepth = 0) {
+  for (const statement of statements) {
+    if (statement.kind === "Break") {
+      if (loopDepth === 0) throw new SyntaxError(`'break' is only valid inside a loop at ${statement.loc?.line ?? 1}:${statement.loc?.column ?? 1}`);
+    } else if (statement.kind === "While" || statement.kind === "ForOf") {
+      validateBreakStatements(statement.body, loopDepth + 1);
+    } else if (statement.kind === "If") {
+      validateBreakStatements(statement.consequent, loopDepth);
+      if (statement.alternate) validateBreakStatements(statement.alternate, loopDepth);
+    } else if (statement.kind === "FunctionDeclaration") {
+      validateBreakStatements(statement.body, 0);
+    } else if (statement.kind === "ConstructorDeclaration") {
+      for (const overload of statement.overloads) validateBreakStatements(overload.body, 0);
+      for (const method2 of statement.methods) validateBreakStatements(method2.body, 0);
+    } else if (statement.kind === "Export") {
+      validateBreakStatements([statement.declaration], loopDepth);
+    } else if (statement.kind === "Variable" && statement.initializer) {
+      validateBreakExpression(statement.initializer, loopDepth);
+    } else if (statement.kind === "Destructure" || statement.kind === "ArrayDestructure") {
+      validateBreakExpression(statement.initializer, loopDepth);
+    } else if (statement.kind === "ExpressionStatement") {
+      validateBreakExpression(statement.expression, loopDepth);
+    } else if (statement.kind === "Return" && statement.value) {
+      validateBreakExpression(statement.value, loopDepth);
+    }
+  }
+}
+function validateBreakExpression(expression, loopDepth) {
+  if (expression.kind === "Match") {
+    validateBreakExpression(expression.value, loopDepth);
+    for (const item of expression.cases) {
+      if (item.guard) validateBreakExpression(item.guard, loopDepth);
+      validateBreakStatements(item.body, loopDepth);
+    }
+  } else if (expression.kind === "Function") {
+    validateBreakStatements(expression.body, 0);
+    if (expression.expressionBody) validateBreakExpression(expression.expressionBody, 0);
+  } else if (expression.kind === "Array") expression.elements.forEach((item) => validateBreakExpression(item, loopDepth));
+  else if (expression.kind === "Object") expression.properties.forEach((item) => validateBreakExpression(item.value, loopDepth));
+  else if (expression.kind === "Spread") validateBreakExpression(expression.value, loopDepth);
+  else if (expression.kind === "Template") expression.parts.forEach((item) => {
+    if (typeof item !== "string") validateBreakExpression(item, loopDepth);
+  });
+  else if (expression.kind === "Unary") validateBreakExpression(expression.operand, loopDepth);
+  else if (expression.kind === "Assignment") validateBreakExpression(expression.value, loopDepth);
+  else if (expression.kind === "MemberAssignment") {
+    validateBreakExpression(expression.object, loopDepth);
+    if (expression.index) validateBreakExpression(expression.index, loopDepth);
+    validateBreakExpression(expression.value, loopDepth);
+  } else if (expression.kind === "Binary") {
+    validateBreakExpression(expression.left, loopDepth);
+    validateBreakExpression(expression.right, loopDepth);
+  } else if (expression.kind === "Conditional") {
+    validateBreakExpression(expression.condition, loopDepth);
+    validateBreakExpression(expression.consequent, loopDepth);
+    validateBreakExpression(expression.alternate, loopDepth);
+  } else if (expression.kind === "Is") validateBreakExpression(expression.value, loopDepth);
+  else if (expression.kind === "Member") validateBreakExpression(expression.object, loopDepth);
+  else if (expression.kind === "Index") {
+    validateBreakExpression(expression.object, loopDepth);
+    validateBreakExpression(expression.index, loopDepth);
+  } else if (expression.kind === "Call") {
+    validateBreakExpression(expression.callee, loopDepth);
+    expression.args.forEach((item) => validateBreakExpression(item, loopDepth));
+  }
 }
 function validateDeclarations(statements, initialNames = /* @__PURE__ */ new Set()) {
   const names = new Set(initialNames);
@@ -3058,6 +3202,10 @@ function inferExpression(expression, env) {
           const members2 = (type) => {
             const resolved = resolveType(type, env);
             if (resolved.kind === "ObjectType") return resolved.members;
+            if (resolved.kind === "NamedType") {
+              const constructor = env.get(resolved.name);
+              if (constructor?.kind === "constructor") return members2(constructor.inheritedType);
+            }
             if (resolved.kind === "IntersectionType" || resolved.kind === "UnionType") return resolved.types.flatMap(members2);
             return [];
           };
@@ -3210,6 +3358,11 @@ function inferExpression(expression, env) {
       }
       return named("any");
     }
+    case "Match": {
+      const results = expression.cases.map((item) => inferFunctionReturnType2(item.body, matchCaseEnv(expression, item.pattern, env)));
+      if (!expression.cases.some((item) => !item.pattern)) results.push(named("null"));
+      return unionOf(results);
+    }
     case "Function":
       return { kind: "FunctionType", params: expression.params.map(parameterType), result: expression.returnType ?? (expression.expressionBody ? inferExpression(expression.expressionBody, env) : inferFunctionReturnType2(expression.body, env, expression.params)) };
   }
@@ -3221,8 +3374,12 @@ function inferFunctionReturnType2(statements, outer, params = []) {
       if (statement.kind === "Return") {
         returns.push(statement.value ? inferExpression(statement.value, env) : named("null"));
       } else if (statement.kind === "If") {
-        collect(statement.consequent, new Map(env));
-        if (statement.alternate) collect(statement.alternate, new Map(env));
+        collect(statement.consequent, narrowedConditionEnvironment(statement.condition, env, true));
+        const falseEnv = narrowedConditionEnvironment(statement.condition, env, false);
+        if (statement.alternate) collect(statement.alternate, falseEnv);
+        else if (statementsDefinitelyReturn(statement.consequent)) {
+          for (const [name, symbol] of falseEnv) if (env.has(name)) env.set(name, symbol);
+        }
         const guard = negatedMemberTypeGuard(statement.condition);
         if (!statement.alternate && guard && statement.consequent.some((item) => item.kind === "ExpressionStatement" && item.expression.kind === "Assignment" && item.expression.name === guard.name)) {
           const symbol = env.get(guard.name);
@@ -3245,6 +3402,27 @@ function inferFunctionReturnType2(statements, outer, params = []) {
   collect(statements, local);
   return returns.length ? unionOf(returns) : named("null");
 }
+function statementsDefinitelyReturn(statements) {
+  return statements.some((statement) => statement.kind === "Return" || statement.kind === "If" && Boolean(statement.alternate) && statementsDefinitelyReturn(statement.consequent) && statementsDefinitelyReturn(statement.alternate));
+}
+function narrowedConditionEnvironment(condition, env, whenTruthy) {
+  const narrowed = new Map(env);
+  if (condition.kind === "Call" && condition.typeArguments?.[0]) {
+    const identifier = condition.callee.kind === "Member" && condition.callee.property === "isType" && condition.callee.object.kind === "Identifier" ? condition.callee.object : condition.callee.kind === "Identifier" && condition.callee.name === "isType" && condition.args[0]?.kind === "Identifier" ? condition.args[0] : void 0;
+    const narrowedTo = condition.typeArguments[0];
+    const symbol = identifier ? narrowed.get(identifier.name) : void 0;
+    if (identifier && symbol?.kind === "var") {
+      if (whenTruthy) narrowed.set(identifier.name, { ...symbol, type: narrowedTo });
+      else {
+        const flattenUnion = (type) => type.kind === "UnionType" ? type.types.flatMap(flattenUnion) : [type];
+        const parts = flattenUnion(symbol.type);
+        const remaining = parts.filter((part) => !isAssignableTo(narrowedTo, part, env));
+        narrowed.set(identifier.name, { ...symbol, type: remaining.length ? unionOf(remaining) : named("never") });
+      }
+    }
+  }
+  return narrowed;
+}
 function negatedMemberTypeGuard(condition) {
   if (condition.kind !== "Unary" || condition.operator !== "!" || condition.operand.kind !== "Call") return void 0;
   const call = condition.operand;
@@ -3261,12 +3439,48 @@ function unionOf(types) {
 function functionType(params, returnType) {
   return { kind: "FunctionType", params: params.map(parameterType), result: returnType ?? named("any") };
 }
+function matchIdentifierType(name, nullable, env) {
+  const symbol = env.get(name);
+  const base = ["string", "number", "boolean", "bigint", "symbol", "object", "unknown", "any", "null"].includes(name) || symbol?.kind === "type" || symbol?.kind === "constructor" ? named(name) : symbol?.kind === "var" ? symbol.type : named("any");
+  return nullable ? unionOf([base, named("null")]) : base;
+}
+function matchPatternType(pattern, env) {
+  if (pattern.kind === "PatternLiteral") return pattern.value === null ? named("null") : typeof pattern.value === "bigint" ? named("bigint") : { kind: "LiteralType", value: pattern.value };
+  if (pattern.kind === "PatternIdentifier") return pattern.name === "_" ? named("any") : matchIdentifierType(pattern.name, pattern.nullable, env);
+  if (pattern.kind === "PatternUnion") return unionOf(pattern.patterns.map((part) => matchPatternType(part, env)));
+  return { kind: "ObjectType", members: pattern.properties.map((property) => field(property.name, property.pattern ? matchPatternType(property.pattern, env) : named("any"))) };
+}
+function matchPatternBindings(pattern, subject, env) {
+  if (pattern.kind === "PatternUnion") {
+    const parts = pattern.patterns.map((part) => matchPatternBindings(part, subject, env));
+    const names = new Set(parts.flatMap((part) => [...part.keys()]));
+    return new Map([...names].map((name) => [name, unionOf(parts.map((part) => part.get(name) ?? named("null")))]));
+  }
+  if (pattern.kind !== "PatternObject") return /* @__PURE__ */ new Map();
+  const bindings = /* @__PURE__ */ new Map();
+  for (const property of pattern.properties) {
+    const member = lookupMember(subject, property.name, env);
+    const contextual = member && !isFunctionSymbol(member) ? member : named("null");
+    bindings.set(property.name, property.pattern ? matchPatternType(property.pattern, env) : contextual);
+  }
+  return bindings;
+}
+function matchCaseEnv(expression, pattern, env) {
+  const local = new Map(env);
+  if (!pattern) return local;
+  const subject = inferExpression(expression.value, env);
+  if (expression.value.kind === "Identifier") {
+    const symbol = local.get(expression.value.name);
+    if (symbol?.kind === "var") local.set(expression.value.name, { ...symbol, type: matchPatternType(pattern, env) });
+  }
+  for (const [name, type] of matchPatternBindings(pattern, subject, env)) local.set(name, { kind: "var", mutable: false, type });
+  return local;
+}
 function expandedHoverType(type, env) {
   if (type.kind === "NamedType") {
     const symbol = env.get(type.name);
     if (symbol?.kind === "constructor") {
-      const results = symbol.overloads.map((overload) => overload.returnType);
-      return resolveType({ kind: "IntersectionType", types: [symbol.inheritedType, ...results.length ? results : [symbol.inheritedType]] }, env);
+      return resolveType(symbol.inheritedType, env);
     }
   }
   return resolveType(type, env);
@@ -3412,14 +3626,7 @@ var Analyzer = class {
     env.set(name, symbol);
   }
   narrowedConditionEnv(condition, env, whenTruthy) {
-    const narrowed = new Map(env);
-    if (condition.kind === "Call" && whenTruthy && condition.typeArguments?.[0]) {
-      const identifier = condition.callee.kind === "Member" && condition.callee.property === "isType" && condition.callee.object.kind === "Identifier" ? condition.callee.object : condition.callee.kind === "Identifier" && condition.callee.name === "isType" && condition.args[0]?.kind === "Identifier" ? condition.args[0] : void 0;
-      if (identifier) {
-        const symbol = narrowed.get(identifier.name);
-        if (symbol?.kind === "var") narrowed.set(identifier.name, { ...symbol, type: condition.typeArguments[0] });
-      }
-    }
+    const narrowed = narrowedConditionEnvironment(condition, env, whenTruthy);
     if (condition.kind === "Call" && condition.callee.kind === "Member" && condition.callee.property === "has" && condition.callee.object.kind === "Identifier" && whenTruthy) {
       const argument = condition.args[0];
       const argumentSymbol = argument?.kind === "Identifier" ? env.get(argument.name) : void 0;
@@ -3657,6 +3864,7 @@ var Analyzer = class {
             generics: [],
             value: statement.genericConstraints?.[index] ?? statement.genericDefaults?.[index] ?? named("any")
           }));
+          genericEnv.set(statement.name, { kind: "type", generics: statement.generics, value: statement.inheritedType });
           const local = bindInferredParameters(params, genericEnv);
           if (statement.inheritedType.kind === "GenericType") {
             local.set(statement.inheritedType.name, { kind: "type", generics: [], value: resolveType(statement.inheritedType, env) });
@@ -3707,6 +3915,8 @@ var Analyzer = class {
       case "Return":
         this.walkExpression(statement.value, env);
         return;
+      case "Break":
+        return;
       case "ExpressionStatement":
         if (statement.expression.kind === "Assignment") {
           const symbol = env.get(statement.expression.name);
@@ -3722,6 +3932,10 @@ var Analyzer = class {
         if (isNullable(inferExpression(statement.condition, env), env)) this.addDiagnostic(expressionStart(statement.condition), "Nullable value cannot be used as a condition; use ! or ?? to handle null.");
         this.statements(statement.consequent, this.narrowedConditionEnv(statement.condition, env, true));
         if (statement.alternate) this.statements(statement.alternate, this.narrowedConditionEnv(statement.condition, env, false));
+        else if (statementsDefinitelyReturn(statement.consequent)) {
+          const continuation = this.narrowedConditionEnv(statement.condition, env, false);
+          for (const [name, symbol] of continuation) if (env.has(name)) env.set(name, symbol);
+        }
         const guard = negatedMemberTypeGuard(statement.condition);
         if (!statement.alternate && guard && statement.consequent.some((item) => item.kind === "ExpressionStatement" && item.expression.kind === "Assignment" && item.expression.name === guard.name)) {
           const symbol = env.get(guard.name);
@@ -4225,6 +4439,18 @@ var Analyzer = class {
         this.walkExpression(expression.condition, env, thisType);
         this.walkExpression(expression.consequent, env, thisType);
         this.walkExpression(expression.alternate, env, thisType);
+        return;
+      case "Match":
+        this.walkExpression(expression.value, env, thisType);
+        for (const item of expression.cases) {
+          const local = matchCaseEnv(expression, item.pattern, env);
+          if (item.guard) this.walkExpression(item.guard, local, thisType);
+          this.statements(item.body, local);
+          for (const [name, symbol] of local) if (!env.has(name) && symbol.kind === "var") {
+            const property = item.pattern?.kind === "PatternObject" ? item.pattern.properties.find((candidate) => candidate.name === name) : void 0;
+            this.addHover(name, property?.loc, `const ${name}: ${printType(symbol.type)}`, void 0, typeDescription(symbol.type, local));
+          }
+        }
         return;
       case "Is":
         this.walkExpression(expression.value, env, thisType);

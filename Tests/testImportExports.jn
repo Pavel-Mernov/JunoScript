@@ -7,13 +7,15 @@ import {
     fromCharCode,
     fromCodePoint
 } from './testExports'
-import { Error } from 'juno'
+import { Error, Result, ok } from 'juno:types'
 import { console } from 'juno:node'
 
 const message: string = greet('Juno')
 const greeting: Greeting = { text: message }
-const known: Error = { name: 'Error', message }
+const known: Error = Error(message)
 const checked: Error = known
+const success: Result<string> = ok(message)
+const failure: Result<null, Error> = Error.result(known)
 
 const text = message
 
@@ -23,5 +25,6 @@ console.log('imported value:', answer)
 console.log('destructured exports:', first, second)
 console.log('imported function:', text)
 console.log('imported type:', greeting)
+console.log('imported Result helpers:', success, failure)
 console.log('type constructor:', greeting2)
 console.log('TypeScript re-export:', fromCharCode(65, 66, 67), fromCodePoint(128512))

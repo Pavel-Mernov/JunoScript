@@ -1,20 +1,24 @@
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
-import { Expression, Parameter, Statement, TypeMember, TypeNode, parse } from '../Lexer/parser'
+import { Expression, Loc, MatchPattern, Parameter, Statement, TypeMember, TypeNode, parse } from '../Lexer/parser'
 import { resolveModule } from '../Modules'
 import { analyze } from '../vscode-junoscript/src/language.js'
 
 type Binding = { value: unknown; mutable: boolean; declaredType?: TypeNode }
 type TypeAlias = { value: TypeNode; generics: string[]; genericDefaults?: (TypeNode | undefined)[] }
 type Environment = { bindings: Map<string, Binding>; types: Map<string, TypeAlias>; parent?: Environment }
-type RuntimeFunction = { __junoFunction: true; params: Parameter[]; body: Statement[]; closure: Environment; thisValue?: unknown }
+type RuntimeFunction = { __junoFunction: true; params: Parameter[]; body: Statement[]; closure: Environment; thisValue?: unknown; name?: string; file?: string; loc?: Loc }
 type RuntimeConstructor = { __junoConstructor: true; typeName: string; inheritedType: TypeNode; overloads: RuntimeFunction[]; [name: string]: unknown }
 class ReturnValue { constructor(readonly value: unknown) {} }
+class BreakSignal {}
 
 export class Interpreter {
     private readonly globals: Environment = { bindings: new Map(), types: new Map() }
     private currentDirectory = process.cwd()
+    private currentFile?: string
+    private readonly callStack: { name: string; file?: string; loc?: Loc }[] = []
     constructor() {
+        ;(globalThis as any)[Symbol.for('junoscript.captureStackTrace')] = () => this.captureStackTrace()
         this.globals.bindings.set('isType', { value: (value: unknown, type: unknown) => matchesType(value, type), mutable: false })
         this.globals.bindings.set('RegEx', {
             value: (pattern: string | RegExp, flags?: string) => new RegExp(pattern, flags),
@@ -24,6 +28,7 @@ export class Interpreter {
     }
 
     run(source: string, filePath?: string): void {
+        this.currentFile = filePath
         const statements = parse(source, { filePath })
         for (const statement of statements) {
             if (statement.kind === 'TypeDeclaration') {
@@ -51,9 +56,18 @@ export class Interpreter {
                 const adaptedModule = this.adaptModule(module, env)
                 if (statement.defaultImport) this.declare(env, statement.defaultImport, adaptedModule, false)
                 for (const name of statement.namedImports) {
-                    if ((statement.module === 'juno' || statement.module === 'juno:types') && ['Iterable', 'Range', 'Array', 'Boolean', 'Number', 'String', 'Tuple', 'Random'].includes(name)) {
-                        const constructorModule = this.loadLocalModule(`juno/types/${name.toLowerCase()}`, env)
+                    const localTypeModule = ({
+                        Iterable: 'iterable', Range: 'range', Array: 'array', Boolean: 'boolean', Number: 'number',
+                        String: 'string', Tuple: 'tuple', Random: 'random', Error: 'error', Result: 'error', ok: 'error'
+                    } as Record<string, string>)[name]
+                    if ((statement.module === 'juno' || statement.module === 'juno:types') && localTypeModule) {
+                        const constructorModule = this.loadLocalModule(`juno/types/${localTypeModule}`, env)
                         if (!(name in constructorModule)) throw new Error(`Module 'juno' has no export '${name}'`)
+                        const alias = (constructorModule as any).__junoTypes?.[name] as TypeAlias | undefined
+                        if (alias) {
+                            ;(statement.importedTypes ??= {})[name] = alias.value
+                            env.types.set(name, alias)
+                        }
                         this.declare(env, name, constructorModule[name], false)
                         continue
                     }
@@ -107,20 +121,27 @@ export class Interpreter {
                 this.declare(env, statement.name, { __junoTypeConstructor: true, typeName: statement.name, typeNode: statement.value, generics: statement.generics }, false)
                 return
             }
-            case 'FunctionDeclaration': this.declare(env, statement.name, { __junoFunction: true, params: statement.params, body: statement.body, closure: env } satisfies RuntimeFunction, false); return
+            case 'FunctionDeclaration': this.declare(env, statement.name, { __junoFunction: true, params: statement.params, body: statement.body, closure: env, name: statement.name, file: this.currentFile, loc: statement.loc } satisfies RuntimeFunction, false); return
             case 'ConstructorDeclaration': {
                 if (!statement.overloads.length) throw new TypeError(`Constructor '${statement.name}' needs at least one anonymous function`)
                 this.registerTypeDeclarations(statement.inheritedType, env)
-                const overloads = statement.overloads.map(overload => ({ __junoFunction: true as const, params: overload.params, body: overload.body, closure: env }))
+                const overloads = statement.overloads.map(overload => ({ __junoFunction: true as const, params: overload.params, body: overload.body, closure: env, name: statement.name, file: this.currentFile, loc: statement.loc }))
                 const constructor: RuntimeConstructor = { __junoConstructor: true, typeName: statement.name, inheritedType: statement.inheritedType, overloads }
-                for (const method of statement.methods) constructor[method.name] = { __junoFunction: true, params: method.params, body: method.body, closure: env } satisfies RuntimeFunction
+                for (const method of statement.methods) constructor[method.name] = { __junoFunction: true, params: method.params, body: method.body, closure: env, name: `${statement.name}.${method.name}`, file: this.currentFile, loc: method.loc } satisfies RuntimeFunction
                 this.declare(env, statement.name, constructor, false)
                 return
             }
             case 'Return': throw new ReturnValue(statement.value ? this.evaluate(statement.value, env) : null)
+            case 'Break': throw new BreakSignal()
             case 'ExpressionStatement': this.evaluate(statement.expression, env); return
             case 'If': this.executeStatements(this.requireCondition(this.evaluate(statement.condition, env)) ? statement.consequent : (statement.alternate ?? []), this.childEnvironment(env)); return
-            case 'While': while (this.requireCondition(this.evaluate(statement.condition, env))) this.executeStatements(statement.body, this.childEnvironment(env)); return
+            case 'While': {
+                while (this.requireCondition(this.evaluate(statement.condition, env))) {
+                    try { this.executeStatements(statement.body, this.childEnvironment(env)) }
+                    catch (error) { if (error instanceof BreakSignal) break; throw error }
+                }
+                return
+            }
             case 'ForOf': {
                 const iterable = this.evaluate(statement.iterable, env) as any
                 const values = Array.isArray(iterable) || iterable?.[Symbol.iterator]
@@ -130,7 +151,12 @@ export class Interpreter {
                         : iterable && typeof iterable.toArray === 'function'
                             ? iterable.toArray()
                             : iterable
-                for (const value of values) { const local = this.childEnvironment(env); this.declare(local, statement.binding, value, statement.mutable); this.executeStatements(statement.body, local) }
+                for (const value of values) {
+                    const local = this.childEnvironment(env)
+                    this.declare(local, statement.binding, value, statement.mutable)
+                    try { this.executeStatements(statement.body, local) }
+                    catch (error) { if (error instanceof BreakSignal) break; throw error }
+                }
                 return
             }
         }
@@ -183,7 +209,9 @@ export class Interpreter {
             return loaded && typeof loaded === 'object' ? loaded : { default: loaded }
         }
         const previousDirectory = this.currentDirectory
+        const previousFile = this.currentFile
         this.currentDirectory = resolve(base, '..')
+        this.currentFile = file
         const moduleEnv: Environment = { bindings: new Map(), types: new Map(), parent: env }
         const importedModule = (specifier: string, importer: Environment): Record<string, unknown> => {
             if (specifier === 'juno/types' || specifier.startsWith('juno/types/')) return this.loadLocalModule(specifier, importer)
@@ -248,6 +276,7 @@ export class Interpreter {
         }
         Object.defineProperty(exported, '__junoTypes', { value: (exported as any).__types ?? {}, enumerable: false })
         this.currentDirectory = previousDirectory
+        this.currentFile = previousFile
         return exported
     }
 
@@ -462,6 +491,28 @@ export class Interpreter {
                 return this.requireCondition(this.evaluate(expression.condition, env))
                     ? this.evaluate(expression.consequent, env)
                     : this.evaluate(expression.alternate, env)
+            case 'Match': {
+                const value = this.evaluate(expression.value, env)
+                for (const item of expression.cases) {
+                    const bindings = new Map<string, unknown>()
+                    if (item.pattern && !this.matchesPattern(value, item.pattern, env, bindings)) continue
+                    const local = this.childEnvironment(env)
+                    if (item.pattern && expression.value.kind === 'Identifier') {
+                        const narrowedType = this.patternTypeNode(item.pattern, env)
+                        if (narrowedType) this.declare(local, expression.value.name, value, false, narrowedType)
+                    }
+                    for (const [name, binding] of bindings) this.declare(local, name, binding, false)
+                    if (item.guard && !this.requireCondition(this.evaluate(item.guard, local))) continue
+                    try {
+                        this.executeStatements(item.body, local)
+                        return null
+                    } catch (error) {
+                        if (error instanceof ReturnValue) return error.value
+                        throw error
+                    }
+                }
+                return null
+            }
             case 'Is':
                 return this.matchesTypeNode(this.evaluate(expression.value, env), expression.type, env)
             case 'Member': {
@@ -588,6 +639,7 @@ export class Interpreter {
     }
 
     private callFunction(fn: RuntimeFunction, args: unknown[], thisValue?: unknown): unknown {
+        this.callStack.push({ name: fn.name ?? '<anonymous>', file: fn.file, loc: fn.loc })
         const local = this.childEnvironment(fn.closure)
         if (thisValue !== undefined) local.bindings.set('this', { value: thisValue, mutable: false })
         let argumentIndex = 0
@@ -606,8 +658,83 @@ export class Interpreter {
             return null
         } catch (error) {
             if (error instanceof ReturnValue) return error.value
+            if (error instanceof BreakSignal) throw new SyntaxError("'break' cannot cross a function boundary")
             throw error
+        } finally {
+            this.callStack.pop()
         }
+    }
+
+    private patternBindings(pattern: MatchPattern): Set<string> {
+        if (pattern.kind === 'PatternObject') return new Set(pattern.properties.map(property => property.name))
+        if (pattern.kind === 'PatternUnion') return new Set(pattern.patterns.flatMap(part => [...this.patternBindings(part)]))
+        return new Set()
+    }
+
+    private patternTypeNode(pattern: MatchPattern, env: Environment): TypeNode | undefined {
+        if (pattern.kind === 'PatternLiteral') {
+            if (typeof pattern.value === 'bigint') return { kind: 'NamedType', name: 'bigint' }
+            return pattern.value === null ? { kind: 'NamedType', name: 'null' } : { kind: 'LiteralType', value: pattern.value }
+        }
+        if (pattern.kind === 'PatternUnion') {
+            const types = pattern.patterns.flatMap(part => this.patternTypeNode(part, env) ?? [])
+            return types.length ? { kind: 'UnionType', types } : undefined
+        }
+        if (pattern.kind === 'PatternObject') return { kind: 'ObjectType', members: pattern.properties.map(property => ({
+            name: property.name, type: property.pattern ? this.patternTypeNode(property.pattern, env) ?? { kind: 'NamedType', name: 'any' } : { kind: 'NamedType', name: 'any' },
+            optional: false, readonly: true, constant: false
+        })) }
+        if (pattern.name === '_') return undefined
+        const binding = this.lookup(env, pattern.name)?.value as any
+        const isType = binding?.__junoConstructor || binding?.__junoTypeConstructor || env.types.has(pattern.name)
+            || ['string', 'number', 'boolean', 'bigint', 'symbol', 'object', 'unknown', 'any', 'null'].includes(pattern.name)
+        if (!isType) return undefined
+        const base: TypeNode = { kind: 'NamedType', name: pattern.name }
+        return pattern.nullable ? { kind: 'UnionType', types: [base, { kind: 'NamedType', name: 'null' }] } : base
+    }
+
+    private matchesPattern(value: unknown, pattern: MatchPattern, env: Environment, bindings: Map<string, unknown>): boolean {
+        if (pattern.kind === 'PatternLiteral') return deepEqual(value, pattern.value)
+        if (pattern.kind === 'PatternUnion') {
+            const names = this.patternBindings(pattern)
+            for (const part of pattern.patterns) {
+                const candidate = new Map<string, unknown>([...names].map(name => [name, null]))
+                if (this.matchesPattern(value, part, env, candidate)) {
+                    for (const [name, binding] of candidate) bindings.set(name, binding)
+                    return true
+                }
+            }
+            return false
+        }
+        if (pattern.kind === 'PatternObject') {
+            if (value === null || typeof value !== 'object') return false
+            const candidate = new Map(bindings)
+            for (const property of pattern.properties) {
+                const member = property.name in value ? (value as Record<string, unknown>)[property.name] : null
+                if (property.pattern && !this.matchesPattern(member, property.pattern, env, candidate)) return false
+                candidate.set(property.name, member)
+            }
+            for (const [name, binding] of candidate) bindings.set(name, binding)
+            return true
+        }
+        if (pattern.name === '_') return true
+        const binding = this.lookup(env, pattern.name)?.value as any
+        let matches: boolean
+        if (binding?.__junoConstructor) matches = this.matchesTypeNode(value, binding.inheritedType, env)
+        else if (binding?.__junoTypeConstructor || env.types.has(pattern.name) || ['string', 'number', 'boolean', 'bigint', 'symbol', 'object', 'unknown', 'any', 'null'].includes(pattern.name)) {
+            matches = this.matchesTypeNode(value, { kind: 'NamedType', name: pattern.name }, env)
+        } else if (binding !== undefined) matches = deepEqual(value, binding)
+        else matches = false
+        return matches || Boolean(pattern.nullable && value === null)
+    }
+
+    private captureStackTrace(): string[] {
+        return [...this.callStack].reverse().map(frame => {
+            const position = frame.file
+                ? `${frame.file}${frame.loc ? `:${frame.loc.line}:${frame.loc.column}` : ''}`
+                : frame.loc ? `${frame.loc.line}:${frame.loc.column}` : '<unknown>'
+            return `at ${frame.name} (${position})`
+        })
     }
 
     private toNativeValue(value: unknown): unknown {

@@ -1,0 +1,28 @@
+import { captureStackTrace } from './error.ts'
+
+type ErrorType = {
+    readonly type : string
+    readonly message : string
+    readonly stackTrace : string[]?
+}
+
+export constructor Error : ErrorType {
+    fun (error : (string | Error)?) =
+        if isType<string?>(error)
+            return {
+                type : 'Error',
+                message : error ?? '',
+                stackTrace : captureStackTrace()
+            }.asReadonly()
+        return { ...error }
+
+    fun result<E is Error>(error : E) : { ok : false, error : E } =
+        return { ok : false, error }
+}
+
+export type Result<T, E is Error = Error> =
+    | { ok : true, value : T }
+    | { ok : false, error : E }
+
+export fun ok<T>(value : T) : Result<T> =
+    return { ok : true, value }

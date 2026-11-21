@@ -58,3 +58,69 @@ const defaultResult: number = inferredDefault()
 const restResult: number = inferredRest(3, 4)
 console.log("inferred default result:", defaultResult)
 console.log("inferred rest result:", restResult)
+
+# break exits the nearest while loop.
+let whileCount = 0
+while true
+    whileCount++
+    if whileCount == 3
+        break
+console.log("while break:", whileCount)
+
+# break exits the nearest for-of loop.
+let forTotal = 0
+for const value of [1, 2, 3, 4]
+    if value == 3
+        break
+    forTotal += value
+console.log("for-of break:", forTotal)
+
+# A nested break must not terminate the outer loop.
+let nestedCount = 0
+for const outer of [1, 2, 3]
+    for const inner of [1, 2, 3]
+        if inner == 2
+            break
+        nestedCount++
+console.log("nested break:", nestedCount)
+
+# match is an expression; case returns are local to the selected branch.
+fun describeMatch(arg: string | number) = match arg
+    case "hello"
+        return "literal"
+    case string when arg.length > 3
+        return "long string"
+    case string
+        return "string"
+    case number
+        return "number"
+
+const expectedMatchValue = 7
+const literalMatch = describeMatch("hello")
+const guardedMatch = describeMatch("Juno")
+const typeMatch = describeMatch(42)
+const variableMatch = match 7
+    case expectedMatchValue
+        return "variable"
+    default
+        return "default"
+
+const optionalBindingMatch = match "error"
+    case "error" | { error: string?, code: number? }
+        return error ?? "missing error"
+
+const objectBindingMatch = match { error: "failed", code: 500 }
+    case "error" | { error: string?, code: number? } when code != null
+        return error
+
+const unmatchedMatch = match true
+    case false
+        return "false"
+
+console.log("match literal:", literalMatch)
+console.log("match guard:", guardedMatch)
+console.log("match type:", typeMatch)
+console.log("match variable:", variableMatch)
+console.log("match optional binding:", optionalBindingMatch)
+console.log("match object binding:", objectBindingMatch)
+console.log("match without default:", unmatchedMatch)

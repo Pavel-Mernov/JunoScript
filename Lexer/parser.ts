@@ -4,6 +4,11 @@ export type Loc = { line: number; column: number }
 export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'LiteralType'; value: string | number | boolean; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'IndexedAccessType'; object: TypeNode; index: TypeNode; loc?: Loc } | { kind: 'TypeOfType'; expression: Expression; loc?: Loc } | { kind: 'ConditionalType'; check: TypeNode; target: TypeNode; consequent: TypeNode; alternate: TypeNode; loc?: Loc } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; result: TypeNode }
 export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; accessor?: 'get' | 'set'; indexType?: TypeNode; generics?: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params?: Parameter[]; body?: Statement[] }
 export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression; rest?: boolean }
+export type MatchPattern =
+    | { kind: 'PatternLiteral'; value: string | number | bigint | boolean | null; loc?: Loc }
+    | { kind: 'PatternIdentifier'; name: string; nullable?: boolean; loc?: Loc }
+    | { kind: 'PatternObject'; properties: { name: string; pattern?: MatchPattern; loc?: Loc }[]; loc?: Loc }
+    | { kind: 'PatternUnion'; patterns: MatchPattern[]; loc?: Loc }
 export type Expression =
     | { kind: 'Literal'; value: string | number | bigint | boolean | null; loc?: Loc }
     | { kind: 'RegEx'; source: string; flags: string; loc?: Loc }
@@ -16,6 +21,7 @@ export type Expression =
     | { kind: 'MemberAssignment'; object: Expression; property?: string; propertyLoc?: Loc; index?: Expression; loc?: Loc; operator?: string; value: Expression }
     | { kind: 'Binary'; operator: string; left: Expression; right: Expression; loc?: Loc }
     | { kind: 'Conditional'; condition: Expression; consequent: Expression; alternate: Expression; loc?: Loc }
+    | { kind: 'Match'; value: Expression; cases: { pattern?: MatchPattern; guard?: Expression; body: Statement[]; loc?: Loc }[]; loc?: Loc }
     | { kind: 'Is'; value: Expression; type: TypeNode; loc?: Loc }
     | { kind: 'Member'; object: Expression; property: string; optional: boolean; loc?: Loc }
     | { kind: 'Index'; object: Expression; index: Expression; loc?: Loc }
@@ -30,7 +36,7 @@ export type Statement =
     | { kind: 'FunctionDeclaration'; name: string; loc?: Loc; generics?: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params: Parameter[]; returnType?: TypeNode; body: Statement[] }
     | { kind: 'TypeDeclaration'; name: string; loc?: Loc; generics: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; value: TypeNode }
     | { kind: 'ConstructorDeclaration'; name: string; loc?: Loc; generics: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; inheritedType: TypeNode; overloads: Extract<Expression, { kind: 'Function' }>[]; methods: Extract<Statement, { kind: 'FunctionDeclaration' }>[] }
-    | { kind: 'Return'; value?: Expression } | { kind: 'ExpressionStatement'; expression: Expression }
+    | { kind: 'Return'; value?: Expression } | { kind: 'Break'; loc?: Loc } | { kind: 'ExpressionStatement'; expression: Expression }
     | { kind: 'If'; condition: Expression; consequent: Statement[]; alternate?: Statement[] }
     | { kind: 'ForOf'; binding: string; loc?: Loc; mutable: boolean; iterable: Expression; body: Statement[] }
     | { kind: 'While'; condition: Expression; body: Statement[] }
@@ -141,13 +147,16 @@ export class Parser {
             const genericParameters = this.match('Less') ? this.genericParameters() : []
             const params = this.parameters(), returnType = this.match('Colon') ? this.type() : undefined
             this.take('Equal', "Expected '=' before function body")
+            const body = this.is('Keyword', 'match')
+                ? [{ kind: 'Return', value: this.expression() } as Statement]
+                : this.block()
             return {
                 kind: 'FunctionDeclaration', name, loc,
                 generics: genericParameters.map(item => item.name),
                 genericLocs: genericParameters.map(item => item.loc),
                 genericConstraints: genericParameters.map(item => item.constraint),
                 genericDefaults: genericParameters.map(item => item.defaultType),
-                params, returnType, body: this.block()
+                params, returnType, body
             }
         }
         if (this.match('Keyword', 'type')) {
@@ -193,6 +202,7 @@ export class Parser {
             return { kind: 'ConstructorDeclaration', name, loc, generics: genericParameters.map(item => item.name), genericLocs: genericParameters.map(item => item.loc), genericConstraints: genericParameters.map(item => item.constraint), genericDefaults: genericParameters.map(item => item.defaultType), inheritedType, overloads, methods }
         }
         if (this.match('Keyword', 'return')) return { kind: 'Return', value: this.is('Newline') || this.is('Dedent') || this.is('EOF') ? undefined : this.expression() }
+        if (this.match('Keyword', 'break')) return { kind: 'Break', loc: this.loc(this.tokens[this.pos - 1]) }
         if (this.is('Identifier') && assignmentOperators[this.tokens[this.pos + 1]?.type]) {
             const { name, loc } = this.identifier(), operatorToken = this.current, operator = assignmentOperators[operatorToken.type]!
             this.pos++
@@ -260,6 +270,61 @@ export class Parser {
         const body: Statement[] = []; this.separators()
         while (!this.is('Dedent') && !this.is('EOF')) { body.push(this.statement()); this.separators() }
         this.take('Dedent'); return body
+    }
+    private matchPattern(): MatchPattern {
+        const patterns = [this.matchPatternAtom()]
+        while (this.match('Pipe')) patterns.push(this.matchPatternAtom())
+        return patterns.length === 1 ? patterns[0] : { kind: 'PatternUnion', patterns, loc: patterns[0].loc }
+    }
+    private matchPatternAtom(): MatchPattern {
+        if (this.match('String') || this.match('Number') || this.match('BigInt')) {
+            const token = this.tokens[this.pos - 1]
+            return { kind: 'PatternLiteral', value: this.value(token), loc: this.loc(token) }
+        }
+        if (this.match('Keyword', 'true') || this.match('Keyword', 'false') || this.match('Keyword', 'null')) {
+            const token = this.tokens[this.pos - 1]
+            const value = this.value(token)
+            return { kind: 'PatternLiteral', value: value === 'true' ? true : value === 'false' ? false : null, loc: this.loc(token) }
+        }
+        if (this.match('LeftBrace')) {
+            const start = this.tokens[this.pos - 1]
+            const properties: Extract<MatchPattern, { kind: 'PatternObject' }>['properties'] = []
+            this.objectSeparators()
+            while (!this.is('RightBrace')) {
+                const property = this.propertyName()
+                const pattern = this.match('Colon') ? this.matchPatternAtom() : undefined
+                properties.push({ name: property.name, pattern, loc: property.loc })
+                this.parenthesisSeparators()
+                if (this.match('Comma')) this.objectSeparators()
+                else if (!this.is('RightBrace')) this.fail("Expected ',' or '}' in match object pattern")
+            }
+            this.take('RightBrace')
+            return { kind: 'PatternObject', properties, loc: this.loc(start) }
+        }
+        const token = this.take('Identifier', 'Expected a literal, type, variable, or object pattern')
+        return { kind: 'PatternIdentifier', name: String(this.value(token)), nullable: this.match('Question'), loc: this.loc(token) }
+    }
+    private matchExpression(token: Token): Expression {
+        const value = this.expression()
+        this.take('Newline', 'Expected a newline after match value')
+        this.take('Indent', 'Expected indented match cases')
+        const cases: Extract<Expression, { kind: 'Match' }>['cases'] = []
+        this.separators()
+        while (!this.is('Dedent') && !this.is('EOF')) {
+            if (this.match('Keyword', 'case')) {
+                const caseToken = this.tokens[this.pos - 1]
+                const pattern = this.matchPattern()
+                const guard = this.match('Keyword', 'when') ? this.expression() : undefined
+                cases.push({ pattern, guard, body: this.block(), loc: this.loc(caseToken) })
+            } else if (this.match('Keyword', 'default')) {
+                const defaultToken = this.tokens[this.pos - 1]
+                if (cases.some(item => !item.pattern)) this.fail('A match expression can only have one default case')
+                cases.push({ body: this.block(), loc: this.loc(defaultToken) })
+            } else this.fail("Expected 'case' or 'default' in match expression")
+            this.separators()
+        }
+        this.take('Dedent')
+        return { kind: 'Match', value, cases, loc: this.loc(token) }
     }
     private parameters(): Parameter[] {
         this.take('LeftParen'); const params: Parameter[] = []
@@ -571,6 +636,10 @@ export class Parser {
                     case 'MemberAssignment': node.propertyLoc = shiftLoc(node.propertyLoc); shiftExpression(node.object); if (node.index) shiftExpression(node.index); shiftExpression(node.value); break
                     case 'Binary': shiftExpression(node.left); shiftExpression(node.right); break
                     case 'Conditional': shiftExpression(node.condition); shiftExpression(node.consequent); shiftExpression(node.alternate); break
+                    case 'Match':
+                        shiftExpression(node.value)
+                        node.cases.forEach(item => { if (item.guard) shiftExpression(item.guard); item.body.forEach(shiftStatement) })
+                        break
                     case 'Member': shiftExpression(node.object); break
                     case 'Index': shiftExpression(node.object); shiftExpression(node.index); break
                     case 'Call': shiftExpression(node.callee); node.args.forEach(shiftExpression); break
@@ -590,6 +659,7 @@ export class Parser {
                     case 'Variable': if (statement.initializer) shiftExpression(statement.initializer); break
                     case 'ExpressionStatement': shiftExpression(statement.expression); break
                     case 'Return': if (statement.value) shiftExpression(statement.value); break
+                    case 'Break': statement.loc = shiftLoc(statement.loc); break
                     case 'If':
                         shiftExpression(statement.condition)
                         statement.consequent.forEach(shiftStatement)
@@ -610,6 +680,7 @@ export class Parser {
         return { kind: 'Template', parts, loc }
     }
     private prefix(): Expression {
+        if (this.match('Keyword', 'match')) return this.matchExpression(this.tokens[this.pos - 1])
         if (this.match('Increment') || this.match('Decrement')) {
             const token = this.tokens[this.pos - 1]
             const operand = this.expression(8)
@@ -855,6 +926,12 @@ function inferExpressionType(
 
         case 'Conditional':
             return commonType([inferExpressionType(expression.consequent, variables), inferExpressionType(expression.alternate, variables)])
+
+        case 'Match': {
+            const results = expression.cases.map(item => inferFunctionReturnType(item.body, new Map(variables)))
+            if (!expression.cases.some(item => !item.pattern)) results.push(primitive('null'))
+            return commonType(results)
+        }
 
         case 'Is': return primitive('boolean')
 
@@ -1320,10 +1397,77 @@ export function parse(source: string, options: { validate?: boolean; filePath?: 
         item.importedTypes = Object.fromEntries([...types].filter(([name]) => item.namedImports.includes(name)))
     }
     if (options.validate !== false) {
+        validateBreakStatements(statements)
         validateDeclarations(statements)
         validateArithmeticTypes(statements)
     }
     return statements
+}
+
+function validateBreakStatements(statements: Statement[], loopDepth = 0): void {
+    for (const statement of statements) {
+        if (statement.kind === 'Break') {
+            if (loopDepth === 0) throw new SyntaxError(`'break' is only valid inside a loop at ${statement.loc?.line ?? 1}:${statement.loc?.column ?? 1}`)
+        } else if (statement.kind === 'While' || statement.kind === 'ForOf') {
+            validateBreakStatements(statement.body, loopDepth + 1)
+        } else if (statement.kind === 'If') {
+            validateBreakStatements(statement.consequent, loopDepth)
+            if (statement.alternate) validateBreakStatements(statement.alternate, loopDepth)
+        } else if (statement.kind === 'FunctionDeclaration') {
+            validateBreakStatements(statement.body, 0)
+        } else if (statement.kind === 'ConstructorDeclaration') {
+            for (const overload of statement.overloads) validateBreakStatements(overload.body, 0)
+            for (const method of statement.methods) validateBreakStatements(method.body, 0)
+        } else if (statement.kind === 'Export') {
+            validateBreakStatements([statement.declaration], loopDepth)
+        } else if (statement.kind === 'Variable' && statement.initializer) {
+            validateBreakExpression(statement.initializer, loopDepth)
+        } else if (statement.kind === 'Destructure' || statement.kind === 'ArrayDestructure') {
+            validateBreakExpression(statement.initializer, loopDepth)
+        } else if (statement.kind === 'ExpressionStatement') {
+            validateBreakExpression(statement.expression, loopDepth)
+        } else if (statement.kind === 'Return' && statement.value) {
+            validateBreakExpression(statement.value, loopDepth)
+        }
+    }
+}
+
+function validateBreakExpression(expression: Expression, loopDepth: number): void {
+    if (expression.kind === 'Match') {
+        validateBreakExpression(expression.value, loopDepth)
+        for (const item of expression.cases) {
+            if (item.guard) validateBreakExpression(item.guard, loopDepth)
+            validateBreakStatements(item.body, loopDepth)
+        }
+    } else if (expression.kind === 'Function') {
+        validateBreakStatements(expression.body, 0)
+        if (expression.expressionBody) validateBreakExpression(expression.expressionBody, 0)
+    } else if (expression.kind === 'Array') expression.elements.forEach(item => validateBreakExpression(item, loopDepth))
+    else if (expression.kind === 'Object') expression.properties.forEach(item => validateBreakExpression(item.value, loopDepth))
+    else if (expression.kind === 'Spread') validateBreakExpression(expression.value, loopDepth)
+    else if (expression.kind === 'Template') expression.parts.forEach(item => { if (typeof item !== 'string') validateBreakExpression(item, loopDepth) })
+    else if (expression.kind === 'Unary') validateBreakExpression(expression.operand, loopDepth)
+    else if (expression.kind === 'Assignment') validateBreakExpression(expression.value, loopDepth)
+    else if (expression.kind === 'MemberAssignment') {
+        validateBreakExpression(expression.object, loopDepth)
+        if (expression.index) validateBreakExpression(expression.index, loopDepth)
+        validateBreakExpression(expression.value, loopDepth)
+    } else if (expression.kind === 'Binary') {
+        validateBreakExpression(expression.left, loopDepth)
+        validateBreakExpression(expression.right, loopDepth)
+    } else if (expression.kind === 'Conditional') {
+        validateBreakExpression(expression.condition, loopDepth)
+        validateBreakExpression(expression.consequent, loopDepth)
+        validateBreakExpression(expression.alternate, loopDepth)
+    } else if (expression.kind === 'Is') validateBreakExpression(expression.value, loopDepth)
+    else if (expression.kind === 'Member') validateBreakExpression(expression.object, loopDepth)
+    else if (expression.kind === 'Index') {
+        validateBreakExpression(expression.object, loopDepth)
+        validateBreakExpression(expression.index, loopDepth)
+    } else if (expression.kind === 'Call') {
+        validateBreakExpression(expression.callee, loopDepth)
+        expression.args.forEach(item => validateBreakExpression(item, loopDepth))
+    }
 }
 
 function validateDeclarations(statements: Statement[], initialNames: Set<string> = new Set()): void {
