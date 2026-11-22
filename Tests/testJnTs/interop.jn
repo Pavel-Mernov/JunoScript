@@ -6,7 +6,10 @@ import {
     applyMapper,
     label,
     version,
-    nestedValue
+    nestedValue,
+    nativeIterable,
+    createNativeIterable,
+    collectIterable
 } from './native.ts'
 
 type Profile = {
@@ -40,3 +43,14 @@ console.log('TS complex return:', profile.name, profile.active, profile.metadata
 console.log('TS arrays:', scaled, mapped)
 if nestedValue.isType<NativeNested>()
     console.log('TS nested value:', nestedValue.owner.name, nestedValue.flags, nestedValue.optional)
+
+const importedIterable = createNativeIterable()
+const nativeNext = importedIterable.iterator()
+console.log('TS Symbol.iterator as JN iterator:', nativeNext(), nativeNext(), nativeNext(), nativeNext())
+
+type JnIterable = Iterable<number> & {
+    data: number[]
+    toArray(): number[] = this.data
+}
+const jnIterable: JnIterable = { data: [1, 3, 5] }
+console.log('JN toArray as TS Symbol.iterator:', collectIterable(jnIterable))

@@ -57,7 +57,7 @@ export class Interpreter {
                 if (statement.defaultImport) this.declare(env, statement.defaultImport, adaptedModule, false)
                 for (const name of statement.namedImports) {
                     const localTypeModule = ({
-                        Iterable: 'iterable', Range: 'range', Array: 'array', Set: 'set', ValueSet: 'set', Boolean: 'boolean', Number: 'number',
+                        Iterable: 'iterable', Range: 'range', Array: 'array', Set: 'set', ValueSet: 'set', Map: 'map', ValueMap: 'map', Boolean: 'boolean', Number: 'number',
                         String: 'string', Tuple: 'tuple', Random: 'random', Error: 'error', Result: 'error', ok: 'error'
                     } as Record<string, string>)[name]
                     if ((statement.module === 'juno' || statement.module === 'juno:types') && localTypeModule) {
@@ -79,7 +79,7 @@ export class Interpreter {
                         this.declare(env, name, { __junoTypeConstructor: true, typeName: name, typeNode: alias.value, generics: alias.generics }, false)
                         continue
                     }
-                    const importedValue = name === 'console' ? this.adaptConsole(module[name] as Record<string, any>) : module[name]
+                    const importedValue = name === 'console' ? this.adaptConsole(module[name] as Record<string, any>) : this.adaptNativeValue(module[name])
                     if (importedValue && typeof importedValue === 'object') this.installDefaultHas(importedValue)
                     this.declare(env, name, importedValue, false)
                     const exportedType = (module as any).__junoTypes?.[name] as TypeAlias | undefined
@@ -265,7 +265,7 @@ export class Interpreter {
                     : importedModule(statement.module, moduleEnv)
                 if (statement.defaultImport) this.declare(moduleEnv, statement.defaultImport, this.adaptModule(dependency, moduleEnv), false)
                 for (const name of statement.namedImports) {
-                    if (dependency[name] !== undefined) this.declare(moduleEnv, name, dependency[name], false)
+                    if (dependency[name] !== undefined) this.declare(moduleEnv, name, this.adaptNativeValue(dependency[name]), false)
                     else if ((dependency as any).__junoTypes?.[name]) {
                         const alias = (dependency as any).__junoTypes[name] as TypeAlias
                         moduleEnv.types.set(name, alias)
@@ -643,7 +643,7 @@ export class Interpreter {
                 if (passesRuntimeType && expression.typeArguments?.length) args.push(expression.typeArguments[0].kind === 'NamedType' ? expression.typeArguments[0].name : 'object')
                 if (typeof callee === 'function') {
                     const nativeArgs = args.map(argument => this.toNativeValue(argument))
-                    return callee.apply(thisValue, nativeArgs) ?? null
+                    return this.adaptNativeValue(callee.apply(thisValue, nativeArgs)) ?? null
                 }
                 if (callee?.__junoConstructor) {
                     const constructor = callee as RuntimeConstructor
@@ -785,17 +785,27 @@ export class Interpreter {
 
     private toNativeValue(value: unknown): unknown {
         if ((value as any)?.__junoFunction) {
-            return (...args: unknown[]) => this.callFunction(value as RuntimeFunction, args)
+            return (...args: unknown[]) => this.toNativeValue(this.callFunction(value as RuntimeFunction, args))
         }
         if (value === null || typeof value !== 'object') return value
 
         const target = value as Record<PropertyKey, any>
         const hasJunoMethod = Reflect.ownKeys(target).some(property => target[property]?.__junoFunction)
-        if (!hasJunoMethod) return value
+        const hasToArray = typeof target.toArray === 'function' || target.toArray?.__junoFunction
+        if (!hasJunoMethod && !hasToArray) return value
 
+        const thisInterpreter = this
         const wrappers = new Map<PropertyKey, { method: RuntimeFunction; callable: (...args: unknown[]) => unknown }>()
         return new Proxy(target, {
             get: (object, property, receiver) => {
+                if (property === Symbol.iterator && hasToArray) return function() {
+                    const method = object.toArray
+                    const items = method?.__junoFunction
+                        ? thisInterpreter.callFunction(method as RuntimeFunction, [], object)
+                        : method.call(object)
+                    if (!items || typeof items[Symbol.iterator] !== 'function') throw new TypeError('toArray() must return an iterable value')
+                    return items[Symbol.iterator]()
+                }
                 const member = Reflect.get(object, property, receiver)
                 if (!member?.__junoFunction) return member
 
@@ -809,6 +819,26 @@ export class Interpreter {
         })
     }
 
+    private adaptNativeValue(value: any): any {
+        if (value === null || value === undefined || typeof value !== 'object') return value
+        if (typeof value.iterator === 'function' || typeof value[Symbol.iterator] !== 'function') return value
+        const iterator = function(this: any): () => ({ value: unknown } | null) {
+            const native = value[Symbol.iterator].call(value) as Iterator<unknown>
+            return () => {
+                const next = native.next()
+                return next.done ? null : { value: next.value }
+            }
+        }
+        if (Object.isExtensible(value)) {
+            Object.defineProperty(value, 'iterator', { enumerable: false, configurable: true, value: iterator })
+            return value
+        }
+        return new Proxy(value, {
+            has: (target, property) => property === 'iterator' || Reflect.has(target, property),
+            get: (target, property, receiver) => property === 'iterator' ? iterator : Reflect.get(target, property, receiver)
+        })
+    }
+
     private declare(env: Environment, name: string, value: unknown, mutable: boolean, declaredType?: TypeNode): void {
         if (env.bindings.has(name)) throw new SyntaxError(`Duplicate declaration '${name}' in the same scope`)
         env.bindings.set(name, { value, mutable, declaredType })
@@ -817,9 +847,10 @@ export class Interpreter {
     private childEnvironment(parent: Environment): Environment { return { bindings: new Map(), types: new Map(), parent } }
 
     private adaptModule(module: Record<string, any>, env: Environment): Record<string, any> {
-        const adapted = 'console' in module ? { ...module, console: this.adaptConsole(module.console) } : { ...module }
+        const adapted: Record<PropertyKey, any> = 'console' in module ? { ...module, console: this.adaptConsole(module.console) } : { ...module }
+        for (const key of Reflect.ownKeys(adapted)) if (key !== 'console') adapted[key] = this.adaptNativeValue(adapted[key])
         this.installDefaultHas(adapted)
-        return adapted
+        return adapted as Record<string, any>
     }
 
     private adaptConsole(consoleObject: Record<string, any>): Record<string, any> {
@@ -1221,6 +1252,9 @@ export class Interpreter {
                 return [{ kind: 'LiteralType', value: member.name !== '' && Number.isFinite(numeric) && String(numeric) === member.name ? numeric : member.name }]
             })
             return keys.length === 1 ? keys[0] : { kind: 'UnionType', types: keys }
+        }
+        if (source.kind === 'UnionType' || source.kind === 'IntersectionType') {
+            return { ...source, types: source.types.map(part => this.instantiateUtilityType({ ...type, args: [part, ...type.args.slice(1)] }, env) ?? part) }
         }
         if (source.kind !== 'ObjectType') return null
         let members = source.members

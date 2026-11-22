@@ -257,6 +257,9 @@ function resolveType(type: TypeNode, env: Env): TypeNode {
                 }))
                 return named('any')
             }
+            if (source.kind === 'UnionType' || source.kind === 'IntersectionType') {
+                return { ...source, types: source.types.map(part => resolveType({ ...type, args: [part, ...type.args.slice(1)] }, env)) }
+            }
             if (source.kind === 'ObjectType') {
                 let members = source.members
                 if (type.name === 'Partial') members = members.map(member => ({ ...member, optional: true }))
@@ -851,7 +854,25 @@ function hostType(source: string | undefined): TypeNode {
     if (!source) return named('any')
     try {
         const declaration = parse(`type __HostType = ${source.trim()}`, { validate: false })[0]
-        return declaration.kind === 'TypeDeclaration' ? declaration.value : named('any')
+        if (declaration.kind !== 'TypeDeclaration') return named('any')
+        const adapt = (type: TypeNode): TypeNode => {
+            if (type.kind === 'GenericType' && type.name === 'Iterable') {
+                const element = adapt(type.args[0] ?? named('any'))
+                return { kind: 'ObjectType', members: [method('iterator', [], {
+                    kind: 'FunctionType', params: [], result: unionOf([
+                        { kind: 'ObjectType', members: [field('value', element)] },
+                        named('null')
+                    ])
+                })] }
+            }
+            if (type.kind === 'GenericType') return { ...type, args: type.args.map(adapt) }
+            if (type.kind === 'ArrayType') return { ...type, element: adapt(type.element) }
+            if (type.kind === 'UnionType' || type.kind === 'IntersectionType') return { ...type, types: type.types.map(adapt) }
+            if (type.kind === 'FunctionType') return { ...type, params: type.params.map(adapt), result: adapt(type.result) }
+            if (type.kind === 'ObjectType') return { ...type, members: type.members.map(member => ({ ...member, type: adapt(member.type) })) }
+            return type
+        }
+        return adapt(declaration.value)
     } catch { return named('any') }
 }
 
@@ -1119,6 +1140,27 @@ function widenSetElementType(type: TypeNode): TypeNode {
     return type
 }
 
+function inferMapArguments(args: Expression[], env: Env): [TypeNode, TypeNode] {
+    const keys: TypeNode[] = []
+    const values: TypeNode[] = []
+    for (const argument of args) {
+        if (argument.kind === 'Array' && argument.elements.length >= 2 && argument.elements[0].kind !== 'Spread' && argument.elements[1].kind !== 'Spread') {
+            keys.push(inferGenericExpression(argument.elements[0], env))
+            values.push(inferGenericExpression(argument.elements[1], env))
+            continue
+        }
+        const actual = resolveType(inferExpression(argument, env), env)
+        if (actual.kind === 'GenericType' && actual.name === 'Tuple' && actual.args.length >= 2) {
+            keys.push(actual.args[0])
+            values.push(actual.args[1])
+        }
+    }
+    return [
+        widenSetElementType(keys.length ? unionOf(keys) : named('any')),
+        widenSetElementType(values.length ? unionOf(values) : named('any'))
+    ]
+}
+
 function inferGenericArguments(generics: string[], params: Parameter[], args: Expression[], env: Env): TypeNode[] {
     const inferred = new Map<string, TypeNode>()
     const collect = (pattern: TypeNode | undefined, actual: TypeNode): void => {
@@ -1217,6 +1259,12 @@ function constructorMethodForCall(callee: Expression, args: Expression[], env: E
     })
     if (callee.object.name === 'Set' || callee.object.name === 'ValueSet') {
         for (let index = 0; index < constructor.generics.length; index++) inferred[index] = widenSetElementType(inferred[index])
+    }
+    if ((callee.object.name === 'Map' || callee.object.name === 'ValueMap') && method.name === 'from' && args[0]?.kind === 'Array') {
+        const entries = args[0].elements.filter((item): item is Exclude<typeof item, { kind: 'Spread' }> => item.kind !== 'Spread')
+        const [key, value] = inferMapArguments(entries, env)
+        inferred[0] = key
+        inferred[1] = value
     }
     if (callee.object.name === 'Array' && method.name === 'from' && constructor.generics[0] && method.generics[0]) {
         const targetIndex = generics.indexOf(constructor.generics[0])
@@ -1569,6 +1617,11 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
                         : inferGenericArguments(symbol.generics, symbol.overloads[0]?.params ?? [], expression.args, env)
                     if (!expression.typeArguments?.length && (expression.callee.name === 'Set' || expression.callee.name === 'ValueSet')) {
                         for (let index = 0; index < args.length; index++) args[index] = widenSetElementType(args[index])
+                    }
+                    if (!expression.typeArguments?.length && (expression.callee.name === 'Map' || expression.callee.name === 'ValueMap')) {
+                        const [key, value] = inferMapArguments(expression.args, env)
+                        args[0] = key
+                        args[1] = value
                     }
                     return { kind: 'GenericType', name: expression.callee.name, args }
                 }
@@ -2713,6 +2766,14 @@ class Analyzer {
                         const hover = this.hovers.find(item => item.line === expression.callee.loc?.line && item.column === expression.callee.loc?.column)
                         if (hover) hover.code += `\n(infer) ${printGenericInference(directType.generics, typeArguments)}\n(infer) return ${printType(inferredType)}`
                     }
+                }
+                if (directType?.kind === 'constructor' && directType.generics.length && expression.callee.kind === 'Identifier') {
+                    const inferredType = inferExpression(expression, env)
+                    const typeArguments = inferredType.kind === 'GenericType' ? inferredType.args : []
+                    const hover = expression.callee.loc
+                        ? this.hovers.find(item => item.line === expression.callee.loc?.line && item.column === expression.callee.loc?.column)
+                        : undefined
+                    if (hover) hover.code += `\n(infer) ${printGenericInference(directType.generics, typeArguments)}\n(infer) return ${printType(inferredType)}`
                 }
                 if (isNullable(calleeType, env) && !(expression.callee.kind === 'Member' && expression.callee.optional)) {
                     this.addDiagnostic(expressionStart(expression.callee), 'Cannot call a nullable value; use ! or ?? to handle null.')

@@ -1,0 +1,41 @@
+import { Map, ValueMap } from 'juno:types'
+import { console } from 'juno'
+
+const map = Map(['one', 1], ['two', 2])
+# map.set(3, 'invalid')
+console.log('initial:', map.length, map.mapKeys(), map.values(), map.toArray())
+console.log('get:', map.get('one'), map.get('missing'))
+console.log('has key:', map.hasKey('two'), map.hasKey('missing'))
+console.log('includes pair:', map.includes(['two', 2]), map.includes(['two', 22]))
+
+map.set('two', 22).set('three', 3)
+console.log('set replaces and appends:', map.length, map.toArray())
+console.log('delete:', map.delete('one'), map.delete('missing'), map.toArray())
+
+const structural = Map([{ id: 1 }, 'first'], [{ id: 2 }, 'second'])
+console.log('structural get:', structural.get({ id: 2 }))
+console.log('structural has key:', structural.hasKey({ id: 2 }))
+console.log('structural includes pair:', structural.includes([{ id: 2 }, 'second']))
+structural.set({ id: 2 }, 'replaced')
+console.log('structural replacement:', structural.length, structural.toArray())
+
+const fromMap = Map.from([['a', 1], ['b', 2]])
+# fromMap.set(3, 'invalid')
+console.log('from iterable:', fromMap.toArray())
+
+const object = Map.toObject(Map(['name', 'Ada'], [42, 'answer'], ['__proto__', 'safe']))
+console.log('to object:', object['name'], object[42], object['__proto__'])
+
+map.clear()
+console.log('clear:', map.length, map.toArray())
+
+const valueMapKey = { id: 1, nested: { active: true } }
+const valueMap = ValueMap([valueMapKey, 'first'], [{ id: 1, nested: { active: true } }, 'duplicate'])
+valueMapKey.id = 2
+valueMapKey.nested.active = false
+console.log('value map deduplicates snapshots:', valueMap.length)
+console.log('value map retains frozen key:', valueMap.hasKey({ id: 1, nested: { active: true } }))
+console.log('value map ignores source mutation:', valueMap.hasKey(valueMapKey))
+valueMap.set(valueMapKey, 'second')
+console.log('value map adds changed key:', valueMap.length, valueMap.toArray())
+console.log('value map structural get:', valueMap.get({ id: 1, nested: { active: true } }))

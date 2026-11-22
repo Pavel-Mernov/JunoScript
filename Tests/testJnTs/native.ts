@@ -34,3 +34,13 @@ export const nestedValue = {
     flags: ['typed', 'native'],
     optional: null as string | null
 }
+
+export const nativeIterable = new Set([2, 4, 6])
+
+export function createNativeIterable(): Iterable<number> {
+    return nativeIterable
+}
+
+export function collectIterable(values: Iterable<unknown>): unknown[] {
+    return [...values]
+}

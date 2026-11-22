@@ -1,0 +1,44 @@
+import { Iterable } from './iterable'
+import { globalMap, globalMapToObject, globalValueMap } from './map.ts'
+
+export constructor Map<K, V> : Iterable<[K, V]> & {
+    readonly length: number
+    set(key: K, value: V): Map<K, V>
+    get(key: K): V | null
+    hasKey(key: K): boolean
+    delete(key: K): boolean
+    clear(): void
+    mapKeys(): K[]
+    values(): V[]
+    iterator(): () -> ({ value: [K, V] } | null)
+} {
+    fun (...entries: [K, V][]) =
+        return globalMap<K, V>(...entries)
+
+    fun from(entries: Iterable<[K, V]>): Map<K, V> =
+        return Map<K, V>(...entries.toArray())
+
+    fun toObject(map: Map<string | number, any>): { [key: string | number]: any } =
+        return globalMapToObject(map)
+}
+
+export constructor ValueMap<K, V> : Iterable<[K, V]> & {
+    readonly length: number
+    set(key: K, value: V): ValueMap<K, V>
+    get(key: K): V | null
+    hasKey(key: K): boolean
+    delete(key: K): boolean
+    clear(): void
+    mapKeys(): K[]
+    values(): V[]
+    iterator(): () -> ({ value: [K, V] } | null)
+} {
+    fun (...entries: [K, V][]) =
+        return globalValueMap<K, V>(...entries)
+
+    fun from(entries: Iterable<[K, V]>): ValueMap<K, V> =
+        return ValueMap<K, V>(...entries.toArray())
+
+    fun toObject(map: ValueMap<string | number, any>): { [key: string | number]: any } =
+        return globalMapToObject(map)
+}

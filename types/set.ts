@@ -8,7 +8,7 @@ export type JunoSet<T> = {
 }
 
 /** SameValueZero for primitives and structural equality for Juno objects. */
-function junoEqual(left: unknown, right: unknown, seen = new WeakMap<object, WeakSet<object>>()): boolean {
+export function junoEqual(left: unknown, right: unknown, seen = new WeakMap<object, WeakSet<object>>()): boolean {
     if (left === right) return true
     if (typeof left === 'number' && typeof right === 'number' && Number.isNaN(left) && Number.isNaN(right)) return true
     if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') return false
@@ -55,7 +55,7 @@ function identityId(value: object | symbol): number {
 }
 
 /** Equal Juno values always produce the same hash. */
-function structuralHash(value: unknown): string {
+export function structuralHash(value: unknown): string {
     const seen = new Map<object, number>()
     const visit = (item: unknown): string => {
         if (item === null) return 'null'
@@ -161,7 +161,7 @@ export function globalSet<T>(...initialItems: T[]): JunoSet<T> {
     return result
 }
 
-function immutableSnapshot<T>(value: T): T {
+export function immutableSnapshot<T>(value: T): T {
     const clones = new WeakMap<object, any>()
     const clone = (item: any): any => {
         if (item === null || typeof item !== 'object' || item.__junoFunction || item.__junoConstructor) return item
