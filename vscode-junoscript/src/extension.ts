@@ -164,7 +164,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 }
                 if (!info?.typeDescription) return []
                 const fields = new Map<string, string>()
-                const fieldPattern = /^\s*(?:readonly\s+)?(?:"([^"]+)"|(-?\d+(?:\.\d+)?)|([A-Za-z_$][\w$]*))\??\s*(?::|\()/gm
+                const fieldPattern = /^\s*(?:(?:readonly|sealed)\s+)*(?:"([^"]+)"|(-?\d+(?:\.\d+)?)|([A-Za-z_$][\w$]*))\??\s*(?::|\()/gm
                 for (let field = fieldPattern.exec(info.typeDescription); field; field = fieldPattern.exec(info.typeDescription)) {
                     const name = field[1] ?? field[2] ?? field[3]
                     if (name.startsWith('__') || fields.has(name)) continue

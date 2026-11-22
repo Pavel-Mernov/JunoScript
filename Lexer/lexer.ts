@@ -25,7 +25,7 @@ export type Token =
 
 const keywords = new Set([
     'let', 'const', 'fun', 'type', 'return', 'break', 'if', 'else', 'for', 'of',
-    'while', 'match', 'case', 'when', 'true', 'false', 'null', 'readonly', 'static', 'as', 'in',
+    'while', 'match', 'case', 'when', 'true', 'false', 'null', 'readonly', 'sealed', 'static', 'as', 'in',
     'import', 'from', 'export', 'default', 'constructor', 'try', 'catch', 'finally'
 ])
 

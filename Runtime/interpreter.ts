@@ -57,7 +57,7 @@ export class Interpreter {
                 if (statement.defaultImport) this.declare(env, statement.defaultImport, adaptedModule, false)
                 for (const name of statement.namedImports) {
                     const localTypeModule = ({
-                        Iterable: 'iterable', Range: 'range', Array: 'array', Set: 'set', ValueSet: 'set', Map: 'map', ValueMap: 'map', Boolean: 'boolean', Number: 'number',
+                        Iterable: 'iterable', Range: 'range', Array: 'array', Set: 'set', ValueSet: 'set', Map: 'map', ValueMap: 'map', Object: 'object', Boolean: 'boolean', Number: 'number',
                         String: 'string', Tuple: 'tuple', Random: 'random', Error: 'error', Result: 'error', ok: 'error'
                     } as Record<string, string>)[name]
                     if ((statement.module === 'juno' || statement.module === 'juno:types') && localTypeModule) {
@@ -327,6 +327,7 @@ export class Interpreter {
                 const object = this.evaluate(expression.object, env)
                 if (object === null || object === undefined) throw new TypeError(`Cannot set property '${expression.property}' of null`)
                 const key = expression.index ? this.evaluate(expression.index, env) : expression.property!
+                if ((object as any).__junoSealed?.has(String(key))) throw new TypeError(`Cannot override sealed member '${String(key)}'`)
                 const right = this.evaluate(expression.value, env)
                 const current = expression.operator && expression.operator !== '=' ? (object as any)[key as any] : undefined
                 const value = expression.operator && expression.operator !== '=' ? this.applyCompoundOperator(expression.operator, current, right) : right
@@ -349,7 +350,13 @@ export class Interpreter {
                 const object: Record<string, any> = {}
                 const accessors = new Map<string, PropertyDescriptor>()
                 const readonly = new Set<string>()
-                Object.defineProperty(object, 'keys', { enumerable: false, value: function(this: object) { return Object.keys(this) } })
+                const sealed = new Set<string>()
+                Object.defineProperty(object, 'keys', {
+                    enumerable: false,
+                    configurable: true,
+                    writable: true,
+                    value: function(this: object) { return Object.keys(this) }
+                })
                 object.toString = this.defaultToString()
                 this.installDefaultHas(object)
                 for (const property of expression.properties) {
@@ -358,9 +365,14 @@ export class Interpreter {
                         let source = this.evaluate(property.value, env)
                         if (source?.__junoTypeConstructor) source = this.applyTypeDefaults({}, { kind: 'NamedType', name: source.typeName }, env)
                         if (!source || typeof source !== 'object') throw new TypeError('Object spread requires an object')
-                        for (const key of Object.keys(source)) object[key] = source[key]
+                        for (const key of Object.keys(source)) {
+                            if (sealed.has(key)) throw new TypeError(`Cannot override sealed member '${key}'`)
+                            object[key] = source[key]
+                        }
+                        for (const key of (source as any).__junoSealed ?? []) sealed.add(key)
                         continue
                     }
+                    if (sealed.has(property.key)) throw new TypeError(`Cannot override sealed member '${property.key}'`)
                     if (property.accessor && property.value.kind === 'Function') {
                         const previous = accessors.get(property.key) ?? Object.getOwnPropertyDescriptor(object, property.key) ?? { enumerable: true, configurable: true }
                         const fn = property.value
@@ -372,6 +384,7 @@ export class Interpreter {
                         previous.enumerable = true
                         previous.configurable = true
                         accessors.set(property.key, previous)
+                        if (property.sealed) sealed.add(property.key)
                         continue
                     }
                     if (property.value.kind === 'Function') {
@@ -381,9 +394,11 @@ export class Interpreter {
                         else object[property.key] = runtimeFn
                     } else object[property.key] = this.evaluate(property.value, env)
                     if (property.readonly) readonly.add(property.key)
+                    if (property.sealed) sealed.add(property.key)
                 }
                 for (const [key, descriptor] of accessors) Object.defineProperty(object, key, descriptor)
                 for (const key of readonly) Object.defineProperty(object, key, { ...Object.getOwnPropertyDescriptor(object, key), writable: false, enumerable: true, configurable: false })
+                Object.defineProperty(object, '__junoSealed', { enumerable: false, configurable: false, value: sealed })
                 this.installCallableMethods(object)
                 return object
             }
@@ -885,6 +900,8 @@ export class Interpreter {
         const interpreter = this
         if (!('has' in value)) Object.defineProperty(value, 'has', {
             enumerable: false,
+            configurable: true,
+            writable: true,
             value: function(this: object, key: string) { return key in this }
         })
         const installResult = (result: any): any => {
@@ -896,6 +913,8 @@ export class Interpreter {
         }
         if (!('asReadonly' in value)) Object.defineProperty(value, 'asReadonly', {
             enumerable: false,
+            configurable: true,
+            writable: true,
             value: function(this: any) {
                 const copy = Array.isArray(this) ? [...this] : { ...this }
                 interpreter.installDefaultHas(copy)
@@ -904,6 +923,8 @@ export class Interpreter {
         })
         if (!('asMutable' in value)) Object.defineProperty(value, 'asMutable', {
             enumerable: false,
+            configurable: true,
+            writable: true,
             value: function(this: any) {
                 const copy = Array.isArray(this) ? [...this] : { ...this }
                 interpreter.installDefaultHas(copy)
@@ -912,6 +933,8 @@ export class Interpreter {
         })
         if (!('deepClone' in value)) Object.defineProperty(value, 'deepClone', {
             enumerable: false,
+            configurable: true,
+            writable: true,
             value: function(this: object) {
                 const clone = deepCloneValue(this)
                 interpreter.installDefaultHas(clone)
@@ -920,10 +943,14 @@ export class Interpreter {
         })
         if (!('deepFreeze' in value)) Object.defineProperty(value, 'deepFreeze', {
             enumerable: false,
+            configurable: true,
+            writable: true,
             value: function(this: object) { return deepFreezeValue(this) }
         })
         if (!('toDeepFreezed' in value)) Object.defineProperty(value, 'toDeepFreezed', {
             enumerable: false,
+            configurable: true,
+            writable: true,
             value: function(this: object) {
                 const clone = deepCloneValue(this)
                 interpreter.installDefaultHas(clone)
@@ -932,6 +959,8 @@ export class Interpreter {
         })
         if (!('pick' in value)) Object.defineProperty(value, 'pick', {
             enumerable: false,
+            configurable: true,
+            writable: true,
             value: function(this: any, ...keys: (string | number)[]) {
                 if (Array.isArray(this) && keys.every(key => typeof key === 'number')) return installResult(keys.map(key => this[key]))
                 const result: Record<string, unknown> = {}
@@ -941,6 +970,8 @@ export class Interpreter {
         })
         if (!('omit' in value)) Object.defineProperty(value, 'omit', {
             enumerable: false,
+            configurable: true,
+            writable: true,
             value: function(this: any, ...keys: (string | number)[]) {
                 if (Array.isArray(this) && keys.every(key => typeof key === 'number')) {
                     const removed = new Set(keys)
@@ -979,6 +1010,7 @@ export class Interpreter {
         if (target.kind === 'Member') {
             const object = this.evaluate(target.object, env)
             if (object === null || object === undefined) throw new TypeError(`Cannot set property '${target.property}' of null`)
+            if ((object as any).__junoSealed?.has(target.property!)) throw new TypeError(`Cannot override sealed member '${target.property}'`)
             ;(object as any)[target.property] = value
             return
         }
@@ -986,6 +1018,7 @@ export class Interpreter {
             const object = this.evaluate(target.object, env)
             if (object === null || object === undefined) throw new TypeError('Cannot set an index on null')
             const index = this.evaluate(target.index, env)
+            if ((object as any).__junoSealed?.has(String(index))) throw new TypeError(`Cannot override sealed member '${String(index)}'`)
             ;(object as any)[index as any] = value
             return
         }
@@ -1382,6 +1415,8 @@ export class Interpreter {
         const resolvedType = this.resolveAliasType(type, env)
         if (resolvedType.kind === 'ObjectType') type = resolvedType
         this.installDefaultHas(runtimeValue)
+        const sealedMembers: Set<string> = runtimeValue.__junoSealed ?? new Set<string>()
+        if (!runtimeValue.__junoSealed) Object.defineProperty(runtimeValue, '__junoSealed', { enumerable: false, configurable: false, value: sealedMembers })
         if (typeof runtimeValue.toString !== 'function' && !(runtimeValue.toString as any)?.__junoFunction) {
             runtimeValue.toString = this.defaultToString()
         }
@@ -1397,6 +1432,7 @@ export class Interpreter {
                 previous.enumerable = true
                 previous.configurable = true
                 Object.defineProperty(runtimeValue, member.name, previous)
+                if (member.sealed) sealedMembers.add(member.name)
                 continue
             }
             if (member.method) {
@@ -1415,6 +1451,7 @@ export class Interpreter {
                 if (member.body && (isDefaultToString || (typeof runtimeValue[member.name] !== 'function' && !runtimeValue[member.name]?.__junoFunction))) {
                     ;(value as Record<string, any>)[member.name] = { __junoFunction: true, params: member.params ?? [], body: member.body, closure: env, thisValue: value } satisfies RuntimeFunction
                 }
+                if (member.sealed) sealedMembers.add(member.name)
                 continue
             }
             const nullableMember = member.type.kind === 'NamedType' && member.type.name === 'null'
@@ -1434,6 +1471,7 @@ export class Interpreter {
             if (fieldValue && typeof fieldValue === 'object' && !Array.isArray(fieldValue)) {
                 this.applyTypeDefaults(fieldValue, member.type, env, resolving)
             }
+            if (member.sealed) sealedMembers.add(member.name)
         }
         this.installCallableMethods(runtimeValue)
         return value
@@ -1644,6 +1682,18 @@ function deepCloneValue<T>(value: T, seen = new WeakMap<object, any>()): T {
     if (value === null || typeof value !== 'object' || isRuntimeCallable(value)) return value
     const existing = seen.get(value)
     if (existing) return existing
+    if (value instanceof Set) {
+        const clone = new Set()
+        seen.set(value, clone)
+        for (const item of value) clone.add(deepCloneValue(item, seen))
+        return clone as T
+    }
+    if (value instanceof Map) {
+        const clone = new Map()
+        seen.set(value, clone)
+        for (const [key, item] of value) clone.set(deepCloneValue(key, seen), deepCloneValue(item, seen))
+        return clone as T
+    }
     const clone: any = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value))
     seen.set(value, clone)
     for (const key of Reflect.ownKeys(value)) {

@@ -1,0 +1,94 @@
+import { stringify, parse, nativeKeys, readValue, clone, freeze } from './object.ts'
+import { KeyOf, Omit, Pick, Readonly } from 'juno:types'
+
+type AnyObject = { [key: string | number]: any }
+
+type ObjectMethods<T is object> = {
+    sealed pick<Keys is KeyOf<T>>(...keys: Keys[]): Pick<T, Keys>
+    sealed omit<Keys is KeyOf<T>>(...keys: Keys[]): Omit<T, Keys>
+    sealed keys(): KeyOf<T>[]
+    sealed values(): T[KeyOf<T>][]
+    sealed entries(): [KeyOf<T>, T[KeyOf<T>]][]
+    sealed has(key: KeyOf<T>): boolean
+    sealed asReadonly(): Readonly<T>
+    sealed asMutable(): T
+    sealed deepClone(): T
+    sealed deepFreeze(): Readonly<T>
+    sealed toDeepFreezed(): Readonly<T>
+    sealed toJSON(): T
+    sealed toJson(): T
+    sealed toString(): string
+}
+
+export constructor Object<T is object = object> {
+    fun (obj: T): T & ObjectMethods<T> =
+        const objectKeys = nativeKeys(obj)
+        return {
+            ...obj,
+
+            sealed fun pick(...keys: (string | number)[]): AnyObject =
+                let result: AnyObject = {}
+                for const key of keys
+                    result[key] = readValue(obj, key)
+                return result
+
+            sealed fun omit(...keys: (string | number)[]): AnyObject =
+                let result: AnyObject = {}
+                for const entry of this.entries()
+                    if !keys.includes(entry[0])
+                        result[entry[0]] = entry[1]
+                return result
+
+            sealed fun keys(): (string | number)[] =
+                return objectKeys
+
+            sealed fun values(): any[] =
+                return this.keys().map((key) => readValue(obj, key))
+
+            sealed fun entries(): [string | number, any][] =
+                return this.keys().map((key) => [key, readValue(obj, key)])
+
+            sealed fun has(key: string | number): boolean =
+                return this.keys().includes(key)
+
+            sealed fun asReadonly(): object =
+                return freeze(clone(this))
+
+            sealed fun asMutable(): object =
+                return clone(this)
+
+            sealed fun deepClone(): object =
+                return clone(this)
+
+            sealed fun deepFreeze(): object =
+                return freeze(this)
+
+            sealed fun toDeepFreezed(): object =
+                return freeze(clone(this))
+
+            sealed fun toJSON(): AnyObject =
+                let result: AnyObject = {}
+                for const key of objectKeys
+                    result[key] = readValue(obj, key)
+                return result
+
+            sealed fun toJson(): AnyObject =
+                return this.toJSON()
+
+            sealed fun toString(): string =
+                return stringify(this.toJSON())
+        }
+
+    fun from<K is string | number, V>(entries: Iterable<[K, V]>): Object<{ [key: K]: V }> =
+        let result: { [key: K]: V } = {}
+        for const entry of entries
+            result[entry[0]] = entry[1]
+        return Object<object>(result)
+
+    fun fromMap<K is string | number, V>(map: Map<K, V>): Object<{ [key: K]: V }> =
+        return Object.from(map)
+
+    fun fromJSON(json: string): Object<AnyObject> =
+        const parsedObj = parse(json)
+        return Object<object>(parsedObj)
+}

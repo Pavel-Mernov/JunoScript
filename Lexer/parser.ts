@@ -2,7 +2,7 @@ import { Lexer, Token, TokenType } from './lexer'
 
 export type Loc = { line: number; column: number }
 export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'LiteralType'; value: string | number | boolean; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'IndexedAccessType'; object: TypeNode; index: TypeNode; loc?: Loc } | { kind: 'TypeOfType'; expression: Expression; loc?: Loc } | { kind: 'ConditionalType'; check: TypeNode; target: TypeNode; consequent: TypeNode; alternate: TypeNode; loc?: Loc } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; result: TypeNode }
-export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; accessor?: 'get' | 'set'; indexType?: TypeNode; generics?: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params?: Parameter[]; body?: Statement[] }
+export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; sealed?: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; accessor?: 'get' | 'set'; indexType?: TypeNode; generics?: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params?: Parameter[]; body?: Statement[] }
 export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression; rest?: boolean }
 export type MatchPattern =
     | { kind: 'PatternLiteral'; value: string | number | bigint | boolean | null; loc?: Loc }
@@ -15,7 +15,7 @@ export type Expression =
     | { kind: 'Template'; parts: (string | Expression)[]; loc?: Loc }
     | { kind: 'Identifier'; name: string; loc?: Loc } | { kind: 'Array'; elements: Expression[]; loc?: Loc }
     | { kind: 'Spread'; value: Expression; loc?: Loc }
-      | { kind: 'Object'; properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set'; spread?: boolean; readonly?: boolean; typeOnly?: boolean; indexType?: TypeNode; declaredType?: TypeNode }[]; loc?: Loc }
+      | { kind: 'Object'; properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set'; spread?: boolean; readonly?: boolean; sealed?: boolean; typeOnly?: boolean; indexType?: TypeNode; declaredType?: TypeNode }[]; loc?: Loc }
     | { kind: 'Unary'; operator: string; operand: Expression; loc?: Loc }
     | { kind: 'Assignment'; name: string; loc?: Loc; operatorLoc?: Loc; operator?: string; value: Expression }
     | { kind: 'MemberAssignment'; object: Expression; property?: string; propertyLoc?: Loc; index?: Expression; loc?: Loc; operator?: string; value: Expression }
@@ -173,8 +173,9 @@ export class Parser {
         if (this.match('Keyword', 'constructor')) {
             const { name, loc } = this.identifier()
             const genericParameters = this.match('Less') ? this.genericParameters() : []
-            this.take('Colon', "Expected ':' before inherited constructor type")
-            const inheritedType = this.type()
+            const inheritedType: TypeNode = this.match('Colon')
+                ? this.type()
+                : { kind: 'ObjectType', members: [] }
             this.take('LeftBrace', "Expected '{' before constructor overloads")
             const overloads: Extract<Expression, { kind: 'Function' }>[] = []
             const methods: Extract<Statement, { kind: 'FunctionDeclaration' }>[] = []
@@ -440,7 +441,13 @@ export class Parser {
                     this.objectSeparators()
                     continue
                 }
-                const readonly = this.match('Keyword', 'readonly'), constant = this.match('Keyword', 'const')
+                let readonly = false, sealed = false, constant = false
+                while (this.is('Keyword') && ['readonly', 'sealed', 'const'].includes(String(this.value(this.current)))) {
+                    const modifier = String(this.value(this.tokens[this.pos++]))
+                    if (modifier === 'readonly') readonly = true
+                    else if (modifier === 'sealed') sealed = true
+                    else constant = true
+                }
                 const explicitFunction = this.match('Keyword', 'fun')
                 const accessor = this.is('Identifier') && ['get', 'set'].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === 'Identifier'
                     ? String(this.value(this.tokens[this.pos++])) as 'get' | 'set'
@@ -477,7 +484,7 @@ export class Parser {
                 if (accessor === 'get' && params?.length) this.fail('A getter cannot have parameters')
                 if (accessor === 'set' && params?.length !== 1) this.fail('A setter must have exactly one parameter')
                 const accessorType = accessor === 'set' ? params?.[0]?.type ?? { kind: 'NamedType', name: 'any' } : type
-                members.push({ name, loc, optional, readonly, constant, type: accessorType, defaultValue, method, accessor, generics: genericParameters.map(item => item.name), genericLocs: genericParameters.map(item => item.loc), genericConstraints: genericParameters.map(item => item.constraint), genericDefaults: genericParameters.map(item => item.defaultType), params, body }); this.objectSeparators()
+                members.push({ name, loc, optional, readonly, sealed, constant, type: accessorType, defaultValue, method, accessor, generics: genericParameters.map(item => item.name), genericLocs: genericParameters.map(item => item.loc), genericConstraints: genericParameters.map(item => item.constraint), genericDefaults: genericParameters.map(item => item.defaultType), params, body }); this.objectSeparators()
             }
             this.take('RightBrace'); result = { kind: 'ObjectType', members }
         } else if (this.match('LeftParen')) {
@@ -785,7 +792,7 @@ export class Parser {
         }
         if (this.match('LeftBrace')) {
             const token = this.tokens[this.pos - 1]
-            const properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set'; spread?: boolean; readonly?: boolean; typeOnly?: boolean; indexType?: TypeNode; declaredType?: TypeNode }[] = []; this.objectSeparators()
+            const properties: { key: string; keyLoc?: Loc; value: Expression; accessor?: 'get' | 'set'; spread?: boolean; readonly?: boolean; sealed?: boolean; typeOnly?: boolean; indexType?: TypeNode; declaredType?: TypeNode }[] = []; this.objectSeparators()
             while (!this.is('RightBrace') && !this.is('EOF')) {
                 if (this.match('LeftBracket')) {
                     const key = this.identifier()
@@ -805,7 +812,12 @@ export class Parser {
                     if (this.match('Comma')) this.objectSeparators()
                     continue
                 }
-                const readonly = this.match('Keyword', 'readonly')
+                let readonly = false, sealed = false
+                while (this.is('Keyword') && ['readonly', 'sealed'].includes(String(this.value(this.current)))) {
+                    const modifier = String(this.value(this.tokens[this.pos++]))
+                    if (modifier === 'readonly') readonly = true
+                    else sealed = true
+                }
                 const explicitFunction = this.match('Keyword', 'fun')
                 const accessor = this.is('Identifier') && ['get', 'set'].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === 'Identifier'
                     ? String(this.value(this.tokens[this.pos++])) as 'get' | 'set'
@@ -838,7 +850,7 @@ export class Parser {
                 }
                 else if (explicitFunction) this.fail("Expected '(' after object function name")
                 else value = { kind: 'Identifier', name: property.name, loc: property.loc }
-                properties.push({ key: property.name, keyLoc: property.loc, value, accessor, readonly })
+                properties.push({ key: property.name, keyLoc: property.loc, value, accessor, readonly, sealed })
                 this.objectSeparators()
                 if (this.match('Comma')) this.objectSeparators()
             }
@@ -904,7 +916,8 @@ function inferredTypeNode(expression: Expression): TypeNode {
             name: property.key,
             type: property.typeOnly ? property.declaredType ?? { kind: 'NamedType', name: 'any' } : property.accessor === 'get' && property.value.kind === 'Function' ? property.value.returnType ?? { kind: 'NamedType', name: 'any' } : inferredTypeNode(property.value),
             optional: false,
-            readonly: false,
+            readonly: Boolean(property.readonly),
+            sealed: Boolean(property.sealed),
             constant: false,
             indexType: property.indexType
         }]) }

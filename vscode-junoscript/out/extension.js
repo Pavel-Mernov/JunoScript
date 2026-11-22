@@ -58,6 +58,7 @@ var keywords = /* @__PURE__ */ new Set([
   "false",
   "null",
   "readonly",
+  "sealed",
   "static",
   "as",
   "in",
@@ -495,8 +496,7 @@ var Parser = class _Parser {
     if (this.match("Keyword", "constructor")) {
       const { name, loc } = this.identifier();
       const genericParameters = this.match("Less") ? this.genericParameters() : [];
-      this.take("Colon", "Expected ':' before inherited constructor type");
-      const inheritedType = this.type();
+      const inheritedType = this.match("Colon") ? this.type() : { kind: "ObjectType", members: [] };
       this.take("LeftBrace", "Expected '{' before constructor overloads");
       const overloads = [];
       const methods = [];
@@ -778,7 +778,13 @@ var Parser = class _Parser {
           this.objectSeparators();
           continue;
         }
-        const readonly = this.match("Keyword", "readonly"), constant = this.match("Keyword", "const");
+        let readonly = false, sealed = false, constant = false;
+        while (this.is("Keyword") && ["readonly", "sealed", "const"].includes(String(this.value(this.current)))) {
+          const modifier = String(this.value(this.tokens[this.pos++]));
+          if (modifier === "readonly") readonly = true;
+          else if (modifier === "sealed") sealed = true;
+          else constant = true;
+        }
         const explicitFunction = this.match("Keyword", "fun");
         const accessor = this.is("Identifier") && ["get", "set"].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === "Identifier" ? String(this.value(this.tokens[this.pos++])) : void 0;
         const anonymousFunction = explicitFunction && this.is("LeftParen");
@@ -810,7 +816,7 @@ var Parser = class _Parser {
         if (accessor === "get" && params?.length) this.fail("A getter cannot have parameters");
         if (accessor === "set" && params?.length !== 1) this.fail("A setter must have exactly one parameter");
         const accessorType = accessor === "set" ? params?.[0]?.type ?? { kind: "NamedType", name: "any" } : type;
-        members.push({ name, loc, optional, readonly, constant, type: accessorType, defaultValue, method: method2, accessor, generics: genericParameters.map((item) => item.name), genericLocs: genericParameters.map((item) => item.loc), genericConstraints: genericParameters.map((item) => item.constraint), genericDefaults: genericParameters.map((item) => item.defaultType), params, body });
+        members.push({ name, loc, optional, readonly, sealed, constant, type: accessorType, defaultValue, method: method2, accessor, generics: genericParameters.map((item) => item.name), genericLocs: genericParameters.map((item) => item.loc), genericConstraints: genericParameters.map((item) => item.constraint), genericDefaults: genericParameters.map((item) => item.defaultType), params, body });
         this.objectSeparators();
       }
       this.take("RightBrace");
@@ -1236,7 +1242,12 @@ var Parser = class _Parser {
           if (this.match("Comma")) this.objectSeparators();
           continue;
         }
-        const readonly = this.match("Keyword", "readonly");
+        let readonly = false, sealed = false;
+        while (this.is("Keyword") && ["readonly", "sealed"].includes(String(this.value(this.current)))) {
+          const modifier = String(this.value(this.tokens[this.pos++]));
+          if (modifier === "readonly") readonly = true;
+          else sealed = true;
+        }
         const explicitFunction = this.match("Keyword", "fun");
         const accessor = this.is("Identifier") && ["get", "set"].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === "Identifier" ? String(this.value(this.tokens[this.pos++])) : void 0;
         const anonymousFunction = explicitFunction && this.is("LeftParen");
@@ -1263,7 +1274,7 @@ var Parser = class _Parser {
           value = { kind: "Function", params, returnType, body };
         } else if (explicitFunction) this.fail("Expected '(' after object function name");
         else value = { kind: "Identifier", name: property.name, loc: property.loc };
-        properties.push({ key: property.name, keyLoc: property.loc, value, accessor, readonly });
+        properties.push({ key: property.name, keyLoc: property.loc, value, accessor, readonly, sealed });
         this.objectSeparators();
         if (this.match("Comma")) this.objectSeparators();
       }
@@ -1332,7 +1343,8 @@ function inferredTypeNode(expression) {
         name: property.key,
         type: property.typeOnly ? property.declaredType ?? { kind: "NamedType", name: "any" } : property.accessor === "get" && property.value.kind === "Function" ? property.value.returnType ?? { kind: "NamedType", name: "any" } : inferredTypeNode(property.value),
         optional: false,
-        readonly: false,
+        readonly: Boolean(property.readonly),
+        sealed: Boolean(property.sealed),
         constant: false,
         indexType: property.indexType
       }]) };
@@ -1971,9 +1983,9 @@ function printType(type) {
       const members = type.members.map((member) => {
         if (member.indexType) return `[${member.name}: ${printType(member.indexType)}]: ${printType(member.type)}`;
         if (member.name === "" && member.method) return `fun (${(member.params ?? []).map(printParam).join(", ")}): ${printType(member.type)}`;
-        const prefix = `${member.readonly ? "readonly " : ""}${member.constant ? "const " : ""}${member.name}${member.optional ? "?" : ""}`;
-        if (member.accessor === "get") return `get ${member.name}(): ${printType(member.type)}`;
-        if (member.accessor === "set") return `set ${member.name}(${(member.params ?? []).map(printParam).join(", ")}): void`;
+        const prefix = `${member.readonly ? "readonly " : ""}${member.sealed ? "sealed " : ""}${member.constant ? "const " : ""}${member.name}${member.optional ? "?" : ""}`;
+        if (member.accessor === "get") return `${member.sealed ? "sealed " : ""}get ${member.name}(): ${printType(member.type)}`;
+        if (member.accessor === "set") return `${member.sealed ? "sealed " : ""}set ${member.name}(${(member.params ?? []).map(printParam).join(", ")}): void`;
         if (member.method) return `${prefix}${printGenerics(member.generics ?? [], member.genericConstraints, member.genericDefaults)}(${(member.params ?? []).map(printParam).join(", ")}): ${printType(member.type)}`;
         return `${prefix}: ${printType(member.type)}`;
       });
@@ -2030,7 +2042,8 @@ function printSymbol(name, symbol) {
     case "constructor": {
       const generics = printGenerics(symbol.generics, symbol.genericConstraints, symbol.genericDefaults);
       const resultType = symbol.generics.length ? `${name}<${symbol.generics.join(", ")}>` : name;
-      const overloads = symbol.overloads.map((item) => `constructor ${name}${generics}(${item.params.map(printParam).join(", ")}): ${resultType}`);
+      const structural = symbol.inheritedType.kind === "ObjectType" && symbol.inheritedType.members.length === 0;
+      const overloads = symbol.overloads.map((item) => `constructor ${name}${generics}(${item.params.map(printParam).join(", ")}): ${structural ? printType(item.returnType) : resultType}`);
       const methods = symbol.methods.map((method2) => `${name}.${method2.name}${printGenerics(method2.generics, method2.genericConstraints, method2.genericDefaults)}(${method2.params.map(printParam).join(", ")}): ${printType(method2.returnType)}`);
       return { code: [...overloads, ...methods].join("\n"), docs: symbol.docs };
     }
@@ -2746,6 +2759,97 @@ function hostDeclarations(source) {
     if (name === "parseInt") return method(name, [{ name: "value", type: string }, { name: "radix", type: number, defaultValue: { kind: "Literal", value: null } }], number);
     return void 0;
   };
+  const splitTopLevel = (value) => {
+    const parts = [];
+    let start = 0, depth = 0, quote = "";
+    for (let index = 0; index < value.length; index++) {
+      const character = value[index];
+      if (quote) {
+        if (character === "\\") index++;
+        else if (character === quote) quote = "";
+        continue;
+      }
+      if (character === "'" || character === '"' || character === "`") {
+        quote = character;
+        continue;
+      }
+      if ("{[(".includes(character)) depth++;
+      else if ("}])".includes(character)) depth--;
+      else if (character === "," && depth === 0) {
+        parts.push(value.slice(start, index).trim());
+        start = index + 1;
+      }
+    }
+    parts.push(value.slice(start).trim());
+    return parts.filter(Boolean);
+  };
+  const inferHostValue = (raw) => {
+    const value = raw.trim().replace(/;$/, "").trim();
+    const assertion = /^(.*?)\s+as\s+([\s\S]+)$/.exec(value);
+    if (assertion) return hostType(assertion[2]);
+    if (/^['"`]/.test(value)) return named("string");
+    if (/^(?:true|false)$/.test(value)) return named("boolean");
+    if (/^[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?$/.test(value)) return named("number");
+    if (/^[-+]?\d+n$/.test(value)) return named("BigInt");
+    if (value === "null") return named("null");
+    if (value.startsWith("[") && value.endsWith("]")) {
+      const elements = splitTopLevel(value.slice(1, -1)).map(inferHostValue);
+      return arrayOf(elements.length ? unionOf(elements) : named("any"));
+    }
+    if (value.startsWith("{") && value.endsWith("}")) {
+      const members = splitTopLevel(value.slice(1, -1)).flatMap((property) => {
+        const separator = (() => {
+          let depth = 0, quote = "";
+          for (let index = 0; index < property.length; index++) {
+            const character = property[index];
+            if (quote) {
+              if (character === "\\") index++;
+              else if (character === quote) quote = "";
+              continue;
+            }
+            if (character === "'" || character === '"' || character === "`") {
+              quote = character;
+              continue;
+            }
+            if ("{[(".includes(character)) depth++;
+            else if ("}])".includes(character)) depth--;
+            else if (character === ":" && depth === 0) return index;
+          }
+          return -1;
+        })();
+        if (separator < 0) {
+          const name2 = property.trim();
+          const type = localTypes.get(name2);
+          return /^[A-Za-z_$][\w$]*$/.test(name2) ? [field(name2, type ?? named("any"))] : [];
+        }
+        const rawName = property.slice(0, separator).trim();
+        const name = rawName.replace(/^['"]|['"]$/g, "");
+        return [field(name, inferHostValue(property.slice(separator + 1)))];
+      });
+      return { kind: "ObjectType", members };
+    }
+    return localTypes.get(value) ?? named("any");
+  };
+  for (const match of source.matchAll(/\b(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?:\:\s*([^=\n]+))?\s*=\s*/g)) {
+    const start = match.index + match[0].length;
+    let end = start, depth = 0, quote = "";
+    for (; end < source.length; end++) {
+      const character = source[end];
+      if (quote) {
+        if (character === "\\") end++;
+        else if (character === quote) quote = "";
+        continue;
+      }
+      if (character === "'" || character === '"' || character === "`") {
+        quote = character;
+        continue;
+      }
+      if ("{[(".includes(character)) depth++;
+      else if ("}])".includes(character)) depth--;
+      else if ((character === ";" || character === "\n" || character === "\r") && depth === 0) break;
+    }
+    localTypes.set(match[1], match[2] ? hostType(match[2]) : inferHostValue(source.slice(start, end)));
+  }
   const functions = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<([^>]+)>)?\s*\(([^)]*)\)\s*(?::\s*([^\n{]+))?/g;
   for (const match of source.matchAll(functions)) {
     const params = match[3].trim() ? match[3].split(",").map((raw, index) => {
@@ -2779,7 +2883,7 @@ function hostDeclarations(source) {
     result.set(match[1], { kind: "fun", generics, params, returnType: match[4] ? hostType(match[4]) : inferredReturnType });
   }
   for (const match of source.matchAll(/export\s+(?:const|let|var|class)\s+([A-Za-z_$][\w$]*)/g)) {
-    if (!result.has(match[1])) result.set(match[1], { kind: "var", type: named("any") });
+    if (!result.has(match[1])) result.set(match[1], { kind: "var", type: localTypes.get(match[1]) ?? named("any") });
   }
   for (const match of source.matchAll(/const\s*\{([^}]+)\}\s*=\s*globalThis\.Number/g)) {
     for (const item of match[1].split(",")) {
@@ -2813,6 +2917,7 @@ function hostDeclarations(source) {
   }
   for (const match of source.matchAll(/export\s+(?:const|let|var)\s*\{([^}]+)\}\s*=\s*([^\n;]+)/g)) {
     const sourceExpression = match[2].trim();
+    const sourceType = localTypes.get(sourceExpression);
     for (const item of match[1].split(",")) {
       const [sourceName, exportedName = sourceName] = item.trim().split(/\s*:\s*/);
       if (!sourceName) continue;
@@ -2823,6 +2928,8 @@ function hostDeclarations(source) {
           params: [{ name: parameterName, type: arrayOf(named("number")), rest: true }],
           returnType: named("string")
         });
+      } else if (sourceType?.kind === "ObjectType") {
+        result.set(exportedName, { kind: "var", type: sourceType.members.find((member) => member.name === sourceName)?.type ?? named("any") });
       } else result.set(exportedName, { kind: "var", type: named("any") });
     }
   }
@@ -2841,6 +2948,33 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
     const declaration = statement.kind === "Export" ? statement.declaration : statement;
     if (declaration.kind === "TypeDeclaration") declarationEnv.set(declaration.name, { kind: "type", generics: declaration.generics, value: declaration.value });
   }
+  const expandLocalAliases = (type, resolving = /* @__PURE__ */ new Set()) => {
+    if (type.kind === "NamedType") {
+      const symbol = declarationEnv.get(type.name);
+      if (symbol?.kind === "type" && symbol.generics.length === 0 && !resolving.has(type.name)) {
+        return expandLocalAliases(symbol.value, /* @__PURE__ */ new Set([...resolving, type.name]));
+      }
+      return type;
+    }
+    if (type.kind === "GenericType") {
+      const symbol = declarationEnv.get(type.name);
+      if (symbol?.kind === "type" && !resolving.has(type.name)) {
+        return expandLocalAliases(instantiate(symbol.value, symbol.generics, type.args, symbol.genericDefaults), /* @__PURE__ */ new Set([...resolving, type.name]));
+      }
+      return { ...type, args: type.args.map((argument) => expandLocalAliases(argument, resolving)) };
+    }
+    if (type.kind === "UnionType" || type.kind === "IntersectionType") return { ...type, types: type.types.map((part) => expandLocalAliases(part, resolving)) };
+    if (type.kind === "ArrayType") return { ...type, element: expandLocalAliases(type.element, resolving) };
+    if (type.kind === "IndexedAccessType") return { ...type, object: expandLocalAliases(type.object, resolving), index: expandLocalAliases(type.index, resolving) };
+    if (type.kind === "FunctionType") return { ...type, params: type.params.map((param) => expandLocalAliases(param, resolving)), result: expandLocalAliases(type.result, resolving) };
+    if (type.kind === "ObjectType") return { ...type, members: type.members.map((member) => ({
+      ...member,
+      type: expandLocalAliases(member.type, resolving),
+      indexType: member.indexType ? expandLocalAliases(member.indexType, resolving) : void 0,
+      params: member.params?.map((param) => ({ ...param, type: param.type ? expandLocalAliases(param.type, resolving) : void 0 }))
+    })) };
+    return type;
+  };
   for (const statement of statements) {
     const declaration = statement.kind === "Export" ? statement.declaration : statement;
     const exported = statement.kind === "Export";
@@ -2858,9 +2992,19 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
       generics: declaration.generics,
       genericConstraints: declaration.genericConstraints,
       genericDefaults: declaration.genericDefaults,
-      inheritedType: declaration.inheritedType,
-      overloads: declaration.overloads.map((overload) => ({ params: overload.params, returnType: overload.returnType ?? inferFunctionReturnType2(overload.body, globals(), overload.params) })),
-      methods: declaration.methods.map((method2) => ({ name: method2.name, generics: method2.generics ?? [], genericConstraints: method2.genericConstraints, genericDefaults: method2.genericDefaults, params: method2.params, returnType: method2.returnType ?? inferFunctionReturnType2(method2.body, globals(), method2.params) }))
+      inheritedType: expandLocalAliases(declaration.inheritedType),
+      overloads: declaration.overloads.map((overload) => ({
+        params: overload.params.map((param) => ({ ...param, type: param.type ? expandLocalAliases(param.type) : void 0 })),
+        returnType: expandLocalAliases(overload.returnType ?? inferFunctionReturnType2(overload.body, declarationEnv, overload.params))
+      })),
+      methods: declaration.methods.map((method2) => ({
+        name: method2.name,
+        generics: method2.generics ?? [],
+        genericConstraints: method2.genericConstraints,
+        genericDefaults: method2.genericDefaults,
+        params: method2.params.map((param) => ({ ...param, type: param.type ? expandLocalAliases(param.type) : void 0 })),
+        returnType: expandLocalAliases(method2.returnType ?? inferFunctionReturnType2(method2.body, declarationEnv, method2.params))
+      }))
     });
     else if (declaration.kind === "Variable" && exported) result.set(declaration.name, { kind: "var", type: declaration.type ? resolveType(declaration.type, declarationEnv) : declaration.initializer ? inferExpression(declaration.initializer, declarationEnv) : named("any") });
     else if (declaration.kind === "Destructure" && exported) {
@@ -3330,6 +3474,7 @@ function inferExpression(expression, env) {
           type: property.declaredType,
           optional: false,
           readonly: Boolean(property.readonly),
+          sealed: Boolean(property.sealed),
           constant: false
         }];
         if (property.spread) {
@@ -3348,16 +3493,16 @@ function inferExpression(expression, env) {
         }
         if (property.accessor === "get" && property.value.kind === "Function") {
           const result = property.value.returnType ?? inferFunctionReturnType2(property.value.body, env, property.value.params);
-          return [{ ...field(property.key, result), accessor: "get" }];
+          return [{ ...field(property.key, result), sealed: Boolean(property.sealed), accessor: "get" }];
         }
         if (property.accessor === "set" && property.value.kind === "Function") {
           const setterType = property.value.params[0] ? parameterBodyType(property.value.params[0]) : named("any");
-          return [{ ...field(property.key, setterType), accessor: "set", params: property.value.params }];
+          return [{ ...field(property.key, setterType), sealed: Boolean(property.sealed), accessor: "set", params: property.value.params }];
         }
         if (property.value.kind === "Function") {
-          return [method(property.key, property.value.params, property.value.returnType ?? named("any"))];
+          return [{ ...method(property.key, property.value.params, property.value.returnType ?? named("any")), sealed: Boolean(property.sealed) }];
         }
-        return [field(property.key, inferExpression(property.value, env), property.readonly)];
+        return [{ ...field(property.key, inferExpression(property.value, env), property.readonly), sealed: Boolean(property.sealed) }];
       });
       const objectType = { kind: "ObjectType", members };
       const methodEnv = new Map(env);
@@ -3367,7 +3512,7 @@ function inferExpression(expression, env) {
         const index = members.findLastIndex((member) => member.name === property.key);
         if (index >= 0) {
           const inferred = inferFunctionReturnType2(property.value.body, methodEnv, property.value.params);
-          members[index] = property.accessor === "get" ? { ...field(property.key, inferred), accessor: "get" } : method(property.key, property.value.params, inferred);
+          members[index] = property.accessor === "get" ? { ...field(property.key, inferred), sealed: Boolean(property.sealed), accessor: "get" } : { ...method(property.key, property.value.params, inferred), sealed: Boolean(property.sealed) };
         }
       }
       objectType.members = members.filter((member, index) => {
@@ -3454,6 +3599,9 @@ function inferExpression(expression, env) {
             const [key, value] = inferMapArguments(expression.args, env);
             args[0] = key;
             args[1] = value;
+          }
+          if (symbol.inheritedType.kind === "ObjectType" && symbol.inheritedType.members.length === 0 && symbol.overloads[0]) {
+            return instantiate(symbol.overloads[0].returnType, symbol.generics, args, symbol.genericDefaults);
           }
           return { kind: "GenericType", name: expression.callee.name, args };
         }
@@ -3672,12 +3820,12 @@ function compactType(type, depth = 0) {
     case "ObjectType": {
       if (!type.members.length) return "{}";
       const members = type.members.map((member) => {
-        const modifier = `${member.readonly ? "readonly " : ""}${member.constant ? "const " : ""}`;
+        const modifier = `${member.readonly ? "readonly " : ""}${member.sealed ? "sealed " : ""}${member.constant ? "const " : ""}`;
         const optional = member.optional ? "?" : "";
         const params = (member.params ?? []).map((param) => `${param.rest ? "..." : ""}${param.name}${param.defaultValue !== void 0 ? "?" : ""}: ${compactType(parameterType(param), depth + 1)}`).join(", ");
         if (member.indexType) return `${childIndent}[${member.name}: ${compactType(member.indexType, depth + 1)}]: ${compactType(member.type, depth + 1)};`;
-        if (member.accessor === "get") return `${childIndent}get ${member.name}(): ${compactType(member.type, depth + 1)};`;
-        if (member.accessor === "set") return `${childIndent}set ${member.name}(${params}): void;`;
+        if (member.accessor === "get") return `${childIndent}${member.sealed ? "sealed " : ""}get ${member.name}(): ${compactType(member.type, depth + 1)};`;
+        if (member.accessor === "set") return `${childIndent}${member.sealed ? "sealed " : ""}set ${member.name}(${params}): void;`;
         if (member.method) return `${childIndent}${modifier}${member.name}${optional}(${params}): ${compactType(member.type, depth + 1)};`;
         return `${childIndent}${modifier}${member.name}${optional}: ${compactType(member.type, depth + 1)};`;
       });
@@ -3856,13 +4004,19 @@ var Analyzer = class {
       case "TypeDeclaration": {
         const symbol = { kind: "type", generics: statement.generics, genericConstraints: statement.genericConstraints, genericDefaults: statement.genericDefaults, value: statement.value };
         this.bind(env, statement.name, symbol);
-        this.walkType(statement.value, env);
-        const resolved = resolveType(statement.value, env);
+        const genericEnv = new Map(env);
+        statement.generics.forEach((name, index) => genericEnv.set(name, {
+          kind: "type",
+          generics: [],
+          value: statement.genericConstraints?.[index] ?? statement.genericDefaults?.[index] ?? named("any")
+        }));
+        this.walkType(statement.value, genericEnv);
+        const resolved = resolveType(statement.value, genericEnv);
         const printed = {
           code: `type ${statement.name}${printGenerics(statement.generics, statement.genericConstraints, statement.genericDefaults)} = ${printType(statement.value)}${statement.generics.length ? "" : `
 (infer) ${printType(resolved)}`}`
         };
-        this.addHover(statement.name, statement.loc, printed.code, void 0, statement.generics.length ? compactType(statement.value) : typeDescription(resolved, env));
+        this.addHover(statement.name, statement.loc, printed.code, void 0, statement.generics.length ? compactType(statement.value) : typeDescription(resolved, genericEnv));
         statement.generics.forEach((name, index) => {
           this.addHover(name, statement.genericLocs?.[index], `(type parameter) ${name}`);
           const constraint = statement.genericConstraints?.[index];
@@ -4142,7 +4296,7 @@ var Analyzer = class {
 (infer) ${printType(inferred)}`, void 0, typeDescription(inferred, env));
           if (type.name === "KeyOf" && type.args[0]) {
             const source = resolveType(type.args[0], env);
-            const objectLike = source.kind === "ObjectType" || source.kind === "ArrayType" || source.kind === "GenericType" && (source.name === "Array" || source.name === "ReadonlyArray");
+            const objectLike = isNamedType(source, "object") || source.kind === "ObjectType" || source.kind === "ArrayType" || source.kind === "GenericType" && (source.name === "Array" || source.name === "ReadonlyArray");
             if (!objectLike) this.addDiagnostic(type.args[0].loc, `Type '${printType(type.args[0])}' does not satisfy constraint 'object'.`);
           }
         } else if (symbol && symbol.kind !== "type") {
@@ -4204,7 +4358,7 @@ var Analyzer = class {
         }
         for (const member of type.members) {
           const signature = member.indexType ? `(index signature) [${member.name}: ${printType(member.indexType)}]: ${printType(member.type)}
-(infer) typeof<obj[${member.name}]> = ${printType(member.type)}` : member.accessor === "get" ? `(getter) ${member.name}: ${printType(member.type)}` : member.accessor === "set" ? `(setter) ${member.name}(${(member.params ?? []).map(printParam).join(", ")})` : member.method ? `(method) ${member.name}${printGenerics(member.generics ?? [], member.genericConstraints, member.genericDefaults)}(${(member.params ?? []).map(printParam).join(", ")}): ${printType(member.type)}` : `(property) ${member.readonly ? "readonly " : ""}${member.name}${member.optional ? "?" : ""}: ${printType(member.type)}`;
+(infer) typeof<obj[${member.name}]> = ${printType(member.type)}` : member.accessor === "get" ? `(getter) ${member.name}: ${printType(member.type)}` : member.accessor === "set" ? `(setter) ${member.name}(${(member.params ?? []).map(printParam).join(", ")})` : member.method ? `(method) ${member.sealed ? "sealed " : ""}${member.name}${printGenerics(member.generics ?? [], member.genericConstraints, member.genericDefaults)}(${(member.params ?? []).map(printParam).join(", ")}): ${printType(member.type)}` : `(property) ${member.readonly ? "readonly " : ""}${member.sealed ? "sealed " : ""}${member.name}${member.optional ? "?" : ""}: ${printType(member.type)}`;
           this.addHover(member.name, member.loc, signature);
           const memberEnv = member.indexType ? new Map(env) : env;
           if (member.indexType) memberEnv.set(member.name, { kind: "type", generics: [], value: resolveType(member.indexType, env) });
@@ -4310,12 +4464,16 @@ var Analyzer = class {
           const resolved = objectType.kind === "GenericType" && env.get(objectType.name)?.kind === "constructor" ? resolveType(instantiate(env.get(objectType.name).inheritedType, env.get(objectType.name).generics, objectType.args), env) : resolveType(objectType, env);
           const readonlyMember = resolved.kind === "ObjectType" ? resolved.members.find((member) => member.name === String(expression.index.value) && member.readonly) : resolved.kind === "IntersectionType" ? resolved.types.flatMap((part) => part.kind === "ObjectType" ? part.members : []).find((member) => member.name === String(expression.index.value) && member.readonly) : void 0;
           if (readonlyArray || readonlyMember) this.addDiagnostic(expression.loc, `Cannot assign to readonly index '${String(expression.index.value)}'.`);
+          const sealedMember = resolved.kind === "ObjectType" ? resolved.members.find((member) => member.name === String(expression.index.value) && member.sealed) : void 0;
+          if (sealedMember) this.addDiagnostic(expression.loc, `Cannot override sealed member '${String(expression.index.value)}'.`);
         }
         if (expression.property) {
           const objectType = inferExpression(expression.object, env);
           const resolvedObject = resolveType(objectType, env);
           const readonlyProperty = resolvedObject.kind === "ObjectType" ? resolvedObject.members.find((item) => item.name === expression.property && item.readonly) : void 0;
           if (readonlyProperty) this.addDiagnostic(expression.propertyLoc ?? expression.loc, `Cannot assign to readonly property '${expression.property}'.`);
+          const sealedProperty = resolvedObject.kind === "ObjectType" ? resolvedObject.members.find((item) => item.name === expression.property && item.sealed) : void 0;
+          if (sealedProperty) this.addDiagnostic(expression.propertyLoc ?? expression.loc, `Cannot override sealed member '${expression.property}'.`);
           const setter = lookupAccessor(objectType, expression.property, "set", env);
           const member = setter ?? lookupMember(objectType, expression.property, env);
           const code = setter ? `(setter) ${setter.name}(${(setter.params ?? []).map(printParam).join(", ")})` : isFunctionSymbol(member) ? `(method) ${expression.property}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}` : `(property) ${expression.property}: ${printType(member && !isFunctionSymbol(member) ? member : named("any"))}`;
@@ -4326,6 +4484,7 @@ var Analyzer = class {
       case "Object": {
         const objectType = thisType ? resolveType(thisType, env) : inferExpression(expression, env);
         const methodEnv = new Map(env);
+        const sealedMembers = /* @__PURE__ */ new Set();
         this.bind(methodEnv, "this", { kind: "var", mutable: false, type: objectType });
         for (const property of expression.properties) {
           if (property.typeOnly) {
@@ -4334,9 +4493,17 @@ var Analyzer = class {
             continue;
           }
           if (property.spread) {
+            const spreadType = resolveType(inferExpression(property.value, env), env);
+            const spreadMembers = spreadType.kind === "ObjectType" ? spreadType.members : [];
+            for (const member2 of spreadMembers) {
+              if (sealedMembers.has(member2.name)) this.addDiagnostic(property.keyLoc, `Cannot override sealed member '${member2.name}'.`);
+              if (member2.sealed) sealedMembers.add(member2.name);
+            }
             this.walkExpression(property.value, env, thisType);
             continue;
           }
+          if (sealedMembers.has(property.key)) this.addDiagnostic(property.keyLoc, `Cannot override sealed member '${property.key}'.`);
+          if (property.sealed) sealedMembers.add(property.key);
           const member = lookupMember(objectType, property.key, env);
           const code = isFunctionSymbol(member) ? property.key === "" ? `(call) (${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}` : `(method) ${property.key}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}` : `(property) ${property.key}: ${printType(member && !isFunctionSymbol(member) ? member : named("any"))}`;
           this.addHover(property.key, property.keyLoc, code);
@@ -4941,7 +5108,7 @@ ${info.docs}`);
         }
         if (!info?.typeDescription) return [];
         const fields = /* @__PURE__ */ new Map();
-        const fieldPattern = /^\s*(?:readonly\s+)?(?:"([^"]+)"|(-?\d+(?:\.\d+)?)|([A-Za-z_$][\w$]*))\??\s*(?::|\()/gm;
+        const fieldPattern = /^\s*(?:(?:readonly|sealed)\s+)*(?:"([^"]+)"|(-?\d+(?:\.\d+)?)|([A-Za-z_$][\w$]*))\??\s*(?::|\()/gm;
         for (let field2 = fieldPattern.exec(info.typeDescription); field2; field2 = fieldPattern.exec(info.typeDescription)) {
           const name = field2[1] ?? field2[2] ?? field2[3];
           if (name.startsWith("__") || fields.has(name)) continue;

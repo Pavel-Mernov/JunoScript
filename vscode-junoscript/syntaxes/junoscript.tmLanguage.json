@@ -217,7 +217,7 @@
         },
         {
           "name": "storage.modifier.junoscript",
-          "match": "\\b(readonly|static)\\b"
+          "match": "\\b(readonly|sealed|static)\\b"
         },
         {
           "name": "storage.type.junoscript",
@@ -245,7 +245,7 @@
         },
         {
           "name": "support.type.primitive.junoscript",
-          "match": "\\b(string|number|boolean|void)\\b"
+          "match": "\\b(string|number|boolean|object|void)\\b"
         },
         {
           "name": "support.type.builtin.junoscript",
