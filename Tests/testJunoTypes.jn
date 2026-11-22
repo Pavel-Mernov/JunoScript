@@ -1,4 +1,4 @@
-import { Iterable, Range, Array, Error, Result, ok } from 'juno/types'
+import { Iterable, Range, Array, Error, Result, ok } from 'juno:types'
 import { console } from 'juno'
 
 const textIndices = "abc".indices

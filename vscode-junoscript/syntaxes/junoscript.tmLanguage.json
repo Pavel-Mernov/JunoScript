@@ -205,7 +205,7 @@
         },
         {
           "name": "keyword.control.junoscript",
-          "match": "\\b(if|else|for|of|while|match|case|when|return|break|in|as|from|import|export|default)\\b"
+          "match": "\\b(if|else|for|of|while|match|case|when|try|catch|finally|return|break|in|as|from|import|export|default)\\b"
         },
         {
           "name": "entity.name.type.operator.constraint.junoscript",

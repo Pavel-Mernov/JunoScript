@@ -439,6 +439,10 @@ function callableType(type: TypeNode, env: Env): Extract<TypeNode, { kind: 'Func
 
 function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | FunctionSymbol | undefined {
     if (type.kind === 'GenericType' && type.name === 'Tuple' && type.args[0]?.kind !== 'ObjectType') return lookupMember(tupleShape(type.args), name, env)
+    if (type.kind === 'NamedType' && type.name === 'Error') {
+        if (name === 'type' || name === 'message') return named('string')
+        if (name === 'stackTrace') return unionOf([arrayOf(named('string')), named('null')])
+    }
     if (name === 'asReadonly' || name === 'asMutable') {
         const rawElement = type.kind === 'ArrayType'
             ? type.element
@@ -969,10 +973,10 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
     if (!filePath) return result
     for (const statement of statements) {
         const importedStatement = statement.kind === 'Import' ? statement : statement.kind === 'Export' && statement.declaration.kind === 'Import' ? statement.declaration : undefined
-        if (!importedStatement || (!importedStatement.module.startsWith('.') && importedStatement.module !== 'juno:types' && importedStatement.module !== 'juno/types' && !importedStatement.module.startsWith('juno/types/'))) continue
+        if (!importedStatement || (!importedStatement.module.startsWith('.') && importedStatement.module !== 'juno:types' && !importedStatement.module.startsWith('juno:types/'))) continue
         let base: string
-        if (importedStatement.module === 'juno:types' || importedStatement.module === 'juno/types' || importedStatement.module.startsWith('juno/types/')) {
-            const relativeModule = importedStatement.module === 'juno:types' || importedStatement.module === 'juno/types' ? 'index' : importedStatement.module.slice('juno/types/'.length)
+        if (importedStatement.module === 'juno:types' || importedStatement.module.startsWith('juno:types/')) {
+            const relativeModule = importedStatement.module === 'juno:types' ? 'index' : importedStatement.module.slice('juno:types/'.length)
             let directory = path.dirname(path.resolve(filePath))
             let found: string | undefined
             while (true) {
@@ -1580,6 +1584,27 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             const results = expression.cases.map(item => inferFunctionReturnType(item.body, matchCaseEnv(expression, item.pattern, env)))
             if (!expression.cases.some(item => !item.pattern)) results.push(named('null'))
             return unionOf(results)
+        }
+        case 'Try': {
+            const source = resolveType(expression.body
+                ? inferFunctionReturnType(expression.body, env)
+                : inferExpression(expression.value!, env), env)
+            let success: TypeNode = named('any')
+            const parts = (source.kind === 'UnionType' ? source.types : [source]).map(part => resolveType(part, env))
+            const values = parts.flatMap(part => part.kind === 'ObjectType'
+                ? part.members.filter(member => member.name === 'value').map(member => member.type)
+                : [])
+            if (values.length) success = unionOf(values)
+            const errors = parts.flatMap(part => part.kind === 'ObjectType'
+                ? part.members.filter(member => member.name === 'error').map(member => member.type)
+                : [])
+            const inferredError = errors.length ? unionOf(errors) : named('Error')
+            const caught = expression.catches.map(clause => {
+                const local = new Map(env)
+                if (clause.binding) local.set(clause.binding, { kind: 'var', mutable: false, type: clause.type ?? inferredError })
+                return inferFunctionReturnType(clause.body, local)
+            })
+            return unionOf([success, ...caught])
         }
         case 'Function': return { kind: 'FunctionType', params: expression.params.map(parameterType), result: expression.returnType ?? (expression.expressionBody ? inferExpression(expression.expressionBody, env) : inferFunctionReturnType(expression.body, env, expression.params)) }
     }
@@ -2756,6 +2781,30 @@ class Analyzer {
                     this.addHover(name, property?.loc, `const ${name}: ${printType(symbol.type)}`, undefined, typeDescription(symbol.type, local))
                 }
             }
+            return
+        case 'Try':
+            if (expression.body) this.statements(expression.body, new Map(env))
+            else this.walkExpression(expression.value, env, thisType)
+            const trySource = resolveType(expression.body
+                ? inferFunctionReturnType(expression.body, env)
+                : inferExpression(expression.value!, env), env)
+            const tryParts = (trySource.kind === 'UnionType' ? trySource.types : [trySource]).map(part => resolveType(part, env))
+            const errorTypes = tryParts.flatMap(part => part.kind === 'ObjectType'
+                ? part.members.filter(member => member.name === 'error').map(member => member.type)
+                : [])
+            const inferredError = errorTypes.length ? unionOf(errorTypes) : named('Error')
+            for (const clause of expression.catches) {
+                const local = new Map(env)
+                if (clause.binding) {
+                    const type = clause.type ?? inferredError
+                    local.set(clause.binding, { kind: 'var', mutable: false, type })
+                    this.addHover(clause.binding, clause.bindingLoc, `const ${clause.binding}: ${printType(type)}`)
+                }
+                if (clause.type) this.walkType(clause.type, env)
+                this.statements(clause.body, local)
+            }
+            if (expression.finallyBody) this.statements(expression.finallyBody, new Map(env))
+            this.addHover('try', expression.loc, `(try expression) ${printType(inferExpression(expression, env))}`)
             return
         case 'Is':
             this.walkExpression(expression.value, env, thisType)

@@ -22,6 +22,7 @@ export type Expression =
     | { kind: 'Binary'; operator: string; left: Expression; right: Expression; loc?: Loc }
     | { kind: 'Conditional'; condition: Expression; consequent: Expression; alternate: Expression; loc?: Loc }
     | { kind: 'Match'; value: Expression; cases: { pattern?: MatchPattern; guard?: Expression; body: Statement[]; loc?: Loc }[]; loc?: Loc }
+    | { kind: 'Try'; value?: Expression; body?: Statement[]; catches: { binding?: string; bindingLoc?: Loc; type?: TypeNode; body: Statement[]; loc?: Loc }[]; finallyBody?: Statement[]; loc?: Loc }
     | { kind: 'Is'; value: Expression; type: TypeNode; loc?: Loc }
     | { kind: 'Member'; object: Expression; property: string; optional: boolean; loc?: Loc }
     | { kind: 'Index'; object: Expression; index: Expression; loc?: Loc }
@@ -640,6 +641,12 @@ export class Parser {
                         shiftExpression(node.value)
                         node.cases.forEach(item => { if (item.guard) shiftExpression(item.guard); item.body.forEach(shiftStatement) })
                         break
+                    case 'Try':
+                        if (node.value) shiftExpression(node.value)
+                        node.body?.forEach(shiftStatement)
+                        node.catches.forEach(item => item.body.forEach(shiftStatement))
+                        node.finallyBody?.forEach(shiftStatement)
+                        break
                     case 'Member': shiftExpression(node.object); break
                     case 'Index': shiftExpression(node.object); shiftExpression(node.index); break
                     case 'Call': shiftExpression(node.callee); node.args.forEach(shiftExpression); break
@@ -680,6 +687,7 @@ export class Parser {
         return { kind: 'Template', parts, loc }
     }
     private prefix(): Expression {
+        if (this.match('Keyword', 'try')) return this.tryExpression(this.tokens[this.pos - 1])
         if (this.match('Keyword', 'match')) return this.matchExpression(this.tokens[this.pos - 1])
         if (this.match('Increment') || this.match('Decrement')) {
             const token = this.tokens[this.pos - 1]
@@ -839,6 +847,35 @@ export class Parser {
         if (this.match('Keyword', 'fun')) { const params = this.parameters(), returnType = this.match('Colon') ? this.type() : undefined; this.take('Equal'); return { kind: 'Function', params, returnType, body: this.block() } }
         this.fail('Expected expression')
     }
+
+    private tryExpression(token: Token): Expression {
+        let value: Expression | undefined, body: Statement[] | undefined
+        if (this.is('Newline')) body = this.block()
+        else {
+            value = this.expression()
+            this.take('Newline', "Expected a newline after try expression")
+        }
+        while (this.match('Newline')) {}
+        const indentedClauses = value !== undefined && this.match('Indent')
+        const catches: Extract<Expression, { kind: 'Try' }>['catches'] = []
+        let finallyBody: Statement[] | undefined
+        while (this.match('Keyword', 'catch')) {
+            const catchToken = this.tokens[this.pos - 1]
+            let binding: string | undefined, bindingLoc: Loc | undefined, type: TypeNode | undefined
+            if (this.match('LeftParen')) {
+                const identifier = this.identifier()
+                binding = identifier.name; bindingLoc = identifier.loc
+                if (this.match('Colon')) type = this.type()
+                this.take('RightParen', "Expected ')' after catch binding")
+            }
+            catches.push({ binding, bindingLoc, type, body: this.block(), loc: this.loc(catchToken) })
+            while (this.match('Newline')) {}
+        }
+        if (this.match('Keyword', 'finally')) finallyBody = this.block()
+        if (!catches.length) this.fail("A try expression needs at least one catch")
+        if (indentedClauses) this.take('Dedent', "Expected the end of the try expression")
+        return { kind: 'Try', value, body, catches, finallyBody, loc: this.loc(token) }
+    }
 }
 
 type InferredType =
@@ -931,6 +968,11 @@ function inferExpressionType(
             const results = expression.cases.map(item => inferFunctionReturnType(item.body, new Map(variables)))
             if (!expression.cases.some(item => !item.pattern)) results.push(primitive('null'))
             return commonType(results)
+        }
+
+        case 'Try': {
+            const results = expression.catches.map(item => inferFunctionReturnType(item.body, new Map(variables)))
+            return results.length ? commonType(results) : unknownType
         }
 
         case 'Is': return primitive('boolean')

@@ -61,7 +61,7 @@ export class Interpreter {
                         String: 'string', Tuple: 'tuple', Random: 'random', Error: 'error', Result: 'error', ok: 'error'
                     } as Record<string, string>)[name]
                     if ((statement.module === 'juno' || statement.module === 'juno:types') && localTypeModule) {
-                        const constructorModule = this.loadLocalModule(`juno/types/${localTypeModule}`, env)
+                        const constructorModule = this.loadLocalModule(`juno:types/${localTypeModule}`, env)
                         if (!(name in constructorModule)) throw new Error(`Module 'juno' has no export '${name}'`)
                         const alias = (constructorModule as any).__junoTypes?.[name] as TypeAlias | undefined
                         if (alias) {
@@ -189,7 +189,7 @@ export class Interpreter {
     }
 
     private loadLocalModule(specifier: string, env: Environment): Record<string, unknown> {
-        const junoTypeModule = specifier === 'juno/types' ? 'index' : /^juno\/types\/(.+)$/.exec(specifier)?.[1]
+        const junoTypeModule = specifier === 'juno:types' ? 'index' : /^juno:types\/(.+)$/.exec(specifier)?.[1]
         if (!junoTypeModule && !specifier.startsWith('.') && !isAbsolute(specifier)) throw new Error(`Unsupported module '${specifier}'`)
         const base = junoTypeModule
             ? resolve(__dirname, '../../types', junoTypeModule)
@@ -214,7 +214,7 @@ export class Interpreter {
         this.currentFile = file
         const moduleEnv: Environment = { bindings: new Map(), types: new Map(), parent: env }
         const importedModule = (specifier: string, importer: Environment): Record<string, unknown> => {
-            if (specifier === 'juno/types' || specifier.startsWith('juno/types/')) return this.loadLocalModule(specifier, importer)
+            if (specifier === 'juno:types' || specifier.startsWith('juno:types/')) return this.loadLocalModule(specifier, importer)
             const moduleBase = resolve(this.currentDirectory, specifier)
             const options = /\.(?:jn|[cm]?[jt]s)$/i.test(moduleBase) ? [moduleBase] : [
                 `${moduleBase}.jn`, `${moduleBase}.js`, `${moduleBase}.ts`,
@@ -512,6 +512,52 @@ export class Interpreter {
                     }
                 }
                 return null
+            }
+            case 'Try': {
+                let result: unknown
+                try {
+                    let attempted: any
+                    if (expression.body) {
+                        try {
+                            this.executeStatements(expression.body, this.childEnvironment(env))
+                            attempted = null
+                        } catch (error) {
+                            if (error instanceof ReturnValue) attempted = error.value
+                            else throw error
+                        }
+                    } else attempted = this.evaluate(expression.value!, env) as any
+                    if (!attempted || typeof attempted !== 'object' || typeof attempted.ok !== 'boolean') {
+                        throw new TypeError('try expects a Result value')
+                    }
+                    if (attempted.ok) result = attempted.value
+                    else {
+                        let handled = false
+                        for (const clause of expression.catches) {
+                            const taggedMatch = clause.type?.kind === 'NamedType'
+                                && attempted.error !== null && typeof attempted.error === 'object'
+                                && attempted.error.type === clause.type.name
+                            if (clause.type && !taggedMatch && !this.matchesTypeNode(attempted.error, clause.type, env)) continue
+                            const local = this.childEnvironment(env)
+                            if (clause.binding) this.declare(local, clause.binding, attempted.error, false)
+                            try {
+                                this.executeStatements(clause.body, local)
+                                result = null
+                            } catch (error) {
+                                if (error instanceof ReturnValue) result = error.value
+                                else throw error
+                            }
+                            handled = true
+                            break
+                        }
+                        if (!handled) throw attempted.error
+                    }
+                } finally {
+                    if (expression.finallyBody) {
+                        try { this.executeStatements(expression.finallyBody, this.childEnvironment(env)) }
+                        catch (error) { if (!(error instanceof ReturnValue)) throw error }
+                    }
+                }
+                return result
             }
             case 'Is':
                 return this.matchesTypeNode(this.evaluate(expression.value, env), expression.type, env)

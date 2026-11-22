@@ -63,7 +63,10 @@ var keywords = /* @__PURE__ */ new Set([
   "from",
   "export",
   "default",
-  "constructor"
+  "constructor",
+  "try",
+  "catch",
+  "finally"
 ]);
 function Lexer(source) {
   return {
@@ -1028,6 +1031,12 @@ var Parser = class _Parser {
               item.body.forEach(shiftStatement);
             });
             break;
+          case "Try":
+            if (node.value) shiftExpression(node.value);
+            node.body?.forEach(shiftStatement);
+            node.catches.forEach((item) => item.body.forEach(shiftStatement));
+            node.finallyBody?.forEach(shiftStatement);
+            break;
           case "Member":
             shiftExpression(node.object);
             break;
@@ -1094,6 +1103,7 @@ var Parser = class _Parser {
     return { kind: "Template", parts, loc };
   }
   prefix() {
+    if (this.match("Keyword", "try")) return this.tryExpression(this.tokens[this.pos - 1]);
     if (this.match("Keyword", "match")) return this.matchExpression(this.tokens[this.pos - 1]);
     if (this.match("Increment") || this.match("Decrement")) {
       const token = this.tokens[this.pos - 1];
@@ -1265,6 +1275,37 @@ var Parser = class _Parser {
     }
     this.fail("Expected expression");
   }
+  tryExpression(token) {
+    let value, body;
+    if (this.is("Newline")) body = this.block();
+    else {
+      value = this.expression();
+      this.take("Newline", "Expected a newline after try expression");
+    }
+    while (this.match("Newline")) {
+    }
+    const indentedClauses = value !== void 0 && this.match("Indent");
+    const catches = [];
+    let finallyBody;
+    while (this.match("Keyword", "catch")) {
+      const catchToken = this.tokens[this.pos - 1];
+      let binding, bindingLoc, type;
+      if (this.match("LeftParen")) {
+        const identifier = this.identifier();
+        binding = identifier.name;
+        bindingLoc = identifier.loc;
+        if (this.match("Colon")) type = this.type();
+        this.take("RightParen", "Expected ')' after catch binding");
+      }
+      catches.push({ binding, bindingLoc, type, body: this.block(), loc: this.loc(catchToken) });
+      while (this.match("Newline")) {
+      }
+    }
+    if (this.match("Keyword", "finally")) finallyBody = this.block();
+    if (!catches.length) this.fail("A try expression needs at least one catch");
+    if (indentedClauses) this.take("Dedent", "Expected the end of the try expression");
+    return { kind: "Try", value, body, catches, finallyBody, loc: this.loc(token) };
+  }
 };
 var unknownType = { kind: "unknown" };
 function primitive(name) {
@@ -1343,6 +1384,10 @@ function inferExpressionType(expression, variables) {
       const results = expression.cases.map((item) => inferFunctionReturnType(item.body, new Map(variables)));
       if (!expression.cases.some((item) => !item.pattern)) results.push(primitive("null"));
       return commonType(results);
+    }
+    case "Try": {
+      const results = expression.catches.map((item) => inferFunctionReturnType(item.body, new Map(variables)));
+      return results.length ? commonType(results) : unknownType;
     }
     case "Is":
       return primitive("boolean");
@@ -2216,6 +2261,10 @@ function callableType(type, env) {
 }
 function lookupMember(type, name, env) {
   if (type.kind === "GenericType" && type.name === "Tuple" && type.args[0]?.kind !== "ObjectType") return lookupMember(tupleShape(type.args), name, env);
+  if (type.kind === "NamedType" && type.name === "Error") {
+    if (name === "type" || name === "message") return named("string");
+    if (name === "stackTrace") return unionOf([arrayOf(named("string")), named("null")]);
+  }
   if (name === "asReadonly" || name === "asMutable") {
     const rawElement = type.kind === "ArrayType" ? type.element : type.kind === "GenericType" && (type.name === "Array" || type.name === "ReadonlyArray") ? type.args[0] ?? named("any") : void 0;
     if (rawElement) return {
@@ -2777,10 +2826,10 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
   if (!filePath) return result;
   for (const statement of statements) {
     const importedStatement = statement.kind === "Import" ? statement : statement.kind === "Export" && statement.declaration.kind === "Import" ? statement.declaration : void 0;
-    if (!importedStatement || !importedStatement.module.startsWith(".") && importedStatement.module !== "juno:types" && importedStatement.module !== "juno/types" && !importedStatement.module.startsWith("juno/types/")) continue;
+    if (!importedStatement || !importedStatement.module.startsWith(".") && importedStatement.module !== "juno:types" && !importedStatement.module.startsWith("juno:types/")) continue;
     let base;
-    if (importedStatement.module === "juno:types" || importedStatement.module === "juno/types" || importedStatement.module.startsWith("juno/types/")) {
-      const relativeModule = importedStatement.module === "juno:types" || importedStatement.module === "juno/types" ? "index" : importedStatement.module.slice("juno/types/".length);
+    if (importedStatement.module === "juno:types" || importedStatement.module.startsWith("juno:types/")) {
+      const relativeModule = importedStatement.module === "juno:types" ? "index" : importedStatement.module.slice("juno:types/".length);
       let directory = path.dirname(path.resolve(filePath));
       let found;
       while (true) {
@@ -3362,6 +3411,21 @@ function inferExpression(expression, env) {
       const results = expression.cases.map((item) => inferFunctionReturnType2(item.body, matchCaseEnv(expression, item.pattern, env)));
       if (!expression.cases.some((item) => !item.pattern)) results.push(named("null"));
       return unionOf(results);
+    }
+    case "Try": {
+      const source = resolveType(expression.body ? inferFunctionReturnType2(expression.body, env) : inferExpression(expression.value, env), env);
+      let success = named("any");
+      const parts = (source.kind === "UnionType" ? source.types : [source]).map((part) => resolveType(part, env));
+      const values = parts.flatMap((part) => part.kind === "ObjectType" ? part.members.filter((member) => member.name === "value").map((member) => member.type) : []);
+      if (values.length) success = unionOf(values);
+      const errors = parts.flatMap((part) => part.kind === "ObjectType" ? part.members.filter((member) => member.name === "error").map((member) => member.type) : []);
+      const inferredError = errors.length ? unionOf(errors) : named("Error");
+      const caught = expression.catches.map((clause) => {
+        const local = new Map(env);
+        if (clause.binding) local.set(clause.binding, { kind: "var", mutable: false, type: clause.type ?? inferredError });
+        return inferFunctionReturnType2(clause.body, local);
+      });
+      return unionOf([success, ...caught]);
     }
     case "Function":
       return { kind: "FunctionType", params: expression.params.map(parameterType), result: expression.returnType ?? (expression.expressionBody ? inferExpression(expression.expressionBody, env) : inferFunctionReturnType2(expression.body, env, expression.params)) };
@@ -4451,6 +4515,26 @@ var Analyzer = class {
             this.addHover(name, property?.loc, `const ${name}: ${printType(symbol.type)}`, void 0, typeDescription(symbol.type, local));
           }
         }
+        return;
+      case "Try":
+        if (expression.body) this.statements(expression.body, new Map(env));
+        else this.walkExpression(expression.value, env, thisType);
+        const trySource = resolveType(expression.body ? inferFunctionReturnType2(expression.body, env) : inferExpression(expression.value, env), env);
+        const tryParts = (trySource.kind === "UnionType" ? trySource.types : [trySource]).map((part) => resolveType(part, env));
+        const errorTypes = tryParts.flatMap((part) => part.kind === "ObjectType" ? part.members.filter((member) => member.name === "error").map((member) => member.type) : []);
+        const inferredError = errorTypes.length ? unionOf(errorTypes) : named("Error");
+        for (const clause of expression.catches) {
+          const local = new Map(env);
+          if (clause.binding) {
+            const type = clause.type ?? inferredError;
+            local.set(clause.binding, { kind: "var", mutable: false, type });
+            this.addHover(clause.binding, clause.bindingLoc, `const ${clause.binding}: ${printType(type)}`);
+          }
+          if (clause.type) this.walkType(clause.type, env);
+          this.statements(clause.body, local);
+        }
+        if (expression.finallyBody) this.statements(expression.finallyBody, new Map(env));
+        this.addHover("try", expression.loc, `(try expression) ${printType(inferExpression(expression, env))}`);
         return;
       case "Is":
         this.walkExpression(expression.value, env, thisType);
