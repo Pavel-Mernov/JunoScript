@@ -68,7 +68,7 @@ function keyLiteral(name: string): TypeNode {
 
 function keyType(typeNode: TypeNode): TypeNode {
     if (typeNode.kind === 'ArrayType' || typeNode.kind === 'GenericType' && (typeNode.name === 'Array' || typeNode.name === 'ReadonlyArray')) {
-        const names = ['length', 'indices', 'has', 'pick', 'omit', 'at', 'concat', 'copy', 'copyWithin', 'entries', 'enumerate', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'forEach', 'includes', 'indexOf', 'iterator', 'join', 'lastIndexOf', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toArray', 'toReversed', 'toSorted', 'toSpliced', 'toString', 'unshift', 'with']
+        const names = ['length', 'indices', 'has', 'pick', 'omit', 'deepClone', 'deepFreeze', 'toDeepFreezed', 'at', 'concat', 'copy', 'copyWithin', 'entries', 'enumerate', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'forEach', 'includes', 'indexOf', 'iterator', 'join', 'lastIndexOf', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toArray', 'toReversed', 'toSorted', 'toSpliced', 'toString', 'unshift', 'with']
         return { kind: 'UnionType', types: [{ kind: 'NamedType', name: 'number' }, ...names.map(name => ({ kind: 'LiteralType', value: name } as TypeNode))] }
     }
     if (typeNode.kind === 'ObjectType') {

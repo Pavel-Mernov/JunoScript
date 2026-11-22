@@ -35,6 +35,8 @@ __export(extension_exports, {
 });
 module.exports = __toCommonJS(extension_exports);
 var vscode = __toESM(require("vscode"));
+var fs = __toESM(require("node:fs"));
+var path = __toESM(require("node:path"));
 
 // ../Lexer/lexer.ts
 var keywords = /* @__PURE__ */ new Set([
@@ -1592,7 +1594,7 @@ function typeFromNode(type, aliases = /* @__PURE__ */ new Map(), resolving = /* 
     const source = typeFromNode(type.args[0], aliases, resolving);
     if (type.name === "KeyOf") {
       if (source.kind === "array") {
-        const names = ["length", "indices", "has", "pick", "omit", "at", "concat", "copy", "copyWithin", "entries", "enumerate", "every", "fill", "filter", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "forEach", "includes", "indexOf", "iterator", "join", "lastIndexOf", "map", "pop", "push", "reduce", "reduceRight", "reverse", "shift", "slice", "some", "sort", "splice", "toArray", "toReversed", "toSorted", "toSpliced", "toString", "unshift", "with"];
+        const names = ["length", "indices", "has", "pick", "omit", "deepClone", "deepFreeze", "toDeepFreezed", "at", "concat", "copy", "copyWithin", "entries", "enumerate", "every", "fill", "filter", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "forEach", "includes", "indexOf", "iterator", "join", "lastIndexOf", "map", "pop", "push", "reduce", "reduceRight", "reverse", "shift", "slice", "some", "sort", "splice", "toArray", "toReversed", "toSorted", "toSpliced", "toString", "unshift", "with"];
         return { kind: "union", types: [primitive("number"), ...names.map((value) => ({ kind: "literal", value }))] };
       }
       if (source.kind !== "object") return unknownType;
@@ -1659,9 +1661,9 @@ function validateArithmeticTypes(statements, variables = /* @__PURE__ */ new Map
   for (const statement of statements) if (statement.kind === "Import" && !statement.importedTypes) {
     try {
       const { readFileSync } = require("node:fs");
-      const { resolve, dirname } = require("node:path");
+      const { resolve: resolve2, dirname: dirname2 } = require("node:path");
       if (statement.module.startsWith(".")) {
-        const base = resolve(process.cwd(), statement.module);
+        const base = resolve2(process.cwd(), statement.module);
         const file = /\.jn$/i.test(base) ? base : `${base}.jn`;
         const imported = new Parser(Lexer(readFileSync(file, "utf8")).tokenize()).parse();
         for (const item of imported) if (item.kind === "Export" && item.declaration.kind === "TypeDeclaration") aliases.set(item.declaration.name, item.declaration.value);
@@ -1743,11 +1745,11 @@ function parse(source, options = {}) {
       if (item.kind === "TypeDeclaration") types.set(item.name, item.value);
       if (item.kind === "Import" && item.module.startsWith(".")) {
         try {
-          const fs = require("node:fs");
-          const path = require("node:path");
-          const base = path.resolve(options.filePath ? path.dirname(options.filePath) : process.cwd(), item.module);
-          const candidates = /\.jn$/i.test(base) ? [base] : [`${base}.jn`, path.resolve(base, "index.jn")];
-          const file = candidates.find((candidate) => fs.existsSync(candidate));
+          const fs2 = require("node:fs");
+          const path2 = require("node:path");
+          const base = path2.resolve(options.filePath ? path2.dirname(options.filePath) : process.cwd(), item.module);
+          const candidates = /\.jn$/i.test(base) ? [base] : [`${base}.jn`, path2.resolve(base, "index.jn")];
+          const file = candidates.find((candidate) => fs2.existsSync(candidate));
           if (!file || seen.has(file)) continue;
           const nested = visitParsed(file, seen);
           for (const [name, value] of nested) if (item.namedImports.includes(name)) types.set(name, value);
@@ -2069,7 +2071,7 @@ function resolveType(type, env) {
       const source = resolveType(type.args[0], env);
       if (type.name === "KeyOf") {
         if (source.kind === "ArrayType" || source.kind === "GenericType" && (source.name === "Array" || source.name === "ReadonlyArray")) {
-          const names = ["length", "indices", "has", "pick", "omit", ...Object.keys(arrayMethodDescriptions).filter((name) => name !== "from"), "iterator", "toArray", "toString"];
+          const names = ["length", "indices", "has", "pick", "omit", "deepClone", "deepFreeze", "toDeepFreezed", ...Object.keys(arrayMethodDescriptions).filter((name) => name !== "from"), "iterator", "toArray", "toString"];
           return unionOf([named("number"), ...[...new Set(names)].map((value) => ({ kind: "LiteralType", value }))]);
         }
         if (source.kind === "ObjectType") return unionOf(source.members.flatMap((member) => member.indexType ? [member.indexType] : [{
@@ -2259,6 +2261,21 @@ function callableType(type, env) {
   }
   return void 0;
 }
+function deepReadonlyType(type, env) {
+  const resolved = resolveType(type, env);
+  if (resolved.kind === "ArrayType") return { kind: "GenericType", name: "ReadonlyArray", args: [deepReadonlyType(resolved.element, env)] };
+  if (resolved.kind === "GenericType" && (resolved.name === "Array" || resolved.name === "ReadonlyArray")) {
+    return { kind: "GenericType", name: "ReadonlyArray", args: [deepReadonlyType(resolved.args[0] ?? named("any"), env)] };
+  }
+  if (resolved.kind === "ObjectType") return {
+    ...resolved,
+    members: resolved.members.map((member) => member.method ? member : { ...member, readonly: true, type: deepReadonlyType(member.type, env) })
+  };
+  if (resolved.kind === "UnionType" || resolved.kind === "IntersectionType") {
+    return { ...resolved, types: resolved.types.map((part) => deepReadonlyType(part, env)) };
+  }
+  return resolved;
+}
 function lookupMember(type, name, env) {
   if (type.kind === "GenericType" && type.name === "Tuple" && type.args[0]?.kind !== "ObjectType") return lookupMember(tupleShape(type.args), name, env);
   if (type.kind === "NamedType" && type.name === "Error") {
@@ -2304,6 +2321,12 @@ function lookupMember(type, name, env) {
   const resolved = resolveType(type, env);
   if (resolved.kind === "GenericType" && resolved.name === "ReadonlyArray" && ["copyWithin", "fill", "pop", "push", "reverse", "shift", "sort", "splice", "unshift"].includes(name)) return void 0;
   if (name === "isType") return { kind: "fun", params: [], returnType: named("boolean") };
+  if (name === "deepClone" && (resolved.kind === "ObjectType" || resolved.kind === "ArrayType" || resolved.kind === "GenericType" && (resolved.name === "Array" || resolved.name === "ReadonlyArray"))) {
+    return { kind: "fun", params: [], returnType: resolved, ownerType: resolved };
+  }
+  if ((name === "deepFreeze" || name === "toDeepFreezed") && (resolved.kind === "ObjectType" || resolved.kind === "ArrayType" || resolved.kind === "GenericType" && (resolved.name === "Array" || resolved.name === "ReadonlyArray"))) {
+    return { kind: "fun", params: [], returnType: deepReadonlyType(resolved, env), ownerType: resolved };
+  }
   if (name === "asReadonly" || name === "asMutable") {
     let result = resolved;
     if (resolved.kind === "ArrayType") result = name === "asReadonly" ? { kind: "GenericType", name: "ReadonlyArray", args: [resolved.element] } : resolved;
@@ -2700,9 +2723,9 @@ function hostDeclarations(source) {
     if (name === "parseInt") return method(name, [{ name: "value", type: string }, { name: "radix", type: number, defaultValue: { kind: "Literal", value: null } }], number);
     return void 0;
   };
-  const functions = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*(?::\s*([^\n{]+))?/g;
+  const functions = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<([^>]+)>)?\s*\(([^)]*)\)\s*(?::\s*([^\n{]+))?/g;
   for (const match of source.matchAll(functions)) {
-    const params = match[2].trim() ? match[2].split(",").map((raw, index) => {
+    const params = match[3].trim() ? match[3].split(",").map((raw, index) => {
       const part = raw.trim(), rest = part.startsWith("...");
       const clean = rest ? part.slice(3) : part;
       const separator = clean.indexOf(":");
@@ -2712,11 +2735,12 @@ function hostDeclarations(source) {
       const type = hostType(separator < 0 ? void 0 : clean.slice(separator + 1));
       return { name, type, rest, ...optional ? { defaultValue: { kind: "Literal", value: null } } : {} };
     }) : [];
-    result.set(match[1], { kind: "fun", params, returnType: hostType(match[3]) });
+    const generics = match[2]?.split(",").map((item) => item.trim().split(/\s+(?:extends|is)\s+|\s*=/)[0]) ?? [];
+    result.set(match[1], { kind: "fun", generics, params, returnType: hostType(match[4]) });
   }
-  const arrowFunctions = /export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?\(([^)]*)\)\s*(?::\s*([^=\n]+?))?\s*=>\s*([^\n;]+)/g;
+  const arrowFunctions = /export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:<([^>]+)>\s*)?\(([^)]*)\)\s*(?::\s*([^=\n]+?))?\s*=>\s*([^\n;]+)/g;
   for (const match of source.matchAll(arrowFunctions)) {
-    const params = match[2].trim() ? match[2].split(",").map((raw, index) => {
+    const params = match[3].trim() ? match[3].split(",").map((raw, index) => {
       const part = raw.trim(), rest = part.startsWith("...");
       const clean = rest ? part.slice(3) : part;
       const separator = clean.indexOf(":");
@@ -2726,9 +2750,10 @@ function hostDeclarations(source) {
       const type = hostType(separator < 0 ? void 0 : clean.slice(separator + 1));
       return { name, type, rest, ...optional ? { defaultValue: { kind: "Literal", value: null } } : {} };
     }) : [];
-    const body = match[4].trim();
+    const body = match[5].trim();
     const inferredReturnType = /^(?:globalThis\.)?Math\.(?:random|abs|ceil|floor|round|trunc|min|max|pow|sqrt|cbrt|hypot|exp|log|log2|log10|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|fround|imul|clz32)\s*\(/.test(body) || /^[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?$/.test(body) ? named("number") : /^(?:true|false)$/.test(body) ? named("boolean") : /^(?:["'`])/.test(body) ? named("string") : named("any");
-    result.set(match[1], { kind: "fun", params, returnType: match[3] ? hostType(match[3]) : inferredReturnType });
+    const generics = match[2]?.split(",").map((item) => item.trim().split(/\s+(?:extends|is)\s+|\s*=/)[0]) ?? [];
+    result.set(match[1], { kind: "fun", generics, params, returnType: match[4] ? hostType(match[4]) : inferredReturnType });
   }
   for (const match of source.matchAll(/export\s+(?:const|let|var|class)\s+([A-Za-z_$][\w$]*)/g)) {
     if (!result.has(match[1])) result.set(match[1], { kind: "var", type: named("any") });
@@ -2786,8 +2811,8 @@ function hostDeclarations(source) {
 }
 function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new Set()) {
   const result = /* @__PURE__ */ new Map();
-  const fs = require("node:fs");
-  const path = require("node:path");
+  const fs2 = require("node:fs");
+  const path2 = require("node:path");
   const declarationEnv = globals();
   for (const statement of statements) {
     const declaration = statement.kind === "Export" ? statement.declaration : statement;
@@ -2830,38 +2855,38 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
     let base;
     if (importedStatement.module === "juno:types" || importedStatement.module.startsWith("juno:types/")) {
       const relativeModule = importedStatement.module === "juno:types" ? "index" : importedStatement.module.slice("juno:types/".length);
-      let directory = path.dirname(path.resolve(filePath));
+      let directory = path2.dirname(path2.resolve(filePath));
       let found;
       while (true) {
-        const candidate = path.join(directory, "types", relativeModule);
-        if (fs.existsSync(`${candidate}.jn`) || fs.existsSync(path.resolve(candidate, "index.jn"))) {
+        const candidate = path2.join(directory, "types", relativeModule);
+        if (fs2.existsSync(`${candidate}.jn`) || fs2.existsSync(path2.resolve(candidate, "index.jn"))) {
           found = candidate;
           break;
         }
-        const parent = path.dirname(directory);
+        const parent = path2.dirname(directory);
         if (parent === directory) break;
         directory = parent;
       }
-      base = found ?? path.resolve(__dirname, "../../types", relativeModule);
-    } else base = path.resolve(path.dirname(filePath), importedStatement.module);
+      base = found ?? path2.resolve(__dirname, "../../types", relativeModule);
+    } else base = path2.resolve(path2.dirname(filePath), importedStatement.module);
     const candidates = /\.(?:jn|[cm]?[jt]s)$/i.test(base) ? [base] : [
       `${base}.jn`,
       `${base}.js`,
       `${base}.ts`,
-      path.resolve(base, "index.jn"),
-      path.resolve(base, "index.js"),
-      path.resolve(base, "index.ts")
+      path2.resolve(base, "index.jn"),
+      path2.resolve(base, "index.js"),
+      path2.resolve(base, "index.ts")
     ];
-    const importedFile = candidates.find((candidate) => fs.existsSync(candidate));
+    const importedFile = candidates.find((candidate) => fs2.existsSync(candidate));
     if (!importedFile || seen.has(importedFile)) continue;
     seen.add(importedFile);
     try {
       if (!/\.jn$/i.test(importedFile)) {
-        const declarations2 = hostDeclarations(fs.readFileSync(importedFile, "utf8"));
+        const declarations2 = hostDeclarations(fs2.readFileSync(importedFile, "utf8"));
         for (const name of importedStatement.namedImports) if (declarations2.has(name)) result.set(name, declarations2.get(name));
         continue;
       }
-      const nested = parse(fs.readFileSync(importedFile, "utf8"), { validate: false, filePath: importedFile });
+      const nested = parse(fs2.readFileSync(importedFile, "utf8"), { validate: false, filePath: importedFile });
       const declarations = importedDeclarations(nested, importedFile, seen);
       for (const name of importedStatement.namedImports) if (declarations.has(name)) result.set(name, declarations.get(name));
     } catch {
@@ -2873,27 +2898,27 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
     result.set("Error", { kind: "type", generics: [], value: { kind: "ObjectType", members: [field("name", named("string")), field("message", named("string")), { ...field("stack", named("string")), optional: true }] } });
   }
   if (statements.some((item) => item.kind === "Import" && item.module === "juno" && item.namedImports.includes("Range"))) {
-    let directory = path.dirname(path.resolve(filePath));
+    let directory = path2.dirname(path2.resolve(filePath));
     let rangeFile;
     while (true) {
-      const candidate = path.join(directory, "types", "range.jn");
-      if (fs.existsSync(candidate)) {
+      const candidate = path2.join(directory, "types", "range.jn");
+      if (fs2.existsSync(candidate)) {
         rangeFile = candidate;
         break;
       }
-      const parent = path.dirname(directory);
+      const parent = path2.dirname(directory);
       if (parent === directory) break;
       directory = parent;
     }
-    rangeFile ??= path.resolve(__dirname, "../../types/range.jn");
-    if (fs.existsSync(rangeFile)) {
+    rangeFile ??= path2.resolve(__dirname, "../../types/range.jn");
+    if (fs2.existsSync(rangeFile)) {
       try {
-        const declarations = importedDeclarations(parse(fs.readFileSync(rangeFile, "utf8"), { validate: false, filePath: rangeFile }), rangeFile, seen);
+        const declarations = importedDeclarations(parse(fs2.readFileSync(rangeFile, "utf8"), { validate: false, filePath: rangeFile }), rangeFile, seen);
         const range = declarations.get("Range");
         if (range) result.set("Range", range);
-        const iterableFile = path.join(path.dirname(rangeFile), "iterable.jn");
-        if (fs.existsSync(iterableFile)) {
-          const iterableDeclarations = importedDeclarations(parse(fs.readFileSync(iterableFile, "utf8"), { validate: false, filePath: iterableFile }), iterableFile, seen);
+        const iterableFile = path2.join(path2.dirname(rangeFile), "iterable.jn");
+        if (fs2.existsSync(iterableFile)) {
+          const iterableDeclarations = importedDeclarations(parse(fs2.readFileSync(iterableFile, "utf8"), { validate: false, filePath: iterableFile }), iterableFile, seen);
           const iterable = iterableDeclarations.get("Iterable");
           if (iterable) result.set("Iterable", iterable);
         }
@@ -2903,24 +2928,24 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
   }
   const junoConstructors = ["Boolean", "Number", "String"];
   for (const name of junoConstructors) if (statements.some((item) => item.kind === "Import" && item.module === "juno" && item.namedImports.includes(name))) {
-    let directory = path.dirname(path.resolve(filePath ?? process.cwd()));
+    let directory = path2.dirname(path2.resolve(filePath ?? process.cwd()));
     let base;
     while (true) {
-      const candidate = path.join(directory, "types", name.toLowerCase());
-      if (fs.existsSync(`${candidate}.jn`) || fs.existsSync(`${candidate}.ts`)) {
+      const candidate = path2.join(directory, "types", name.toLowerCase());
+      if (fs2.existsSync(`${candidate}.jn`) || fs2.existsSync(`${candidate}.ts`)) {
         base = candidate;
         break;
       }
-      const parent = path.dirname(directory);
+      const parent = path2.dirname(directory);
       if (parent === directory) break;
       directory = parent;
     }
-    base ??= path.resolve(__dirname, "../../types", name.toLowerCase());
+    base ??= path2.resolve(__dirname, "../../types", name.toLowerCase());
     const candidates = [`${base}.jn`, `${base}.ts`];
-    const file = candidates.find((candidate) => fs.existsSync(candidate));
+    const file = candidates.find((candidate) => fs2.existsSync(candidate));
     if (!file) continue;
     try {
-      const declarations = /\.jn$/i.test(file) ? importedDeclarations(parse(fs.readFileSync(file, "utf8"), { validate: false, filePath: file }), file, seen) : hostDeclarations(fs.readFileSync(file, "utf8"));
+      const declarations = /\.jn$/i.test(file) ? importedDeclarations(parse(fs2.readFileSync(file, "utf8"), { validate: false, filePath: file }), file, seen) : hostDeclarations(fs2.readFileSync(file, "utf8"));
       const constructor = declarations.get(name);
       if (constructor) result.set(name, constructor);
     } catch {
@@ -2949,12 +2974,21 @@ function inferGenericExpression(expression, env) {
   }
   return inferExpression(expression, env);
 }
+function widenSetElementType(type) {
+  if (type.kind === "LiteralType") return inferLiteral(type.value);
+  if (type.kind === "UnionType") return unionOf(type.types.map(widenSetElementType));
+  if (type.kind === "ArrayType") return { ...type, element: widenSetElementType(type.element) };
+  return type;
+}
 function inferGenericArguments(generics, params, args, env) {
   const inferred = /* @__PURE__ */ new Map();
   const collect = (pattern, actual) => {
     if (!pattern) return;
     if (pattern.kind === "NamedType" && generics.includes(pattern.name)) {
-      if (!inferred.has(pattern.name) && !isNamedType(actual, "any")) inferred.set(pattern.name, actual);
+      if (!isNamedType(actual, "any")) {
+        const previous = inferred.get(pattern.name);
+        inferred.set(pattern.name, previous ? unionOf([previous, actual]) : actual);
+      }
       return;
     }
     if (pattern.kind === "ArrayType") {
@@ -3035,6 +3069,9 @@ function constructorMethodForCall(callee, args, env, explicitTypeArguments) {
     const explicit = methodIndex >= 0 ? explicitTypeArguments?.[methodIndex] : void 0;
     return explicit ?? (!isNamedType(inferredCandidates[index], "any") ? inferredCandidates[index] : void 0) ?? defaults[index] ?? named("any");
   });
+  if (callee.object.name === "Set" || callee.object.name === "ValueSet") {
+    for (let index = 0; index < constructor.generics.length; index++) inferred[index] = widenSetElementType(inferred[index]);
+  }
   if (callee.object.name === "Array" && method2.name === "from" && constructor.generics[0] && method2.generics[0]) {
     const targetIndex = generics.indexOf(constructor.generics[0]);
     const sourceIndex = generics.indexOf(method2.generics[0]);
@@ -3361,6 +3398,9 @@ function inferExpression(expression, env) {
         if (symbol?.kind === "constructor") {
           if (!symbol.generics.length) return named(expression.callee.name);
           const args = expression.typeArguments?.length ? expression.typeArguments : inferGenericArguments(symbol.generics, symbol.overloads[0]?.params ?? [], expression.args, env);
+          if (!expression.typeArguments?.length && (expression.callee.name === "Set" || expression.callee.name === "ValueSet")) {
+            for (let index = 0; index < args.length; index++) args[index] = widenSetElementType(args[index]);
+          }
           return { kind: "GenericType", name: expression.callee.name, args };
         }
       }
@@ -4618,23 +4658,23 @@ function analyze(source, filePath) {
     const stringifyForTypeSearch = (value) => JSON.stringify(value, (_key, item) => typeof item === "bigint" ? `${item}n` : item);
     const needsIterable = stringifyForTypeSearch(statements).includes("Iterable") || stringifyForTypeSearch([...imported]).includes("Iterable");
     if (needsIterable) {
-      const fs = require("node:fs");
-      const path = require("node:path");
-      let directory = path.dirname(path.resolve(filePath ?? process.cwd()));
+      const fs2 = require("node:fs");
+      const path2 = require("node:path");
+      let directory = path2.dirname(path2.resolve(filePath ?? process.cwd()));
       let iterablePath;
       while (true) {
-        const candidate = path.join(directory, "types", "iterable.jn");
-        if (fs.existsSync(candidate)) {
+        const candidate = path2.join(directory, "types", "iterable.jn");
+        if (fs2.existsSync(candidate)) {
           iterablePath = candidate;
           break;
         }
-        const parent = path.dirname(directory);
+        const parent = path2.dirname(directory);
         if (parent === directory) break;
         directory = parent;
       }
-      iterablePath ??= path.resolve(__dirname, "../../types/iterable.jn");
-      if (fs.existsSync(iterablePath)) {
-        const iterableStatements = parse(fs.readFileSync(iterablePath, "utf8"), { validate: false, filePath: iterablePath });
+      iterablePath ??= path2.resolve(__dirname, "../../types/iterable.jn");
+      if (fs2.existsSync(iterablePath)) {
+        const iterableStatements = parse(fs2.readFileSync(iterablePath, "utf8"), { validate: false, filePath: iterablePath });
         const iterable2 = importedDeclarations(iterableStatements).get("Iterable");
         if (iterable2?.kind === "type") imported.set("Iterable", iterable2);
       }
@@ -4663,8 +4703,81 @@ function hoverAt(source, line, column, filePath) {
 function inlayHintsFor(source, filePath) {
   return analyze(source, filePath)?.hints ?? [];
 }
+function exportsForFile(filePath) {
+  try {
+    const fs2 = require("node:fs");
+    const source = fs2.readFileSync(filePath, "utf8");
+    const declarations = /\.jn$/i.test(filePath) ? importedDeclarations(parse(source, { validate: false, filePath }), filePath) : hostDeclarations(source);
+    return [...declarations].map(([name, symbol]) => ({
+      name,
+      detail: printSymbol(name, symbol).code
+    })).sort((left, right) => left.name.localeCompare(right.name));
+  } catch {
+    return [];
+  }
+}
 
 // src/extension.ts
+function resolveImportedFile(documentFile, specifier) {
+  if (!specifier.startsWith(".")) return void 0;
+  const base = path.resolve(path.dirname(documentFile), specifier);
+  const candidates = /\.(?:jn|[cm]?[jt]s)$/i.test(base) ? [base] : [
+    `${base}.jn`,
+    `${base}.ts`,
+    `${base}.js`,
+    path.join(base, "index.jn"),
+    path.join(base, "index.ts"),
+    path.join(base, "index.js")
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isFile());
+}
+function importCompletions(document, position) {
+  const line = document.lineAt(position.line).text;
+  const before = line.slice(0, position.character);
+  const named2 = /^\s*(?:export\s+)?import\s*\{([^}]*)$/.exec(before);
+  if (named2) {
+    const tail = line.slice(position.character);
+    const module2 = /^\s*\}\s*from\s*['"]([^'"]+)['"]/.exec(tail)?.[1];
+    if (!module2) return [];
+    const file = resolveImportedFile(document.uri.fsPath, module2);
+    if (!file) return [];
+    const typed2 = named2[1].split(",").pop()?.trim() ?? "";
+    const imported = new Set(named2[1].split(",").slice(0, -1).map((name) => name.trim()));
+    const start2 = new vscode.Position(position.line, position.character - typed2.length);
+    return exportsForFile(file).filter((symbol) => !imported.has(symbol.name) && symbol.name.startsWith(typed2)).map((symbol) => {
+      const item = new vscode.CompletionItem(symbol.name, vscode.CompletionItemKind.Reference);
+      item.detail = symbol.detail;
+      item.documentation = `Export from ${module2}`;
+      item.range = new vscode.Range(start2, position);
+      return item;
+    });
+  }
+  const moduleMatch = /\bfrom\s+(['"])([^'"]*)$/.exec(before);
+  if (!moduleMatch) return void 0;
+  const typed = moduleMatch[2];
+  const start = new vscode.Position(position.line, position.character - typed.length);
+  const modules = /* @__PURE__ */ new Set(["juno", "juno:node", "juno:types", "types"]);
+  if (typed.startsWith(".")) {
+    const slash = Math.max(typed.lastIndexOf("/"), typed.lastIndexOf("\\"));
+    const directoryPart = slash < 0 ? "." : typed.slice(0, slash + 1);
+    const namePart = slash < 0 ? typed.slice(2) : typed.slice(slash + 1);
+    const directory = path.resolve(path.dirname(document.uri.fsPath), directoryPart);
+    try {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (!entry.name.startsWith(namePart) || entry.name.startsWith(".")) continue;
+        const normalizedDirectory = directoryPart.replace(/\\/g, "/");
+        const baseName = entry.isDirectory() ? `${entry.name}/` : entry.name.replace(/\.(?:jn|[cm]?[jt]s)$/i, "");
+        modules.add(`${normalizedDirectory}${baseName}`);
+      }
+    } catch {
+    }
+  }
+  return [...modules].filter((name) => name.startsWith(typed)).map((name) => {
+    const item = new vscode.CompletionItem(name, name.endsWith("/") ? vscode.CompletionItemKind.Folder : vscode.CompletionItemKind.Module);
+    item.range = new vscode.Range(start, position);
+    return item;
+  });
+}
 function activate(context) {
   const selector = { language: "junoscript", scheme: "file" };
   const diagnostics = vscode.languages.createDiagnosticCollection("junoscript");
@@ -4746,6 +4859,8 @@ ${info.docs}`);
     }),
     vscode.languages.registerCompletionItemProvider(selector, {
       provideCompletionItems(document, position) {
+        const imports = importCompletions(document, position);
+        if (imports) return imports;
         const linePrefix = document.lineAt(position.line).text.slice(0, position.character);
         const match = /([A-Za-z_$][\w$]*)\s*\[\s*(?:(['"])([^'"]*)?)?$/.exec(linePrefix);
         if (!match) return [];
@@ -4780,7 +4895,7 @@ ${info.docs}`);
           return item;
         });
       }
-    }, "[", "'", '"'),
+    }, "[", "{", ",", "'", '"', "/"),
     vscode.languages.registerCodeActionsProvider(selector, {
       provideCodeActions(document, _range, context2) {
         const result = analyze(document.getText(), document.uri.fsPath);

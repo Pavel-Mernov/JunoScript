@@ -245,7 +245,7 @@ function resolveType(type: TypeNode, env: Env): TypeNode {
             const source = resolveType(type.args[0], env)
             if (type.name === 'KeyOf') {
                 if (source.kind === 'ArrayType' || source.kind === 'GenericType' && (source.name === 'Array' || source.name === 'ReadonlyArray')) {
-                    const names = ['length', 'indices', 'has', 'pick', 'omit', ...Object.keys(arrayMethodDescriptions).filter(name => name !== 'from'), 'iterator', 'toArray', 'toString']
+                    const names = ['length', 'indices', 'has', 'pick', 'omit', 'deepClone', 'deepFreeze', 'toDeepFreezed', ...Object.keys(arrayMethodDescriptions).filter(name => name !== 'from'), 'iterator', 'toArray', 'toString']
                     return unionOf([named('number'), ...[...new Set(names)].map(value => ({ kind: 'LiteralType', value } as TypeNode))])
                 }
                 if (source.kind === 'ObjectType') return unionOf(source.members.flatMap(member => member.indexType ? [member.indexType] : [{
@@ -437,6 +437,24 @@ function callableType(type: TypeNode, env: Env): Extract<TypeNode, { kind: 'Func
     return undefined
 }
 
+function deepReadonlyType(type: TypeNode, env: Env): TypeNode {
+    const resolved = resolveType(type, env)
+    if (resolved.kind === 'ArrayType') return { kind: 'GenericType', name: 'ReadonlyArray', args: [deepReadonlyType(resolved.element, env)] }
+    if (resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray')) {
+        return { kind: 'GenericType', name: 'ReadonlyArray', args: [deepReadonlyType(resolved.args[0] ?? named('any'), env)] }
+    }
+    if (resolved.kind === 'ObjectType') return {
+        ...resolved,
+        members: resolved.members.map(member => member.method
+            ? member
+            : { ...member, readonly: true, type: deepReadonlyType(member.type, env) })
+    }
+    if (resolved.kind === 'UnionType' || resolved.kind === 'IntersectionType') {
+        return { ...resolved, types: resolved.types.map(part => deepReadonlyType(part, env)) }
+    }
+    return resolved
+}
+
 function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | FunctionSymbol | undefined {
     if (type.kind === 'GenericType' && type.name === 'Tuple' && type.args[0]?.kind !== 'ObjectType') return lookupMember(tupleShape(type.args), name, env)
     if (type.kind === 'NamedType' && type.name === 'Error') {
@@ -485,6 +503,12 @@ function lookupMember(type: TypeNode, name: string, env: Env): TypeNode | Functi
     const resolved = resolveType(type, env)
     if (resolved.kind === 'GenericType' && resolved.name === 'ReadonlyArray' && ['copyWithin', 'fill', 'pop', 'push', 'reverse', 'shift', 'sort', 'splice', 'unshift'].includes(name)) return undefined
     if (name === 'isType') return { kind: 'fun', params: [], returnType: named('boolean') }
+    if (name === 'deepClone' && (resolved.kind === 'ObjectType' || resolved.kind === 'ArrayType' || resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray'))) {
+        return { kind: 'fun', params: [], returnType: resolved, ownerType: resolved }
+    }
+    if ((name === 'deepFreeze' || name === 'toDeepFreezed') && (resolved.kind === 'ObjectType' || resolved.kind === 'ArrayType' || resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray'))) {
+        return { kind: 'fun', params: [], returnType: deepReadonlyType(resolved, env), ownerType: resolved }
+    }
     if (name === 'asReadonly' || name === 'asMutable') {
         let result: TypeNode = resolved
         if (resolved.kind === 'ArrayType') result = name === 'asReadonly' ? { kind: 'GenericType', name: 'ReadonlyArray', args: [resolved.element] } : resolved
@@ -842,9 +866,9 @@ function hostDeclarations(source: string): Map<string, ImportedSymbol> {
         if (name === 'parseInt') return method(name, [{ name: 'value', type: string }, { name: 'radix', type: number, defaultValue: { kind: 'Literal', value: null } }], number)
         return undefined
     }
-    const functions = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*(?::\s*([^\n{]+))?/g
+    const functions = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<([^>]+)>)?\s*\(([^)]*)\)\s*(?::\s*([^\n{]+))?/g
     for (const match of source.matchAll(functions)) {
-        const params = match[2].trim() ? match[2].split(',').map((raw, index): Parameter => {
+        const params = match[3].trim() ? match[3].split(',').map((raw, index): Parameter => {
             const part = raw.trim(), rest = part.startsWith('...')
             const clean = rest ? part.slice(3) : part
             const separator = clean.indexOf(':')
@@ -854,11 +878,12 @@ function hostDeclarations(source: string): Map<string, ImportedSymbol> {
             const type = hostType(separator < 0 ? undefined : clean.slice(separator + 1))
             return { name, type, rest, ...(optional ? { defaultValue: { kind: 'Literal', value: null } as Expression } : {}) }
         }) : []
-        result.set(match[1], { kind: 'fun', params, returnType: hostType(match[3]) })
+        const generics = match[2]?.split(',').map(item => item.trim().split(/\s+(?:extends|is)\s+|\s*=/)[0]) ?? []
+        result.set(match[1], { kind: 'fun', generics, params, returnType: hostType(match[4]) })
     }
-    const arrowFunctions = /export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?\(([^)]*)\)\s*(?::\s*([^=\n]+?))?\s*=>\s*([^\n;]+)/g
+    const arrowFunctions = /export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:<([^>]+)>\s*)?\(([^)]*)\)\s*(?::\s*([^=\n]+?))?\s*=>\s*([^\n;]+)/g
     for (const match of source.matchAll(arrowFunctions)) {
-        const params = match[2].trim() ? match[2].split(',').map((raw, index): Parameter => {
+        const params = match[3].trim() ? match[3].split(',').map((raw, index): Parameter => {
             const part = raw.trim(), rest = part.startsWith('...')
             const clean = rest ? part.slice(3) : part
             const separator = clean.indexOf(':')
@@ -868,7 +893,7 @@ function hostDeclarations(source: string): Map<string, ImportedSymbol> {
             const type = hostType(separator < 0 ? undefined : clean.slice(separator + 1))
             return { name, type, rest, ...(optional ? { defaultValue: { kind: 'Literal', value: null } as Expression } : {}) }
         }) : []
-        const body = match[4].trim()
+        const body = match[5].trim()
         const inferredReturnType = /^(?:globalThis\.)?Math\.(?:random|abs|ceil|floor|round|trunc|min|max|pow|sqrt|cbrt|hypot|exp|log|log2|log10|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|fround|imul|clz32)\s*\(/.test(body)
             || /^[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?$/.test(body)
             ? named('number')
@@ -877,7 +902,8 @@ function hostDeclarations(source: string): Map<string, ImportedSymbol> {
                 : /^(?:["'`])/.test(body)
                     ? named('string')
                     : named('any')
-        result.set(match[1], { kind: 'fun', params, returnType: match[3] ? hostType(match[3]) : inferredReturnType })
+        const generics = match[2]?.split(',').map(item => item.trim().split(/\s+(?:extends|is)\s+|\s*=/)[0]) ?? []
+        result.set(match[1], { kind: 'fun', generics, params, returnType: match[4] ? hostType(match[4]) : inferredReturnType })
     }
     for (const match of source.matchAll(/export\s+(?:const|let|var|class)\s+([A-Za-z_$][\w$]*)/g)) {
         if (!result.has(match[1])) result.set(match[1], { kind: 'var', type: named('any') })
@@ -1086,12 +1112,22 @@ function inferGenericExpression(expression: Expression, env: Env): TypeNode {
     return inferExpression(expression, env)
 }
 
+function widenSetElementType(type: TypeNode): TypeNode {
+    if (type.kind === 'LiteralType') return inferLiteral(type.value)
+    if (type.kind === 'UnionType') return unionOf(type.types.map(widenSetElementType))
+    if (type.kind === 'ArrayType') return { ...type, element: widenSetElementType(type.element) }
+    return type
+}
+
 function inferGenericArguments(generics: string[], params: Parameter[], args: Expression[], env: Env): TypeNode[] {
     const inferred = new Map<string, TypeNode>()
     const collect = (pattern: TypeNode | undefined, actual: TypeNode): void => {
         if (!pattern) return
         if (pattern.kind === 'NamedType' && generics.includes(pattern.name)) {
-            if (!inferred.has(pattern.name) && !isNamedType(actual, 'any')) inferred.set(pattern.name, actual)
+            if (!isNamedType(actual, 'any')) {
+                const previous = inferred.get(pattern.name)
+                inferred.set(pattern.name, previous ? unionOf([previous, actual]) : actual)
+            }
             return
         }
         if (pattern.kind === 'ArrayType') {
@@ -1179,6 +1215,9 @@ function constructorMethodForCall(callee: Expression, args: Expression[], env: E
         const explicit = methodIndex >= 0 ? explicitTypeArguments?.[methodIndex] : undefined
         return explicit ?? (!isNamedType(inferredCandidates[index], 'any') ? inferredCandidates[index] : undefined) ?? defaults[index] ?? named('any')
     })
+    if (callee.object.name === 'Set' || callee.object.name === 'ValueSet') {
+        for (let index = 0; index < constructor.generics.length; index++) inferred[index] = widenSetElementType(inferred[index])
+    }
     if (callee.object.name === 'Array' && method.name === 'from' && constructor.generics[0] && method.generics[0]) {
         const targetIndex = generics.indexOf(constructor.generics[0])
         const sourceIndex = generics.indexOf(method.generics[0])
@@ -1528,6 +1567,9 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
                     const args = expression.typeArguments?.length
                         ? expression.typeArguments
                         : inferGenericArguments(symbol.generics, symbol.overloads[0]?.params ?? [], expression.args, env)
+                    if (!expression.typeArguments?.length && (expression.callee.name === 'Set' || expression.callee.name === 'ValueSet')) {
+                        for (let index = 0; index < args.length; index++) args[index] = widenSetElementType(args[index])
+                    }
                     return { kind: 'GenericType', name: expression.callee.name, args }
                 }
             }
@@ -2942,5 +2984,19 @@ export function hoverAt(source: string, line: number, column: number, filePath?:
 
 export function inlayHintsFor(source: string, filePath?: string): InlayHintInfo[] {
     return analyze(source, filePath)?.hints ?? []
+}
+
+export function exportsForFile(filePath: string): { name: string; detail: string }[] {
+    try {
+        const fs = require('node:fs') as typeof import('node:fs')
+        const source = fs.readFileSync(filePath, 'utf8')
+        const declarations = /\.jn$/i.test(filePath)
+            ? importedDeclarations(parse(source, { validate: false, filePath }), filePath)
+            : hostDeclarations(source)
+        return [...declarations].map(([name, symbol]) => ({
+            name,
+            detail: printSymbol(name, symbol as SymbolInfo).code
+        })).sort((left, right) => left.name.localeCompare(right.name))
+    } catch { return [] }
 }
 

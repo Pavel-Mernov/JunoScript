@@ -1,5 +1,5 @@
 import { Array, Range, Tuple } from 'juno:types'
-import { console } from 'juno'
+import { console, Math } from 'juno'
 
 console.log("=== Array and object index tests ===")
 
@@ -10,6 +10,8 @@ console.log("array[0] =", values[0])
 console.log("array[1] =", values[1])
 console.log("array[2] =", values[2])
 console.log("array.toString() =", values.toString())
+console.log("array includes uses JN ==:", [{ id: 1 }].includes({ id: 1 }))
+console.log("array includes NaN and signed zero:", [Math.NaN].includes(Math.NaN), [-0].includes(0))
 console.log("primitive toString() =", 42.toString(), true.toString(), "Juno".toString())
 
 # Arrays can contain values of different types, including objects and functions.
@@ -253,6 +255,23 @@ mutableObjectCopy.name = "Grace"
 mutableObjectCopy.age = 37
 console.log("readonly object copy:", readonlyObjectCopy)
 console.log("mutable object copy:", mutableObjectCopy)
+
+const deepSource = { nested: { value: 1 }, items: [1, 2] }
+const deepClone = deepSource.deepClone()
+deepClone.nested.value = 2
+deepClone.items.push(3)
+console.log("deep clone source unchanged:", deepSource.nested.value, deepSource.items.length)
+console.log("deep clone changed independently:", deepClone.nested.value, deepClone.items.length)
+
+const deeplyFrozen = deepSource.deepFreeze()
+console.log("deep freeze values:", deeplyFrozen.nested.value, deeplyFrozen.items.length)
+# deeplyFrozen.nested.value = 2
+# deeplyFrozen.items.push(3)
+
+const frozenCopy = deepSource.toDeepFreezed()
+console.log("deep frozen copy:", frozenCopy.nested.value, frozenCopy.items.length)
+# frozenCopy.nested.value = 2
+# frozenCopy.items.push(3)
 
 const typedTuple = Tuple("first", 2, true)
 const tupleString = typedTuple[0]

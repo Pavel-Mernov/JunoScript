@@ -57,7 +57,7 @@ export class Interpreter {
                 if (statement.defaultImport) this.declare(env, statement.defaultImport, adaptedModule, false)
                 for (const name of statement.namedImports) {
                     const localTypeModule = ({
-                        Iterable: 'iterable', Range: 'range', Array: 'array', Boolean: 'boolean', Number: 'number',
+                        Iterable: 'iterable', Range: 'range', Array: 'array', Set: 'set', ValueSet: 'set', Boolean: 'boolean', Number: 'number',
                         String: 'string', Tuple: 'tuple', Random: 'random', Error: 'error', Result: 'error', ok: 'error'
                     } as Record<string, string>)[name]
                     if ((statement.module === 'juno' || statement.module === 'juno:types') && localTypeModule) {
@@ -879,6 +879,26 @@ export class Interpreter {
                 return copy
             }
         })
+        if (!('deepClone' in value)) Object.defineProperty(value, 'deepClone', {
+            enumerable: false,
+            value: function(this: object) {
+                const clone = deepCloneValue(this)
+                interpreter.installDefaultHas(clone)
+                return clone
+            }
+        })
+        if (!('deepFreeze' in value)) Object.defineProperty(value, 'deepFreeze', {
+            enumerable: false,
+            value: function(this: object) { return deepFreezeValue(this) }
+        })
+        if (!('toDeepFreezed' in value)) Object.defineProperty(value, 'toDeepFreezed', {
+            enumerable: false,
+            value: function(this: object) {
+                const clone = deepCloneValue(this)
+                interpreter.installDefaultHas(clone)
+                return deepFreezeValue(clone)
+            }
+        })
         if (!('pick' in value)) Object.defineProperty(value, 'pick', {
             enumerable: false,
             value: function(this: any, ...keys: (string | number)[]) {
@@ -1191,7 +1211,7 @@ export class Interpreter {
         const source = this.resolveAliasType(type.args[0], env)
         if (type.name === 'KeyOf') {
             if (source.kind === 'ArrayType' || source.kind === 'GenericType' && (source.name === 'Array' || source.name === 'ReadonlyArray')) {
-                const names = ['length', 'indices', 'has', 'pick', 'omit', 'at', 'concat', 'copy', 'copyWithin', 'entries', 'enumerate', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'forEach', 'includes', 'indexOf', 'iterator', 'join', 'lastIndexOf', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toArray', 'toReversed', 'toSorted', 'toSpliced', 'toString', 'unshift', 'with']
+                const names = ['length', 'indices', 'has', 'pick', 'omit', 'deepClone', 'deepFreeze', 'toDeepFreezed', 'at', 'concat', 'copy', 'copyWithin', 'entries', 'enumerate', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'forEach', 'includes', 'indexOf', 'iterator', 'join', 'lastIndexOf', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toArray', 'toReversed', 'toSorted', 'toSpliced', 'toString', 'unshift', 'with']
                 return { kind: 'UnionType', types: [{ kind: 'NamedType', name: 'number' }, ...names.map(name => ({ kind: 'LiteralType', value: name } as TypeNode))] }
             }
             if (source.kind !== 'ObjectType') return null
@@ -1386,7 +1406,7 @@ export class Interpreter {
     }
 
     private findTypeMember(type: TypeNode, name: string, env: Environment, resolving = new Set<string>()): { type: TypeNode; optional: boolean } | null {
-        if ((name === 'asReadonly' || name === 'asMutable') && !(type.kind === 'LiteralType' && type.value === null) && !(type.kind === 'NamedType' && type.name === 'null')) {
+        if ((name === 'asReadonly' || name === 'asMutable' || name === 'deepClone' || name === 'deepFreeze' || name === 'toDeepFreezed') && !(type.kind === 'LiteralType' && type.value === null) && !(type.kind === 'NamedType' && type.name === 'null')) {
             return { type: { kind: 'FunctionType', params: [], result: type }, optional: false }
         }
         if (type.kind === 'NamedType') {
@@ -1505,6 +1525,16 @@ export class Interpreter {
         if (property === 'indices' && (typeof object === 'string' || Array.isArray(object))) {
             return (resolveModule('juno') as Record<string, any>).Range(object.length)
         }
+        if (Array.isArray(object) && property === 'includes') {
+            return (value: unknown, fromIndex = 0): boolean => {
+                let start = Math.trunc(fromIndex)
+                if (start < 0) start = Math.max(object.length + start, 0)
+                for (let index = start; index < object.length; index++) {
+                    if (deepEqual(object[index], value)) return true
+                }
+                return false
+            }
+        }
         if (Array.isArray(object) && (property === 'copy' || property === 'toArray')) return () => [...object]
         if (object && typeof object === 'object' && (object as any).__junoFunction && property === 'call') {
             return (thisArg: unknown, ...args: unknown[]) => this.callFunction(object as RuntimeFunction, args, thisArg)
@@ -1557,12 +1587,48 @@ export class Interpreter {
     }
 }
 
-function deepEqual(a: any, b: any): boolean {
-    if (Object.is(a, b)) return true
+function deepEqual(a: any, b: any, seen = new WeakMap<object, WeakSet<object>>()): boolean {
+    if (a === b || typeof a === 'number' && typeof b === 'number' && Number.isNaN(a) && Number.isNaN(b)) return true
     if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false
     if (Array.isArray(a) !== Array.isArray(b)) return false
-    const keysA = Object.keys(a), keysB = Object.keys(b)
-    return keysA.length === keysB.length && keysA.every(key => Object.prototype.hasOwnProperty.call(b, key) && deepEqual(a[key], b[key]))
+    let compared = seen.get(a)
+    if (compared?.has(b)) return true
+    if (!compared) { compared = new WeakSet<object>(); seen.set(a, compared) }
+    compared.add(b)
+    const structuralKeys = (value: Record<string, unknown>): string[] => Object.keys(value).filter(key =>
+        !(key === 'toString' && typeof value[key] === 'function' && (value[key] as { __junoDefaultToString?: boolean }).__junoDefaultToString)
+    )
+    const keysA = structuralKeys(a), keysB = structuralKeys(b)
+    return keysA.length === keysB.length && keysA.every(key => Object.prototype.hasOwnProperty.call(b, key) && deepEqual(a[key], b[key], seen))
+}
+
+function isRuntimeCallable(value: unknown): boolean {
+    return Boolean(value && typeof value === 'object' && ((value as any).__junoFunction || (value as any).__junoConstructor))
+}
+
+function deepCloneValue<T>(value: T, seen = new WeakMap<object, any>()): T {
+    if (value === null || typeof value !== 'object' || isRuntimeCallable(value)) return value
+    const existing = seen.get(value)
+    if (existing) return existing
+    const clone: any = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value))
+    seen.set(value, clone)
+    for (const key of Reflect.ownKeys(value)) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key)
+        if (!descriptor) continue
+        if ('value' in descriptor) descriptor.value = deepCloneValue(descriptor.value, seen)
+        Object.defineProperty(clone, key, descriptor)
+    }
+    return clone
+}
+
+function deepFreezeValue<T>(value: T, seen = new WeakSet<object>()): T {
+    if (value === null || typeof value !== 'object' || isRuntimeCallable(value) || seen.has(value)) return value
+    seen.add(value)
+    for (const key of Reflect.ownKeys(value)) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key)
+        if (descriptor && 'value' in descriptor) deepFreezeValue(descriptor.value, seen)
+    }
+    return Object.freeze(value)
 }
 
 function stringifyJunoObject(value: object): string {

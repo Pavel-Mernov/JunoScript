@@ -13,6 +13,14 @@ for const item of array
     console.log(item)
 
 console.log(array.toArray())
+type ObjectIterable = Iterable<{ id: number }> & {
+    data: { id: number }[]
+    toArray(): { id: number }[] = this.data
+}
+const objectIterable: ObjectIterable = {
+    data: [{ id: 1 }],
+}
+console.log("iterable includes uses JN ==:", objectIterable.includes({ id: 1 }))
 
 console.log("map:", array.map((item) => item.toString()))
 const mappedObjects = array.map((item) => { value: item.toString() })

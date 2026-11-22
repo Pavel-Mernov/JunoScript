@@ -1,0 +1,139 @@
+import { Iterable } from './iterable'
+import { globalSet, globalValueSet } from './set.ts'
+
+export constructor Set<T> : Iterable<T> & {
+    readonly length: number
+    includes(value: T): boolean
+    add(value: T): Set<T>
+    delete(value: T): boolean
+    clear(): void
+    iterator(): () -> ({ value: T } | null)
+    union(other: Iterable<T>): Set<T> =
+        const result = Set<T>(...this.toArray())
+        for const item of other
+            result.add(item)
+        return result
+
+    intersection(other: Iterable<T>): Set<T> =
+        const result = Set<T>()
+        const lookup = Set<T>(...other.toArray())
+        for const item of this
+            if lookup.includes(item)
+                result.add(item)
+        return result
+
+    subtract(other: Iterable<T>): Set<T> =
+        const result = Set<T>()
+        const lookup = Set<T>(...other.toArray())
+        for const item of this
+            if !lookup.includes(item)
+                result.add(item)
+        return result
+
+    symmetricDifference(other: Iterable<T>): Set<T> =
+        const lookup = Set<T>(...other.toArray())
+        const result = Set<T>()
+        for const item of this
+            if !lookup.includes(item)
+                result.add(item)
+        for const item of other
+            if !this.includes(item)
+                result.add(item)
+        return result
+
+    isSubset(other: Iterable<T>): boolean =
+        const lookup = Set<T>(...other.toArray())
+        for const item of this
+            if !lookup.includes(item)
+                return false
+        return true
+
+    isSuperset(other: Iterable<T>): boolean =
+        for const item of other
+            if !this.includes(item)
+                return false
+        return true
+
+    isDisjoint(other: Iterable<T>): boolean =
+        const lookup = Set<T>(...other.toArray())
+        for const item of this
+            if lookup.includes(item)
+                return false
+        return true
+} {
+    fun (...items: T[]) =
+        return globalSet<T>(...items)
+
+    fun from(items: Iterable<T>): Set<T> =
+        return Set<T>(...items.toArray())
+
+    fun union(left: Iterable<T>, right: Iterable<T>): Set<T> =
+        const result = Set<T>(...left.toArray())
+        for const item of right
+            result.add(item)
+        return result
+
+    fun intersection(left: Iterable<T>, right: Iterable<T>): Set<T> =
+        const result = Set<T>()
+        const lookup = Set<T>(...right.toArray())
+        for const item of left
+            if lookup.includes(item)
+                result.add(item)
+        return result
+
+    fun subtract(left: Iterable<T>, right: Iterable<T>): Set<T> =
+        const result = Set<T>()
+        const lookup = Set<T>(...right.toArray())
+        for const item of left
+            if !lookup.includes(item)
+                result.add(item)
+        return result
+
+    fun symmetricDifference(left: Iterable<T>, right: Iterable<T>): Set<T> =
+        const result = Set<T>()
+        const leftSet = Set<T>(...left.toArray())
+        const rightSet = Set<T>(...right.toArray())
+        for const item of left
+            if !rightSet.includes(item)
+                result.add(item)
+        for const item of right
+            if !leftSet.includes(item)
+                result.add(item)
+        return result
+
+    fun isSubset(left: Iterable<T>, right: Iterable<T>): boolean =
+        const lookup = Set<T>(...right.toArray())
+        for const item of left
+            if !lookup.includes(item)
+                return false
+        return true
+
+    fun isSuperset(left: Iterable<T>, right: Iterable<T>): boolean =
+        const lookup = Set<T>(...left.toArray())
+        for const item of right
+            if !lookup.includes(item)
+                return false
+        return true
+
+    fun isDisjoint(left: Iterable<T>, right: Iterable<T>): boolean =
+        const lookup = Set<T>(...right.toArray())
+        for const item of left
+            if lookup.includes(item)
+                return false
+        return true
+}
+
+export constructor ValueSet<T> : Iterable<T> & {
+    readonly length: number
+    includes(value: T): boolean
+    add(value: T): ValueSet<T>
+    delete(value: T): boolean
+    clear(): void
+    iterator(): () -> ({ value: T } | null)
+} {
+    fun (...items: T[]) =
+        return globalValueSet<T>(...items)
+
+    fun from(items: Iterable<T>): ValueSet<T> =
+        return ValueSet<T>(...items.toArray())
+}

@@ -1,0 +1,53 @@
+import { Set, ValueSet } from 'juno:types'
+import { console } from 'juno'
+
+const left = Set(1, 2, 3)
+const right = Set(3, 4, 5)
+const inferredNumbers = Set(1, 2, 3)
+inferredNumbers.add(4)
+const inferredFrom = Set.from([10, 20])
+inferredFrom.add(30)
+const inferredUnion = Set.union([1, 2], [3, 4])
+inferredUnion.add(5)
+const inferredMixed = Set(1, 'two')
+inferredMixed.add(3).add('four')
+console.log('inferred Set<number>:', inferredNumbers.toArray(), inferredFrom.toArray(), inferredUnion.toArray())
+console.log('inferred Set<number | string>:', inferredMixed.toArray())
+# inferredNumbers.add('invalid')
+
+console.log('instance union:', left.union(right).toArray())
+console.log('instance intersection:', left.intersection(right).toArray())
+console.log('instance subtract:', left.subtract(right).toArray())
+console.log('instance symmetric difference:', left.symmetricDifference(right).toArray())
+console.log('instance subset:', Set(1, 2).isSubset(left), left.isSubset(right))
+console.log('instance superset:', left.isSuperset([1, 2]), left.isSuperset(right))
+console.log('instance disjoint:', left.isDisjoint([4, 5]), left.isDisjoint(right))
+
+console.log('static union:', Set.union([1, 2, 3], [3, 4, 5]).toArray())
+console.log('static intersection:', Set.intersection([1, 2, 3], [3, 4, 5]).toArray())
+console.log('static subtract:', Set.subtract([1, 2, 3], [3, 4, 5]).toArray())
+console.log('static symmetric difference:', Set.symmetricDifference([1, 2, 3], [3, 4, 5]).toArray())
+console.log('static subset:', Set.isSubset([1, 2], [1, 2, 3]))
+console.log('static superset:', Set.isSuperset([1, 2, 3], [1, 2]))
+console.log('static disjoint:', Set.isDisjoint([1, 2], [3, 4]))
+
+const objectLeft = Set({ id: 1 }, { id: 2 })
+const objectRight = Set({ id: 2 }, { id: 3 })
+console.log('structural intersection:', objectLeft.intersection(objectRight).toArray())
+console.log('structural array intersection:', objectLeft.intersection([{ id: 2 }, { id: 3 }]).toArray())
+console.log('static structural array intersection:', Set.intersection([{ id: 1 }, { id: 2 }], [{ id: 2 }, { id: 3 }]).toArray())
+
+const valueSetSource = { nested: { value: 1 }, items: [1, 2] }
+const valueSet = ValueSet(valueSetSource, { nested: { value: 1 }, items: [1, 2] })
+valueSetSource.nested.value = 2
+valueSetSource.items.push(3)
+console.log('value set deduplicates snapshots:', valueSet.length)
+console.log('value set retains old snapshot:', valueSet.includes({ nested: { value: 1 }, items: [1, 2] }))
+console.log('value set ignores source mutation:', valueSet.includes(valueSetSource))
+valueSet.add(valueSetSource)
+console.log('value set adds changed snapshot:', valueSet.length, valueSet.toArray())
+const storedValue = valueSet.toArray()[0]
+console.log('value set stored snapshot:', storedValue.nested.value, storedValue.items.length)
+# storedValue.nested.value = 99
+# storedValue.items.push(4)
+console.log('value set deletes structurally:', valueSet.delete({ nested: { value: 1 }, items: [1, 2] }), valueSet.length)

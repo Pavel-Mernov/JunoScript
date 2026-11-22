@@ -1,5 +1,64 @@
 import * as vscode from 'vscode'
-import { analyze, hoverAt, inlayHintsFor } from './language'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { analyze, exportsForFile, hoverAt, inlayHintsFor } from './language'
+
+function resolveImportedFile(documentFile: string, specifier: string): string | undefined {
+    if (!specifier.startsWith('.')) return undefined
+    const base = path.resolve(path.dirname(documentFile), specifier)
+    const candidates = /\.(?:jn|[cm]?[jt]s)$/i.test(base) ? [base] : [
+        `${base}.jn`, `${base}.ts`, `${base}.js`, path.join(base, 'index.jn'), path.join(base, 'index.ts'), path.join(base, 'index.js')
+    ]
+    return candidates.find(candidate => fs.existsSync(candidate) && fs.statSync(candidate).isFile())
+}
+
+function importCompletions(document: vscode.TextDocument, position: vscode.Position): vscode.CompletionItem[] | undefined {
+    const line = document.lineAt(position.line).text
+    const before = line.slice(0, position.character)
+    const named = /^\s*(?:export\s+)?import\s*\{([^}]*)$/.exec(before)
+    if (named) {
+        const tail = line.slice(position.character)
+        const module = /^\s*\}\s*from\s*['"]([^'"]+)['"]/.exec(tail)?.[1]
+        if (!module) return []
+        const file = resolveImportedFile(document.uri.fsPath, module)
+        if (!file) return []
+        const typed = named[1].split(',').pop()?.trim() ?? ''
+        const imported = new Set(named[1].split(',').slice(0, -1).map(name => name.trim()))
+        const start = new vscode.Position(position.line, position.character - typed.length)
+        return exportsForFile(file).filter(symbol => !imported.has(symbol.name) && symbol.name.startsWith(typed)).map(symbol => {
+            const item = new vscode.CompletionItem(symbol.name, vscode.CompletionItemKind.Reference)
+            item.detail = symbol.detail
+            item.documentation = `Export from ${module}`
+            item.range = new vscode.Range(start, position)
+            return item
+        })
+    }
+
+    const moduleMatch = /\bfrom\s+(['"])([^'"]*)$/.exec(before)
+    if (!moduleMatch) return undefined
+    const typed = moduleMatch[2]
+    const start = new vscode.Position(position.line, position.character - typed.length)
+    const modules = new Set(['juno', 'juno:node', 'juno:types', 'types'])
+    if (typed.startsWith('.')) {
+        const slash = Math.max(typed.lastIndexOf('/'), typed.lastIndexOf('\\'))
+        const directoryPart = slash < 0 ? '.' : typed.slice(0, slash + 1)
+        const namePart = slash < 0 ? typed.slice(2) : typed.slice(slash + 1)
+        const directory = path.resolve(path.dirname(document.uri.fsPath), directoryPart)
+        try {
+            for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+                if (!entry.name.startsWith(namePart) || entry.name.startsWith('.')) continue
+                const normalizedDirectory = directoryPart.replace(/\\/g, '/')
+                const baseName = entry.isDirectory() ? `${entry.name}/` : entry.name.replace(/\.(?:jn|[cm]?[jt]s)$/i, '')
+                modules.add(`${normalizedDirectory}${baseName}`)
+            }
+        } catch { /* incomplete path */ }
+    }
+    return [...modules].filter(name => name.startsWith(typed)).map(name => {
+        const item = new vscode.CompletionItem(name, name.endsWith('/') ? vscode.CompletionItemKind.Folder : vscode.CompletionItemKind.Module)
+        item.range = new vscode.Range(start, position)
+        return item
+    })
+}
 
 export function activate(context: vscode.ExtensionContext): void {
     const selector: vscode.DocumentSelector = { language: 'junoscript', scheme: 'file' }
@@ -85,6 +144,8 @@ export function activate(context: vscode.ExtensionContext): void {
         }),
         vscode.languages.registerCompletionItemProvider(selector, {
             provideCompletionItems(document, position) {
+                const imports = importCompletions(document, position)
+                if (imports) return imports
                 const linePrefix = document.lineAt(position.line).text.slice(0, position.character)
                 const match = /([A-Za-z_$][\w$]*)\s*\[\s*(?:(['"])([^'"]*)?)?$/.exec(linePrefix)
                 if (!match) return []
@@ -119,7 +180,7 @@ export function activate(context: vscode.ExtensionContext): void {
                     return item
                 })
             }
-        }, '[', "'", '"'),
+        }, '[', '{', ',', "'", '"', '/'),
         vscode.languages.registerCodeActionsProvider(selector, {
             provideCodeActions(document, _range, context) {
                 const result = analyze(document.getText(), document.uri.fsPath)
