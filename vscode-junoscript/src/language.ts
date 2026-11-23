@@ -319,11 +319,16 @@ function resolveType(type: TypeNode, env: Env): TypeNode {
     }
     if (type.kind === 'IndexedAccessType') return indexedAccessType(type.object, type.index, env) ?? named('any')
     if (type.kind === 'ObjectType') return { ...type, members: type.members.flatMap(member => {
-        const indexType = member.indexType ? resolveType(member.indexType, env) : undefined
+        // Keep surrounding type parameters symbolic in member signatures. Their
+        // constraints are useful while checking a body, but replacing `T` with
+        // its constraint here would turn `toArray(): T[]` into `Array<any>`.
+        const signatureEnv = new Map(env)
+        for (const [name, symbol] of signatureEnv) if (symbol.kind === 'type' && symbol.typeParameter) signatureEnv.delete(name)
+        const indexType = member.indexType ? resolveType(member.indexType, signatureEnv) : undefined
         const indexParts = indexType?.kind === 'UnionType' ? indexType.types : indexType ? [indexType] : []
         if (indexType && indexParts.length && indexParts.every(part => part.kind === 'LiteralType' && (typeof part.value === 'string' || typeof part.value === 'number'))) {
             return indexParts.map(part => {
-                const memberEnv = new Map(env)
+                const memberEnv = new Map(signatureEnv)
                 memberEnv.set(member.name, { kind: 'type', generics: [], value: part })
                 return {
                     ...member,
@@ -334,7 +339,7 @@ function resolveType(type: TypeNode, env: Env): TypeNode {
                 }
             })
         }
-        const memberEnv = indexType ? new Map(env) : env
+        const memberEnv = indexType ? new Map(signatureEnv) : signatureEnv
         if (indexType) memberEnv.set(member.name, { kind: 'type', generics: [], value: indexType })
         return [{ ...member, type: resolveType(member.type, memberEnv), indexType, params: member.params?.map(param => ({ ...param, type: param.type ? resolveType(param.type, memberEnv) : undefined })) }]
     }) }
@@ -1430,6 +1435,7 @@ function iterableElementType(type: TypeNode, env: Env): TypeNode {
     }
     if (resolved.kind === 'UnionType') return unionOf(resolved.types.map(part => iterableElementType(part, env)))
     if (isNamedType(resolved, 'string')) return named('string')
+    if (isNamedType(resolved, 'Range')) return named('number')
 
     const arrayElement = (candidate: TypeNode): TypeNode | undefined => {
         const result = resolveType(candidate, env)
@@ -1751,7 +1757,7 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
                     const args = expression.typeArguments?.length
                         ? expression.typeArguments
                         : inferGenericArguments(symbol.generics, symbol.overloads[0]?.params ?? [], expression.args, env)
-                    if (!expression.typeArguments?.length && (expression.callee.name === 'Set' || expression.callee.name === 'ValueSet')) {
+                    if (!expression.typeArguments?.length && (expression.callee.name === 'Set' || expression.callee.name === 'ValueSet' || expression.callee.name === 'Queue')) {
                         for (let index = 0; index < args.length; index++) args[index] = widenSetElementType(args[index])
                     }
                     if (!expression.typeArguments?.length && (expression.callee.name === 'Map' || expression.callee.name === 'ValueMap')) {
@@ -2186,7 +2192,17 @@ class Analyzer {
                 })
             }
             if (declarationName) declaredHere.add(declarationName)
-            this.statement(statement, env)
+            try {
+                this.statement(statement, env)
+            } catch (error) {
+                const loc = candidate.loc ?? ('expression' in candidate ? expressionStart(candidate.expression) : undefined)
+                this.diagnostics.push({
+                    line: loc?.line ?? 1,
+                    column: loc?.column ?? 1,
+                    length: Math.max(1, declarationName?.length ?? 1),
+                    message: error instanceof Error ? error.message : String(error)
+                })
+            }
         }
     }
 
@@ -3168,10 +3184,48 @@ function expressionReference(expression: Expression): string {
     return 'object'
 }
 
+function parseForAnalysis(source: string, filePath?: string): { statements: Statement[]; diagnostics: DiagnosticInfo[] } {
+    const lines = source.split(/\r?\n/)
+    const recoverable = [...lines]
+    const diagnostics: DiagnosticInfo[] = []
+    const masked = new Set<number>()
+
+    for (let attempt = 0; attempt <= lines.length; attempt++) {
+        try {
+            return { statements: parse(recoverable.join('\n'), { validate: false, filePath }), diagnostics }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            const location = /\bat (\d+):(\d+)\s*$/.exec(message)
+            if (!location) return { statements: [], diagnostics: [...diagnostics, { line: 1, column: 1, length: 1, message }] }
+
+            const line = Math.max(1, Math.min(lines.length, Number(location[1])))
+            const column = Math.max(1, Number(location[2]))
+            if (masked.has(line)) return { statements: [], diagnostics }
+            masked.add(line)
+            diagnostics.push({
+                line,
+                column,
+                length: Math.max(1, (lines[line - 1]?.length ?? column) - column + 1),
+                message: message.replace(/\s+at \d+:\d+\s*$/, '')
+            })
+            // Keep the line and column layout stable so every AST location still
+            // maps to the original document after recovery.
+            const indentation = recoverable[line - 1]?.match(/^\s*/)?.[0] ?? ''
+            if (recoverable[line - 1]?.trim()) recoverable[line - 1] = indentation
+            else {
+                const next = recoverable.slice(line).find(candidate => candidate.trim())
+                recoverable[line - 1] = `${next?.match(/^\s*/)?.[0] ?? indentation}null`
+            }
+        }
+    }
+    return { statements: [], diagnostics }
+}
+
 export function analyze(source: string, filePath?: string): { hovers: HoverInfo[]; hints: InlayHintInfo[]; diagnostics: DiagnosticInfo[]; semanticTokens: SemanticTokenInfo[] } | undefined {
     try {
         const analyzer = new Analyzer()
-        const statements = parse(source, { validate: false, filePath })
+        const recovered = parseForAnalysis(source, filePath)
+        const statements = recovered.statements
         const imported = importedDeclarations(statements, filePath)
         const stringifyForTypeSearch = (value: unknown): string => JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? `${item}n` : item)
         const needsIterable = stringifyForTypeSearch(statements).includes('Iterable')
@@ -3204,9 +3258,8 @@ export function analyze(source: string, filePath?: string): { hovers: HoverInfo[
         const iterable = imported.get('Iterable')
         if (iterable?.kind === 'type' && !statements.some(statement => statement.kind === 'TypeDeclaration' && statement.name === 'Iterable')) builtins.set('Iterable', iterable)
         analyzer.analyze(statements, builtins)
-        return { hovers: analyzer.hovers, hints: analyzer.hints, diagnostics: analyzer.diagnostics, semanticTokens: analyzer.semanticTokens }
+        return { hovers: analyzer.hovers, hints: analyzer.hints, diagnostics: [...recovered.diagnostics, ...analyzer.diagnostics], semanticTokens: analyzer.semanticTokens }
     } catch (error) {
-        return undefined
         return undefined
     }
 }

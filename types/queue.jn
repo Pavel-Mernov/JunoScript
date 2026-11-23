@@ -1,0 +1,46 @@
+import { Iterable } from './iterable'
+import { Range } from './range'
+import { Array } from './array'
+
+export constructor Queue<T> : Iterable<T> {
+    fun (...items : T[]) =
+        
+        let _start = 0
+
+        let result = {
+            get length(): number =
+                return items.length - _start
+
+            fun copy(): Queue<T> =
+                return Queue(...items.slice(_start))
+
+            fun toArray(): T[] =
+                return items.slice(_start)
+
+            fun push(...newItems: T[]): number =
+                return items.push(...newItems)
+
+            fun pop(): T? =
+                if this.length == 0
+                    return null
+                const value = items[_start]
+                ++_start
+                return value
+
+            fun copyWithin(target: number, start: number = 0, end: number = this.length): T[] =
+                let destination = target < 0 ? this.length + target : target
+                if destination < 0
+                    destination = 0
+                
+                const array = this.toArray()
+                const values = array.slice(start, end)
+                for const index of array.indices
+                    if index < values.length & destination + index < this.length
+                        this[destination + index] = values[index]
+                return this
+
+        }
+
+        return result
+        
+}

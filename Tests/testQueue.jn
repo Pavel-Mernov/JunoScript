@@ -1,0 +1,30 @@
+import { Queue } from 'juno:types'
+import { console } from 'juno'
+
+console.log('=== Queue tests ===')
+
+const queue = Queue(1, 2, 3)
+console.log('initial:', queue.length, queue.toArray())
+
+console.log('pop:', queue.pop(), queue.length, queue.toArray())
+console.log('push:', queue.push(4, 5), queue.length, queue.toArray())
+
+const copy = queue.copy()
+console.log('copy:', copy.length, copy.toArray())
+console.log('copy pop:', copy.pop(), copy.toArray())
+console.log('source unchanged:', queue.length, queue.toArray())
+
+console.log('iterable methods:', queue.at(0), queue.includes(4), queue.indexOf(5))
+console.log('iterable map:', queue.map((value) => value * 2))
+
+const strings = Queue('first', 'second')
+const first: string? = strings.pop()
+console.log('generic inference:', first, strings.toArray())
+
+# Negative generic check. Uncomment to inspect the diagnostic.
+# strings.push(42)
+
+const empty = Queue<number>()
+console.log('empty:', empty.length, empty.pop(), empty.toArray())
+
+console.log('=== Queue tests complete ===')

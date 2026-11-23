@@ -57,7 +57,7 @@ export class Interpreter {
                 if (statement.defaultImport) this.declare(env, statement.defaultImport, adaptedModule, false)
                 for (const name of statement.namedImports) {
                     const localTypeModule = ({
-                        Iterable: 'iterable', Range: 'range', Array: 'array', Set: 'set', ValueSet: 'set', Map: 'map', ValueMap: 'map', Object: 'object', Boolean: 'boolean', Number: 'number',
+                        Iterable: 'iterable', Range: 'range', Array: 'array', Set: 'set', ValueSet: 'set', Map: 'map', ValueMap: 'map', Queue: 'queue', Object: 'object', Boolean: 'boolean', Number: 'number',
                         String: 'string', Tuple: 'tuple', Random: 'random', Error: 'error', Result: 'error', ok: 'error'
                     } as Record<string, string>)[name]
                     if ((statement.module === 'juno' || statement.module === 'juno:types') && localTypeModule) {

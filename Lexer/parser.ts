@@ -268,7 +268,9 @@ export class Parser {
         return { kind: 'Import', module, defaultImport, defaultImportLoc, namedImports, namedImportLocs }
     }
     private block(): Statement[] {
-        this.take('Newline', 'Expected a newline before indented block'); this.take('Indent', 'Expected an indented block')
+        this.take('Newline', 'Expected a newline before indented block')
+        while (this.match('Newline')) {}
+        this.take('Indent', 'Expected an indented block')
         const body: Statement[] = []; this.separators()
         while (!this.is('Dedent') && !this.is('EOF')) { body.push(this.statement()); this.separators() }
         this.take('Dedent'); return body
