@@ -1,0 +1,20 @@
+export const dependencyName = 'math-dependency'
+
+export fun multiply(left: number, right: number): number =
+    return left * right
+
+export constructor Box<T>: {
+    value: T
+    map(callback: (T) -> T): Box<T>
+} {
+    fun (value: T): Box<T> =
+        return {
+            value
+
+            map(callback: (T) -> T): Box<T> =
+                return Box(callback(this.value))
+        }
+
+    fun of<T>(value: T): Box<T> =
+        return Box(value)
+}

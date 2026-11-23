@@ -9,6 +9,7 @@ JunoScript — экспериментальный интерпретируемы
 ## Содержание
 
 - [Установка и запуск](#установка-и-запуск)
+- [Сборка JN в JavaScript или TypeScript](#сборка-jn-в-javascript-или-typescript)
 - [Первая программа](#первая-программа)
 - [Основы синтаксиса](#основы-синтаксиса)
 - [Переменные и inference](#переменные-и-inference)
@@ -64,6 +65,162 @@ npm run compile --prefix vscode-junoscript
 ```
 
 После пересборки установленного расширения выполните `Developer: Reload Window`.
+
+## Сборка JN в JavaScript или TypeScript
+
+CLI умеет создавать исполняемый JS/TS-модуль из JunoScript-файла:
+
+```sh
+junode --build source.jn
+```
+
+По умолчанию рядом с `source.jn` создаётся `source.js`. Явный output:
+
+```sh
+junode --build source.jn --out dist/source.js
+```
+
+TypeScript wrapper:
+
+```sh
+junode --build source.jn --target ts
+junode --build source.jn --out dist/source.ts
+```
+
+Текущий `.ts` backend создаёт именованные exports, но пока объявляет их как `any`. Он предназначен для выполнения и проверки module wiring; генерация точных `.d.ts`/TS-сигнатур является отдельным будущим этапом. Точные Juno-типы доступны в `.jn` source и hover расширения.
+
+Перед генерацией выполняется полный Juno-анализ. При diagnostics файл не создаётся. Сгенерированный модуль встраивает entry JN source и запускает его через Juno runtime backend. Внутри выполняемого JN-кода сохраняются:
+
+- runtime type behavior и type defaults;
+- `readonly` и `sealed` semantics;
+- constructors и overload dispatch;
+- `Iterable`, `Result`, `try/catch` и стандартные типы;
+- Juno stack information и module resolution.
+
+Собранный файл является runtime wrapper, а не standalone bundle. Он зависит от собранного Juno runtime. Relative imports продолжают разрешаться относительно исходного `.jn`-файла, поэтому импортируемые `.jn`/`.js`/`.ts` dependencies должны оставаться доступными. Entry source при этом уже встроен в generated-файл.
+
+Проверки `readonly`/`sealed` гарантируются при выполнении JN-операций. JavaScript consumer получает обычные JS values; прямое изменение объекта со стороны JS находится за границей статической системы JunoScript.
+
+Пример исходного модуля:
+
+```junoscript
+export const answer = 42
+
+export fun greet(name: string): string =
+    return 'Hello, ${name}'
+
+export constructor Counter: {
+    value: number
+} {
+    fun (value: number): Counter =
+        return { value }
+
+    fun zero(): Counter =
+        return Counter(0)
+}
+```
+
+Использование собранного CommonJS-модуля:
+
+```js
+const { answer, greet, Counter } = require('./source.js')
+
+const counter = Counter(10)
+const empty = Counter.zero()
+```
+
+### Представление JN constructor в JavaScript
+
+JN constructor экспортируется как callable function object, концептуально:
+
+```js
+const Counter = Object.assign(
+    (...args) => createJunoValue(...args),
+    { zero: () => createJunoValue(0) }
+)
+```
+
+Это намеренный выбор вместо JS `class`:
+
+- Juno constructors вызываются без `new`;
+- они могут иметь несколько call overloads;
+- constructor возвращает структурный объект, а не обязательно class instance;
+- static methods естественно размещаются на function object;
+- сохраняется callable/structural модель JunoScript.
+
+Из JavaScript JN constructor можно вызвать как обычную функцию. Его static methods также являются обычными JS-функциями.
+
+### Импорт JS/TS class в JunoScript
+
+Экспортированный JavaScript или TypeScript `class` автоматически адаптируется в Juno constructor:
+
+```ts
+export class NativeCounter {
+    static zero(): NativeCounter { return new NativeCounter(0) }
+    value: number
+    constructor(value: number) { this.value = value }
+    increment(): number { return ++this.value }
+}
+```
+
+```junoscript
+import { NativeCounter } from './native.ts'
+
+const counter = NativeCounter(5) # внутри выполняется new NativeCounter(5)
+counter.increment()
+
+const zero = NativeCounter.zero()
+```
+
+Static values остаются доступны во время выполнения через `NativeCounter.member`. Для hover и inference расширение в текущей версии извлекает constructor parameters, public/readonly instance fields, instance methods, static methods и generic parameters class/methods.
+
+Static data fields доступны runtime, но пока не получают точный тип из host source analysis.
+
+Пример hover для class import:
+
+```text
+constructor NativeAccumulator(value: number): NativeAccumulator
+NativeAccumulator.zero(): NativeAccumulator
+```
+
+Результат вызова сохраняет instance type и структурное описание:
+
+```text
+const sampleAccumulator: NativeAccumulator
+
+{
+  value: number;
+  add(amount: number): number;
+}
+```
+
+Экспортированный class не должен деградировать до `any`. Это поведение закреплено тестом `checkInference.cjs`.
+
+### Тесты build pipeline
+
+Полный набор fixtures находится в [`Tests/testBuild`](./Tests/testBuild). Сначала соберите проект, затем запустите suite:
+
+```sh
+npm run build
+npm run test:build
+```
+
+Runner создаёт временный каталог `Tests/testBuild/.generated`, выполняет проверки и всегда удаляет generated-файлы после завершения.
+
+| Fixture | Что проверяет |
+| --- | --- |
+| [`testBuild.jn`](./Tests/testBuild/testBuild.jn) | Экспорт `const`, функции, JN constructor и static method |
+| [`dependency.jn`](./Tests/testBuild/dependency.jn) | Экспорт generic constructor из зависимого JN-модуля |
+| [`imports.jn`](./Tests/testBuild/imports.jn) | Relative import другого `.jn` во время работы generated module |
+| [`runtimeTypes.jn`](./Tests/testBuild/runtimeTypes.jn) | `type` defaults и экспортированные JN methods |
+| [`nativeClass.ts`](./Tests/testBuild/nativeClass.ts) | Нативный TypeScript class с instance/static methods |
+| [`classInterop.jn`](./Tests/testBuild/classInterop.jn) | Импорт TS class как Juno constructor и повторный экспорт значений |
+| [`checkInference.cjs`](./Tests/testBuild/checkInference.cjs) | Regression-тест constructor hover, instance shape и защиты от `any` |
+| [`consumeBuilt.cjs`](./Tests/testBuild/consumeBuilt.cjs) | Runtime assertions для generated CommonJS modules |
+| [`consumeTypes.ts`](./Tests/testBuild/consumeTypes.ts) | Module wiring generated TypeScript wrapper и проверка через `tsc` |
+| [`run.cjs`](./Tests/testBuild/run.cjs) | Сборка fixtures, запуск assertions, `tsc` и cleanup |
+
+Отдельная краткая памятка находится в [`Tests/testBuild/README.md`](./Tests/testBuild/README.md).
 
 ## Первая программа
 
@@ -1163,6 +1320,7 @@ import {
 | [`testRegEx.jn`](./Tests/testRegEx.jn) | RegEx literals и constructor |
 | [`testImportExports.jn`](./Tests/testImportExports.jn) | Imports, exports, re-exports |
 | [`testJnTs`](./Tests/testJnTs) | JunoScript/TypeScript interop |
+| [`testBuild`](./Tests/testBuild) | `junode --build`, generated JS/TS и межмодульный interop |
 
 Запуск отдельного примера:
 

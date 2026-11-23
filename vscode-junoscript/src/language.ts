@@ -1015,6 +1015,59 @@ function hostDeclarations(source: string): Map<string, ImportedSymbol> {
         const generics = match[2]?.split(',').map(item => item.trim().split(/\s+(?:extends|is)\s+|\s*=/)[0]) ?? []
         result.set(match[1], { kind: 'fun', generics, params, returnType: match[4] ? hostType(match[4]) : inferredReturnType })
     }
+    const hostParameters = (source: string): Parameter[] => source.trim() ? splitTopLevel(source).map((raw, index) => {
+        const clean = raw.trim().replace(/^(?:(?:public|private|protected|readonly|override|declare)\s+)+/, '')
+        const rest = clean.startsWith('...')
+        const parameter = rest ? clean.slice(3) : clean
+        const separator = parameter.indexOf(':')
+        const rawName = (separator < 0 ? parameter : parameter.slice(0, separator)).split('=')[0].trim()
+        const optional = rawName.endsWith('?') || parameter.includes('=')
+        return {
+            name: rawName.replace(/\?$/, '') || `arg${index}`,
+            type: hostType(separator < 0 ? undefined : parameter.slice(separator + 1).split('=')[0].trim()),
+            rest,
+            ...(optional ? { defaultValue: { kind: 'Literal', value: null } as Expression } : {})
+        }
+    }) : []
+    for (const match of source.matchAll(/export\s+(?:default\s+)?class\s+([A-Za-z_$][\w$]*)(?:\s*<([^>{]+)>)?[^\{]*\{/g)) {
+        const name = match[1]
+        const bodyStart = match.index! + match[0].length
+        let cursor = bodyStart, depth = 1, quote = ''
+        for (; cursor < source.length && depth > 0; cursor++) {
+            const character = source[cursor]
+            if (quote) { if (character === '\\') cursor++; else if (character === quote) quote = ''; continue }
+            if (character === "'" || character === '"' || character === '`') { quote = character; continue }
+            if (character === '{') depth++
+            else if (character === '}') depth--
+        }
+        const body = source.slice(bodyStart, Math.max(bodyStart, cursor - 1))
+        const generics = match[2]?.split(',').map(item => item.trim().split(/\s+(?:extends|is)\s+|\s*=/)[0]) ?? []
+        const constructorMatch = /constructor\s*\(([^)]*)\)/.exec(body)
+        const params = hostParameters(constructorMatch?.[1] ?? '')
+        const members: TypeMember[] = []
+        if (constructorMatch) for (const raw of splitTopLevel(constructorMatch[1])) {
+            if (!/\b(?:public|readonly)\b/.test(raw)) continue
+            const parameter = hostParameters(raw)[0]
+            if (parameter) members.push(field(parameter.name, parameter.type ?? named('any'), /\breadonly\b/.test(raw)))
+        }
+        for (const fieldMatch of body.matchAll(/(?:^|\n)\s*(?!(?:static|private|protected)\b)(?:public\s+)?(readonly\s+)?([A-Za-z_$][\w$]*)[!?]?\s*:\s*([^=;\n]+)/g)) {
+            if (!members.some(member => member.name === fieldMatch[2])) members.push(field(fieldMatch[2], hostType(fieldMatch[3]), Boolean(fieldMatch[1])))
+        }
+        const staticMethods: { name: string; generics: string[]; params: Parameter[]; returnType: TypeNode }[] = []
+        for (const methodMatch of body.matchAll(/(?:^|\n)\s*(static\s+)?(?:public\s+)?([A-Za-z_$][\w$]*)\s*(?:<([^>]+)>)?\s*\(([^)]*)\)\s*(?::\s*([^\{\n]+))?\s*\{/g)) {
+            if (methodMatch[2] === 'constructor') continue
+            const methodGenerics = methodMatch[3]?.split(',').map(item => item.trim().split(/\s+(?:extends|is)\s+|\s*=/)[0]) ?? []
+            const methodParams = hostParameters(methodMatch[4])
+            const returnType = hostType(methodMatch[5])
+            if (methodMatch[1]) staticMethods.push({ name: methodMatch[2], generics: methodGenerics, params: methodParams, returnType })
+            else members.push(method(methodMatch[2], methodParams, returnType))
+        }
+        result.set(name, {
+            kind: 'constructor', generics, inheritedType: { kind: 'ObjectType', members },
+            overloads: [{ params, returnType: generics.length ? { kind: 'GenericType', name, args: generics.map(named) } : named(name) }],
+            methods: staticMethods
+        })
+    }
     for (const match of source.matchAll(/export\s+(?:const|let|var|class)\s+([A-Za-z_$][\w$]*)/g)) {
         if (!result.has(match[1])) result.set(match[1], { kind: 'var', type: localTypes.get(match[1]) ?? named('any') })
     }

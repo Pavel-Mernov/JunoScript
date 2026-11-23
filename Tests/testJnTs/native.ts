@@ -44,3 +44,20 @@ export function createNativeIterable(): Iterable<number> {
 export function collectIterable(values: Iterable<unknown>): unknown[] {
     return [...values]
 }
+
+export class NativeCounter {
+    value: number
+
+    static from(value: number): NativeCounter {
+        return new NativeCounter(value)
+    }
+
+    constructor(value: number) {
+        this.value = value
+    }
+
+    increment(amount = 1): number {
+        this.value += amount
+        return this.value
+    }
+}

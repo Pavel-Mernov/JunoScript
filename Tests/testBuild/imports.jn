@@ -1,0 +1,7 @@
+import { dependencyName, multiply, Box } from './dependency.jn'
+
+export const importedName = dependencyName
+export const boxed = Box.of(5)
+
+export fun calculate(value: number): number =
+    return multiply(value, boxed.value)

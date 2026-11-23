@@ -9,7 +9,8 @@ import {
     nestedValue,
     nativeIterable,
     createNativeIterable,
-    collectIterable
+    collectIterable,
+    NativeCounter
 } from './native.ts'
 
 type Profile = {
@@ -54,3 +55,9 @@ type JnIterable = Iterable<number> & {
 }
 const jnIterable: JnIterable = { data: [1, 3, 5] }
 console.log('JN toArray as TS Symbol.iterator:', collectIterable(jnIterable))
+
+# Native JS/TS classes are callable as Juno constructors (without `new`).
+const nativeCounter = NativeCounter(5)
+console.log('TS class as JN constructor:', nativeCounter.value, nativeCounter.increment(2))
+const staticCounter = NativeCounter.from(10)
+console.log('TS class static method:', staticCounter.value)

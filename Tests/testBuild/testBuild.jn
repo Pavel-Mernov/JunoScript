@@ -1,0 +1,21 @@
+export const answer = 42
+
+export fun greet(name: string): string =
+    return 'Hello, ${name}'
+
+export constructor Counter: {
+    value: number
+    increment(amount: number): number
+} {
+    fun (initial: number): Counter =
+        return {
+            value: initial
+
+            increment(amount: number): number =
+                this.value += amount
+                return this.value
+        }
+
+    fun zero(): Counter =
+        return Counter(0)
+}

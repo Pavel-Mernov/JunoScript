@@ -1,0 +1,16 @@
+import { answer, Counter, greet } from '../testBuild'
+import { console } from 'juno'
+
+console.log('answer:', answer)
+
+console.log('greet:', greet('Paul'))
+
+const counter = Counter.zero()
+
+console.log('counter.zero():', counter)
+
+counter.increment(2)
+
+console.log('counter.increment(2):', counter)
+
+console.log('counter.value:', counter.value)

@@ -1,0 +1,13 @@
+export type Settings = {
+    name: string
+    enabled: boolean = true
+
+    describe(): string =
+        return '${this.name}:${this.enabled}'
+}
+
+export fun createSettings(name: string): Settings =
+    return Settings({ name })
+
+export fun toggle(settings: Settings): Settings =
+    return Settings({ name: settings.name, enabled: !settings.enabled })

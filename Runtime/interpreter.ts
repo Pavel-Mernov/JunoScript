@@ -42,6 +42,58 @@ export class Interpreter {
         this.executeStatements(statements, this.globals)
     }
 
+    runModule(source: string, filePath: string): Record<string, unknown> {
+        const previousDirectory = this.currentDirectory
+        const previousFile = this.currentFile
+        this.currentDirectory = resolve(filePath, '..')
+        this.currentFile = filePath
+        const env: Environment = { bindings: new Map(), types: new Map(), parent: this.globals }
+        const exported: Record<string, unknown> = {}
+        const statements = parse(source, { filePath })
+        try {
+            for (const statement of statements) {
+                const declaration = statement.kind === 'Export' ? statement.declaration : statement
+                if (declaration.kind === 'TypeDeclaration') {
+                    env.types.set(declaration.name, { value: declaration.value, generics: declaration.generics, genericDefaults: declaration.genericDefaults })
+                    this.registerTypeDeclarations(declaration.value, env)
+                }
+            }
+            for (const statement of statements) {
+                if (statement.kind !== 'Export') {
+                    this.execute(statement, env)
+                    continue
+                }
+                this.execute(statement.declaration, env)
+                const declaration = statement.declaration
+                if (declaration.kind === 'Import') {
+                    if (declaration.defaultImport) {
+                        const binding = this.lookup(env, declaration.defaultImport)
+                        if (binding) exported[statement.default ? 'default' : declaration.defaultImport] = this.toNativeExport(binding.value)
+                    }
+                    for (const name of declaration.namedImports) {
+                        const binding = this.lookup(env, name)
+                        if (binding) exported[name] = this.toNativeExport(binding.value)
+                    }
+                    continue
+                }
+                if (declaration.kind === 'Destructure') {
+                    for (const binding of declaration.bindings) {
+                        const value = this.lookup(env, binding.name)
+                        if (value) exported[binding.name] = this.toNativeExport(value.value)
+                    }
+                    continue
+                }
+                if (declaration.kind !== 'Variable' && declaration.kind !== 'FunctionDeclaration' && declaration.kind !== 'TypeDeclaration' && declaration.kind !== 'ConstructorDeclaration') continue
+                const binding = this.lookup(env, declaration.name)
+                if (binding) exported[statement.default ? 'default' : declaration.name] = this.toNativeExport(binding.value)
+            }
+            return exported
+        } finally {
+            this.currentDirectory = previousDirectory
+            this.currentFile = previousFile
+        }
+    }
+
     private executeStatements(statements: Statement[], env: Environment): unknown {
         for (const statement of statements) this.execute(statement, env)
         return null
@@ -834,7 +886,54 @@ export class Interpreter {
         })
     }
 
+    private callRuntimeConstructor(constructor: RuntimeConstructor, args: unknown[]): unknown {
+        const overload = constructor.overloads.find(candidate => {
+            const nullable = (type: TypeNode | undefined): boolean => Boolean(type && (
+                type.kind === 'NamedType' && type.name === 'null' ||
+                type.kind === 'UnionType' && type.types.some(part => nullable(part))
+            ))
+            const required = candidate.params.filter(param => !param.rest && param.defaultValue === undefined && !nullable(param.type)).length
+            const maximum = candidate.params.some(param => param.rest) ? Number.POSITIVE_INFINITY : candidate.params.length
+            return args.length >= required && args.length <= maximum
+        })
+        if (!overload) throw new TypeError(`No constructor overload accepts ${args.length} argument(s)`)
+        const value = this.callFunction(overload, args)
+        if (!value || typeof value !== 'object') throw new TypeError('A constructor must return an object')
+        const result = this.applyTypeDefaults(value, constructor.inheritedType, overload.closure)
+        return this.toNativeValue(constructor.typeName === 'Tuple' ? Object.freeze(result) : result)
+    }
+
+    private toNativeExport(value: any): any {
+        if (value?.__junoConstructor) {
+            const constructor = value as RuntimeConstructor
+            const callable = (...args: unknown[]) => this.callRuntimeConstructor(constructor, args.map(argument => this.adaptNativeValue(argument)))
+            for (const key of Object.keys(constructor)) {
+                if (key.startsWith('__') || key === 'overloads' || key === 'inheritedType' || key === 'typeName') continue
+                const member = constructor[key] as any
+                ;(callable as any)[key] = member?.__junoFunction
+                    ? (...args: unknown[]) => this.toNativeValue(this.callFunction(member as RuntimeFunction, args.map(argument => this.adaptNativeValue(argument))))
+                    : this.toNativeValue(member)
+            }
+            Object.defineProperty(callable, '__junoConstructor', { value: true })
+            return callable
+        }
+        if (value?.__junoTypeConstructor) {
+            return (input: Record<string, unknown> = {}) => this.toNativeValue(this.applyTypeDefaults(input, value.typeNode, this.globals))
+        }
+        return this.toNativeValue(value)
+    }
+
     private adaptNativeValue(value: any): any {
+        if (typeof value === 'function') {
+            const source = Function.prototype.toString.call(value)
+            if (/^class\s/.test(source)) {
+                const NativeClass = value
+                return new Proxy(NativeClass, {
+                    apply: (_target, _thisArg, args) => this.adaptNativeValue(Reflect.construct(NativeClass, args.map(argument => this.toNativeValue(argument))))
+                })
+            }
+            return value
+        }
         if (value === null || value === undefined || typeof value !== 'object') return value
         if (typeof value.iterator === 'function' || typeof value[Symbol.iterator] !== 'function') return value
         const iterator = function(this: any): () => ({ value: unknown } | null) {
@@ -1772,4 +1871,16 @@ export function runFile(file: string): void {
     const interpreter = new Interpreter()
     ;(interpreter as any).currentDirectory = resolve(path, '..')
     interpreter.run(source, path)
+}
+
+export function runBuiltModule(source: string, file: string): Record<string, unknown> {
+    const path = resolve(file)
+    const diagnostics = analyze(source, path)?.diagnostics ?? []
+    if (diagnostics.length) {
+        const details = diagnostics
+            .map(diagnostic => `${path}:${diagnostic.line}:${diagnostic.column} - ${diagnostic.message}`)
+            .join('\n')
+        throw new Error(`JunoScript diagnostics prevented module initialization:\n${details}`)
+    }
+    return new Interpreter().runModule(source, path)
 }
