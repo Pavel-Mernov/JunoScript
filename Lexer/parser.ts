@@ -27,7 +27,7 @@ export type Expression =
     | { kind: 'Member'; object: Expression; property: string; optional: boolean; loc?: Loc }
     | { kind: 'Index'; object: Expression; index: Expression; loc?: Loc }
     | { kind: 'Call'; callee: Expression; args: Expression[]; typeArguments?: TypeNode[] }
-    | { kind: 'Function'; params: Parameter[]; returnType?: TypeNode; body: Statement[]; expressionBody?: Expression }
+    | { kind: 'Function'; generics?: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params: Parameter[]; returnType?: TypeNode; body: Statement[]; expressionBody?: Expression }
 export type Statement =
     | { kind: 'Variable'; name: string; loc?: Loc; mutable: boolean; type?: TypeNode; initializer?: Expression }
     | { kind: 'Destructure'; bindings: { name: string; loc?: Loc }[]; mutable: boolean; initializer: Expression }
@@ -826,6 +826,7 @@ export class Parser {
                 const property = anonymousFunction
                     ? { name: '', loc: this.loc(this.tokens[this.pos - 1]) }
                     : this.propertyName()
+                const genericParameters = explicitFunction && !anonymousFunction && this.match('Less') ? this.genericParameters() : []
                 let value: Expression
                 if (accessor) {
                     const params = this.parameters()
@@ -846,7 +847,14 @@ export class Parser {
                     if (anonymousFunction && last?.kind === 'ExpressionStatement') {
                         body[body.length - 1] = { kind: 'Return', value: last.expression }
                     }
-                    value = { kind: 'Function', params, returnType, body }
+                    value = {
+                        kind: 'Function',
+                        generics: genericParameters.map(item => item.name),
+                        genericLocs: genericParameters.map(item => item.loc),
+                        genericConstraints: genericParameters.map(item => item.constraint),
+                        genericDefaults: genericParameters.map(item => item.defaultType),
+                        params, returnType, body
+                    }
                 }
                 else if (explicitFunction) this.fail("Expected '(' after object function name")
                 else value = { kind: 'Identifier', name: property.name, loc: property.loc }

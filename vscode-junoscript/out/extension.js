@@ -1252,6 +1252,7 @@ var Parser = class _Parser {
         const accessor = this.is("Identifier") && ["get", "set"].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === "Identifier" ? String(this.value(this.tokens[this.pos++])) : void 0;
         const anonymousFunction = explicitFunction && this.is("LeftParen");
         const property = anonymousFunction ? { name: "", loc: this.loc(this.tokens[this.pos - 1]) } : this.propertyName();
+        const genericParameters = explicitFunction && !anonymousFunction && this.match("Less") ? this.genericParameters() : [];
         let value;
         if (accessor) {
           const params = this.parameters();
@@ -1271,7 +1272,16 @@ var Parser = class _Parser {
           if (anonymousFunction && last?.kind === "ExpressionStatement") {
             body[body.length - 1] = { kind: "Return", value: last.expression };
           }
-          value = { kind: "Function", params, returnType, body };
+          value = {
+            kind: "Function",
+            generics: genericParameters.map((item) => item.name),
+            genericLocs: genericParameters.map((item) => item.loc),
+            genericConstraints: genericParameters.map((item) => item.constraint),
+            genericDefaults: genericParameters.map((item) => item.defaultType),
+            params,
+            returnType,
+            body
+          };
         } else if (explicitFunction) this.fail("Expected '(' after object function name");
         else value = { kind: "Identifier", name: property.name, loc: property.loc };
         properties.push({ key: property.name, keyLoc: property.loc, value, accessor, readonly, sealed });
@@ -2074,6 +2084,7 @@ function resolveType(type, env) {
     const symbol = env.get(type.name);
     if (symbol?.kind === "type") return resolveType(instantiate(symbol.value, symbol.generics, type.args, symbol.genericDefaults), env);
     if (["Partial", "Required", "Readonly", "Pick", "Omit", "KeyOf", "Exclude"].includes(type.name) && type.args[0]) {
+      if (type.name === "KeyOf" && type.args[0].kind === "NamedType" && env.get(type.args[0].name)?.kind === "type" && env.get(type.args[0].name).typeParameter) return type;
       if (type.name === "Exclude") {
         const source2 = resolveType(type.args[0], env);
         const excluded = type.args[1] ? resolveType(type.args[1], env) : named("never");
@@ -2138,7 +2149,16 @@ function resolveType(type, env) {
     const element = resolveType(type.element, env);
     return env.get("Array")?.kind === "constructor" ? { kind: "GenericType", name: "Array", args: [element] } : { ...type, element };
   }
-  if (type.kind === "TypeOfType") return resolveType(inferExpression(type.expression, env), env);
+  if (type.kind === "TypeOfType") {
+    if (type.expression.kind === "Index" && type.expression.index.kind === "Identifier") {
+      const index = env.get(type.expression.index.name);
+      if (index?.kind === "type") {
+        const resolvedIndex = resolveType(index.value, env);
+        if (resolvedIndex.kind !== "LiteralType") return type;
+      }
+    }
+    return resolveType(inferExpression(type.expression, env), env);
+  }
   if (type.kind === "ConditionalType") {
     const check = resolveType(type.check, env);
     const target = resolveType(type.target, env);
@@ -2353,7 +2373,7 @@ function lookupMember(type, name, env) {
     }
     return { kind: "fun", params: [], returnType: result, ownerType: resolved };
   }
-  if ((name === "pick" || name === "omit") && (resolved.kind === "ObjectType" || resolved.kind === "ArrayType" || resolved.kind === "GenericType" && (resolved.name === "Array" || resolved.name === "ReadonlyArray"))) {
+  if ((name === "pick" || name === "omit") && !(resolved.kind === "ObjectType" && resolved.members.some((member) => member.name === name)) && (resolved.kind === "ObjectType" || resolved.kind === "ArrayType" || resolved.kind === "GenericType" && (resolved.name === "Array" || resolved.name === "ReadonlyArray"))) {
     const keys = resolveType({ kind: "GenericType", name: "KeyOf", args: [resolved] }, env);
     const selectedKeys = name === "pick" ? named("T") : { kind: "GenericType", name: "Exclude", args: [{ kind: "GenericType", name: "KeyOf", args: [resolved] }, named("T")] };
     const result = {
@@ -3500,7 +3520,14 @@ function inferExpression(expression, env) {
           return [{ ...field(property.key, setterType), sealed: Boolean(property.sealed), accessor: "set", params: property.value.params }];
         }
         if (property.value.kind === "Function") {
-          return [{ ...method(property.key, property.value.params, property.value.returnType ?? named("any")), sealed: Boolean(property.sealed) }];
+          return [{
+            ...method(property.key, property.value.params, property.value.returnType ?? named("any")),
+            sealed: Boolean(property.sealed),
+            generics: property.value.generics,
+            genericLocs: property.value.genericLocs,
+            genericConstraints: property.value.genericConstraints,
+            genericDefaults: property.value.genericDefaults
+          }];
         }
         return [{ ...field(property.key, inferExpression(property.value, env), property.readonly), sealed: Boolean(property.sealed) }];
       });
@@ -3512,7 +3539,14 @@ function inferExpression(expression, env) {
         const index = members.findLastIndex((member) => member.name === property.key);
         if (index >= 0) {
           const inferred = inferFunctionReturnType2(property.value.body, methodEnv, property.value.params);
-          members[index] = property.accessor === "get" ? { ...field(property.key, inferred), sealed: Boolean(property.sealed), accessor: "get" } : { ...method(property.key, property.value.params, inferred), sealed: Boolean(property.sealed) };
+          members[index] = property.accessor === "get" ? { ...field(property.key, inferred), sealed: Boolean(property.sealed), accessor: "get" } : {
+            ...method(property.key, property.value.params, inferred),
+            sealed: Boolean(property.sealed),
+            generics: property.value.generics,
+            genericLocs: property.value.genericLocs,
+            genericConstraints: property.value.genericConstraints,
+            genericDefaults: property.value.genericDefaults
+          };
         }
       }
       objectType.members = members.filter((member, index) => {
@@ -4008,7 +4042,8 @@ var Analyzer = class {
         statement.generics.forEach((name, index) => genericEnv.set(name, {
           kind: "type",
           generics: [],
-          value: statement.genericConstraints?.[index] ?? statement.genericDefaults?.[index] ?? named("any")
+          value: statement.genericConstraints?.[index] ?? statement.genericDefaults?.[index] ?? named("any"),
+          typeParameter: true
         }));
         this.walkType(statement.value, genericEnv);
         const resolved = resolveType(statement.value, genericEnv);
@@ -4124,7 +4159,8 @@ var Analyzer = class {
         (statement.generics ?? []).forEach((name, index) => genericEnv.set(name, {
           kind: "type",
           generics: [],
-          value: statement.genericConstraints?.[index] ?? statement.genericDefaults?.[index] ?? named("any")
+          value: statement.genericConstraints?.[index] ?? statement.genericDefaults?.[index] ?? named("any"),
+          typeParameter: true
         }));
         const inferenceEnv = bindInferredParameters(statement.params, genericEnv);
         const returnType = statement.returnType ?? inferFunctionReturnType2(statement.body, inferenceEnv, statement.params);
@@ -4174,7 +4210,8 @@ var Analyzer = class {
           statement.generics.forEach((name, index) => genericEnv.set(name, {
             kind: "type",
             generics: [],
-            value: statement.genericConstraints?.[index] ?? statement.genericDefaults?.[index] ?? named("any")
+            value: statement.genericConstraints?.[index] ?? statement.genericDefaults?.[index] ?? named("any"),
+            typeParameter: true
           }));
           genericEnv.set(statement.name, { kind: "type", generics: statement.generics, value: statement.inheritedType });
           const local = bindInferredParameters(params, genericEnv);
@@ -4213,7 +4250,7 @@ var Analyzer = class {
           const generics = printGenerics(methodInfo.generics, methodInfo.genericConstraints, methodInfo.genericDefaults);
           this.addHover(method2.name, method2.loc, `(method) ${statement.name}.${method2.name}${generics}(${method2.params.map(printParam).join(", ")}): ${printType(methodInfo.returnType)}`, arrayMethodDescriptions[method2.name]);
           const methodEnv = new Map(env);
-          methodInfo.generics.forEach((name, genericIndex) => methodEnv.set(name, { kind: "type", generics: [], value: methodInfo.genericConstraints?.[genericIndex] ?? methodInfo.genericDefaults?.[genericIndex] ?? named("any") }));
+          methodInfo.generics.forEach((name, genericIndex) => methodEnv.set(name, { kind: "type", generics: [], value: methodInfo.genericConstraints?.[genericIndex] ?? methodInfo.genericDefaults?.[genericIndex] ?? named("any"), typeParameter: true }));
           const local = bindInferredParameters(method2.params, methodEnv);
           method2.params.forEach((param) => {
             const type = local.get(param.name)?.type ?? parameterType(param);
@@ -4346,7 +4383,7 @@ var Analyzer = class {
         for (const member of type.members) {
           if (!member.method || !member.body) continue;
           const local = new Map(env);
-          (member.generics ?? []).forEach((name, index) => local.set(name, { kind: "type", generics: [], value: member.genericConstraints?.[index] ?? member.genericDefaults?.[index] ?? named("any") }));
+          (member.generics ?? []).forEach((name, index) => local.set(name, { kind: "type", generics: [], value: member.genericConstraints?.[index] ?? member.genericDefaults?.[index] ?? named("any"), typeParameter: true }));
           this.bind(local, "this", { kind: "var", mutable: false, type: thisType ?? type });
           for (const param of member.params ?? []) {
             const paramType = parameterBodyType(param);
@@ -4505,7 +4542,7 @@ var Analyzer = class {
           if (sealedMembers.has(property.key)) this.addDiagnostic(property.keyLoc, `Cannot override sealed member '${property.key}'.`);
           if (property.sealed) sealedMembers.add(property.key);
           const member = lookupMember(objectType, property.key, env);
-          const code = isFunctionSymbol(member) ? property.key === "" ? `(call) (${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}` : `(method) ${property.key}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}` : `(property) ${property.key}: ${printType(member && !isFunctionSymbol(member) ? member : named("any"))}`;
+          const code = isFunctionSymbol(member) ? property.key === "" ? `(call) ${printGenerics(member.generics ?? [], member.genericConstraints, member.genericDefaults)}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}` : `(method) ${property.sealed ? "sealed " : ""}${property.key}${printGenerics(member.generics ?? [], member.genericConstraints, member.genericDefaults)}(${member.params.map(printParam).join(", ")}): ${printType(member.returnType)}` : `(property) ${property.key}: ${printType(member && !isFunctionSymbol(member) ? member : named("any"))}`;
           this.addHover(property.key, property.keyLoc, code);
           if (property.key && property.keyLoc && isFunctionSymbol(member)) {
             this.semanticTokens.push({
@@ -4550,7 +4587,8 @@ var Analyzer = class {
         const keyType = inferGenericExpression(expression.index, env);
         if (isNullable(objectType, env)) this.addDiagnostic(expression.loc, "Cannot index a nullable value; use ! or ?? to handle null.");
         const resultType = indexedAccessType(objectType, keyType, env);
-        if (!resultType) this.addDiagnostic(expressionStart(expression.index) ?? expression.loc, `Type '${printType(keyType)}' cannot be used to index type '${printType(objectType)}'.`);
+        const dependentKey = expression.index.kind === "Identifier" && env.get(expression.index.name)?.kind === "type";
+        if (!resultType && !dependentKey) this.addDiagnostic(expressionStart(expression.index) ?? expression.loc, `Type '${printType(keyType)}' cannot be used to index type '${printType(objectType)}'.`);
         if (expression.loc) {
           this.hovers.push({
             line: expression.loc.line,
@@ -4812,7 +4850,19 @@ var Analyzer = class {
     }
   }
   walkFunction(expression, env, contextualType) {
-    const local = bindInferredParameters(expression.params, env);
+    const genericEnv = new Map(env);
+    (expression.generics ?? []).forEach((name, index) => {
+      const constraint = expression.genericConstraints?.[index];
+      const defaultType = expression.genericDefaults?.[index];
+      genericEnv.set(name, { kind: "type", generics: [], value: constraint ?? defaultType ?? named("any"), typeParameter: true });
+      this.addHover(name, expression.genericLocs?.[index], `(type parameter) ${name}${constraint ? ` is ${printType(constraint)}` : ""}${defaultType ? ` = ${printType(defaultType)}` : ""}`);
+      if (constraint) this.walkType(constraint, env);
+      if (defaultType) {
+        this.walkType(defaultType, env);
+        if (constraint && !isAssignableTo(constraint, defaultType, env)) this.addDiagnostic(expression.genericLocs?.[index], `Default type '${printType(defaultType)}' does not satisfy constraint '${printType(constraint)}'.`);
+      }
+    });
+    const local = bindInferredParameters(expression.params, genericEnv);
     const contextual = contextualType ? removeNull(resolveType(contextualType, env)) : void 0;
     if (contextual?.kind === "FunctionType") expression.params.forEach((param, index) => {
       if (!param.type && contextual.params[index]) local.set(param.name, { kind: "var", mutable: true, type: contextual.params[index] });
@@ -4826,10 +4876,10 @@ var Analyzer = class {
       }
       this.addHover(param.name, param.loc, param.name === "_" ? `(ignored parameter) _: ${printType(type)}` : parameterHover(param, type));
       if (param.name !== "_") this.addTypeHint(param.loc, param.name, Boolean(param.type), type, "callbackType");
-      if (param.type) this.walkType(param.type, env);
+      if (param.type) this.walkType(param.type, local);
       if (param.defaultValue) this.walkExpression(param.defaultValue, local);
     }
-    if (expression.returnType) this.walkType(expression.returnType, env);
+    if (expression.returnType) this.walkType(expression.returnType, local);
     if (expression.expressionBody) this.walkExpression(expression.expressionBody, local);
     else this.statements(expression.body, local);
   }

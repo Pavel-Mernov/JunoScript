@@ -1215,7 +1215,13 @@ export class Interpreter {
             return { ...type, types: parts }
         }
         if (type.kind === 'ArrayType') return { ...type, element: this.resolveAliasType(type.element, env, resolving) }
-        if (type.kind === 'TypeOfType') return this.resolveAliasType(this.inferRuntimeValueType(this.evaluate(type.expression, env)), env, resolving)
+        if (type.kind === 'TypeOfType') {
+            const dependsOnUnresolvedType = type.expression.kind === 'Index'
+                && type.expression.index.kind === 'Identifier'
+                && resolving.has(type.expression.index.name)
+            if (dependsOnUnresolvedType) return type
+            return this.resolveAliasType(this.inferRuntimeValueType(this.evaluate(type.expression, env)), env, resolving)
+        }
         if (type.kind === 'ConditionalType') {
             const check = this.resolveAliasType(type.check, env, resolving)
             const target = this.resolveAliasType(type.target, env, resolving)
@@ -1234,7 +1240,7 @@ export class Interpreter {
         if (type.kind === 'IndexedAccessType') return this.indexedType(type.object, type.index, env) ?? { kind: 'NamedType', name: 'any' }
         if (type.kind === 'ObjectType') return { ...type, members: type.members.map(member => ({
             ...member,
-            type: this.resolveAliasType(member.type, env, new Set([...resolving, ...(member.generics ?? [])])),
+            type: this.resolveAliasType(member.type, env, new Set([...resolving, ...(member.generics ?? []), ...(member.indexType ? [member.name] : [])])),
             indexType: member.indexType ? this.resolveAliasType(member.indexType, env, resolving) : undefined,
             params: member.params?.map(param => ({ ...param, type: param.type ? this.resolveAliasType(param.type, env, new Set([...resolving, ...(member.generics ?? [])])) : undefined }))
         })) }

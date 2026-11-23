@@ -9,7 +9,7 @@ type ObjectMethods<T is object> = {
     sealed keys(): KeyOf<T>[]
     sealed values(): T[KeyOf<T>][]
     sealed entries(): [KeyOf<T>, T[KeyOf<T>]][]
-    sealed has(key: KeyOf<T>): boolean
+    sealed has(key: string | number): boolean
     sealed asReadonly(): Readonly<T>
     sealed asMutable(): T
     sealed deepClone(): T
@@ -26,53 +26,53 @@ export constructor Object<T is object = object> {
         return {
             ...obj,
 
-            sealed fun pick(...keys: (string | number)[]): AnyObject =
-                let result: AnyObject = {}
+            sealed fun pick<K is KeyOf<T>>(...keys: K[]): { [key : K] : typeof<this[key]> } =
+                let result: { [key : K] : typeof<this[key]>? } = {}
                 for const key of keys
                     result[key] = readValue(obj, key)
                 return result
 
-            sealed fun omit(...keys: (string | number)[]): AnyObject =
-                let result: AnyObject = {}
+            sealed fun omit<K is KeyOf<T>>(...keys: K[]): Omit<T, K> =
+                let result: { [key : KeyOf<T>]: typeof<this[key]>? } = {}
                 for const entry of this.entries()
                     if !keys.includes(entry[0])
                         result[entry[0]] = entry[1]
                 return result
 
-            sealed fun keys(): (string | number)[] =
+            sealed fun keys(): KeyOf<T>[] =
                 return objectKeys
 
-            sealed fun values(): any[] =
+            sealed fun values(): T[KeyOf<T>][] =
                 return this.keys().map((key) => readValue(obj, key))
 
-            sealed fun entries(): [string | number, any][] =
+            sealed fun entries(): [KeyOf<T>, T[KeyOf<T>]][] =
                 return this.keys().map((key) => [key, readValue(obj, key)])
 
             sealed fun has(key: string | number): boolean =
                 return this.keys().includes(key)
 
-            sealed fun asReadonly(): object =
+            sealed fun asReadonly(): Readonly<T> =
                 return freeze(clone(this))
 
-            sealed fun asMutable(): object =
+            sealed fun asMutable(): T =
                 return clone(this)
 
-            sealed fun deepClone(): object =
+            sealed fun deepClone(): T =
                 return clone(this)
 
-            sealed fun deepFreeze(): object =
+            sealed fun deepFreeze(): Readonly<T> =
                 return freeze(this)
 
-            sealed fun toDeepFreezed(): object =
+            sealed fun toDeepFreezed(): Readonly<T> =
                 return freeze(clone(this))
 
-            sealed fun toJSON(): AnyObject =
-                let result: AnyObject = {}
+            sealed fun toJSON(): T =
+                let result: { [key : KeyOf<T>]: typeof<this[key]>? } = {}
                 for const key of objectKeys
                     result[key] = readValue(obj, key)
                 return result
 
-            sealed fun toJson(): AnyObject =
+            sealed fun toJson(): T =
                 return this.toJSON()
 
             sealed fun toString(): string =
