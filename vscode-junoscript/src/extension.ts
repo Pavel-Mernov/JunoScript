@@ -3,6 +3,68 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { analyze, exportsForFile, hoverAt, inlayHintsFor } from './language'
 
+type ImportCandidate = { module: string }
+
+function moduleSpecifier(documentFile: string, exportedFile: string): string {
+    let relative = path.relative(path.dirname(documentFile), exportedFile).replace(/\\/g, '/')
+    relative = relative.replace(/\.(?:jn|[cm]?[jt]s)$/i, '').replace(/\/index$/i, '')
+    return relative.startsWith('.') ? relative : `./${relative}`
+}
+
+async function importCandidates(document: vscode.TextDocument, name: string): Promise<ImportCandidate[]> {
+    const candidates: ImportCandidate[] = []
+    const seen = new Set<string>()
+    const seenFiles = new Set<string>()
+    const addFile = (module: string, file: string): void => {
+        const resolvedFile = path.resolve(file)
+        if (seen.has(module) || seenFiles.has(resolvedFile) || resolvedFile === path.resolve(document.uri.fsPath)) return
+        const exported = exportsForFile(file).find(symbol => symbol.name === name)
+        if (!exported) return
+        seen.add(module)
+        seenFiles.add(resolvedFile)
+        candidates.push({ module })
+    }
+
+    const standardModules: Record<string, string[]> = {
+        juno: ['console', 'Math', 'types', 'Error', 'Range', 'Iterable', 'Boolean', 'Number', 'String'],
+        'juno:node': ['console'],
+        'juno:types': ['Iterable', 'Range', 'Array', 'Set', 'ValueSet', 'Map', 'ValueMap', 'Queue', 'Object', 'Boolean', 'Tuple', 'Random', 'Error', 'Result', 'ok', 'Partial', 'Required', 'Readonly', 'Pick', 'Omit', 'KeyOf', 'Exclude', 'Items']
+    }
+    for (const [module, exports] of Object.entries(standardModules)) if (exports.includes(name)) {
+        seen.add(module)
+        candidates.push({ module })
+    }
+
+    const projectRoot = path.resolve(__dirname, '../..')
+    seenFiles.add(path.join(projectRoot, 'Modules', 'juno.ts'))
+    seenFiles.add(path.join(projectRoot, 'Modules', 'juno-node.ts'))
+    seenFiles.add(path.join(projectRoot, 'types', 'index.jn'))
+
+    const files = await vscode.workspace.findFiles(
+        '**/*.{jn,ts,js,mts,cts,mjs,cjs}',
+        '**/{node_modules,dist,out,.git,.build-tools}/**',
+        1000
+    )
+    for (const uri of files) addFile(moduleSpecifier(document.uri.fsPath, uri.fsPath), uri.fsPath)
+    return candidates
+}
+
+function addImportEdit(document: vscode.TextDocument, name: string, module: string): vscode.WorkspaceEdit {
+    const edit = new vscode.WorkspaceEdit()
+    const source = document.getText()
+    const escapedModule = module.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const existing = new RegExp(`(?:export\\s+)?import\\s*\\{([\\s\\S]*?)\\}\\s*from\\s*(['"])${escapedModule}\\2`).exec(source)
+    if (existing) {
+        const brace = source.indexOf('}', existing.index)
+        const names = existing[1].split(',').map(item => item.trim()).filter(Boolean)
+        const prefix = names.length ? `${existing[1].trimEnd().endsWith(',') ? '' : ','} ` : ''
+        edit.insert(document.uri, document.positionAt(brace), `${prefix}${name}`)
+        return edit
+    }
+    edit.insert(document.uri, new vscode.Position(0, 0), `import { ${name} } from '${module}'\n`)
+    return edit
+}
+
 function resolveImportedFile(documentFile: string, specifier: string): string | undefined {
     if (!specifier.startsWith('.')) return undefined
     const base = path.resolve(path.dirname(documentFile), specifier)
@@ -182,26 +244,38 @@ export function activate(context: vscode.ExtensionContext): void {
             }
         }, '[', '{', ',', "'", '"', '/'),
         vscode.languages.registerCodeActionsProvider(selector, {
-            provideCodeActions(document, _range, context) {
+            async provideCodeActions(document, _range, context) {
                 const result = analyze(document.getText(), document.uri.fsPath)
                 if (!result) return []
                 const actions: vscode.CodeAction[] = []
                 for (const diagnostic of context.diagnostics) {
                     const info = result.diagnostics.find(item => item.fix && item.line === diagnostic.range.start.line + 1 && item.message === diagnostic.message)
-                    if (!info?.fix) continue
-                    const action = new vscode.CodeAction(info.fix.title, vscode.CodeActionKind.QuickFix)
-                    action.diagnostics = [diagnostic]
-                    const insertLine = Math.min(info.fix.line, document.lineCount - 1)
-                    const lineText = document.lineAt(insertLine).text
-                    let indent = lineText.match(/^\s*/)?.[0] ?? ''
-                    if (lineText.trimStart().startsWith('}')) {
-                        const braceIndent = document.lineAt(Math.max(0, insertLine - 1)).text.match(/^\s*/)?.[0] ?? ''
-                        indent = `${braceIndent}    `
+                    if (info?.fix) {
+                        const action = new vscode.CodeAction(info.fix.title, vscode.CodeActionKind.QuickFix)
+                        action.diagnostics = [diagnostic]
+                        const insertLine = Math.min(info.fix.line, document.lineCount - 1)
+                        const lineText = document.lineAt(insertLine).text
+                        let indent = lineText.match(/^\s*/)?.[0] ?? ''
+                        if (lineText.trimStart().startsWith('}')) {
+                            const braceIndent = document.lineAt(Math.max(0, insertLine - 1)).text.match(/^\s*/)?.[0] ?? ''
+                            indent = `${braceIndent}    `
+                        }
+                        const rows = info.fix.fields.map(field => `${indent}${field.name}: ${placeholderFor(field.type)},\n`).join('')
+                        action.edit = new vscode.WorkspaceEdit()
+                        action.edit.insert(document.uri, new vscode.Position(insertLine, 0), rows)
+                        actions.push(action)
                     }
-                    const rows = info.fix.fields.map(field => `${indent}${field.name}: ${placeholderFor(field.type)},\n`).join('')
-                    action.edit = new vscode.WorkspaceEdit()
-                    action.edit.insert(document.uri, new vscode.Position(insertLine, 0), rows)
-                    actions.push(action)
+
+                    const missingName = /^Cannot find name '([^']+)'\.$/.exec(diagnostic.message)?.[1]
+                    if (!missingName) continue
+                    const candidates = await importCandidates(document, missingName)
+                    for (const [index, candidate] of candidates.entries()) {
+                        const action = new vscode.CodeAction(`Import '${missingName}' from '${candidate.module}'`, vscode.CodeActionKind.QuickFix)
+                        action.diagnostics = [diagnostic]
+                        action.isPreferred = index === 0
+                        action.edit = addImportEdit(document, missingName, candidate.module)
+                        actions.push(action)
+                    }
                 }
                 return actions
             }

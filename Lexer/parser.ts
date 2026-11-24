@@ -730,7 +730,20 @@ export class Parser {
         if (this.match('Keyword', 'null')) return { kind: 'Literal', value: null, loc: this.loc(this.tokens[this.pos - 1]) }
         if (this.match('Identifier')) {
             const token = this.tokens[this.pos - 1]
-            return { kind: 'Identifier', name: String(this.value(token)), loc: this.loc(token) }
+            const name = String(this.value(token))
+            const loc = this.loc(token)
+            if (this.match('FatArrow')) {
+                const params: Parameter[] = [{ name, loc }]
+                if (this.match('Newline')) {
+                    this.take('Indent', 'Expected an indented function body')
+                    const body: Statement[] = []; this.separators()
+                    while (!this.is('Dedent') && !this.is('EOF')) { body.push(this.statement()); this.separators() }
+                    this.take('Dedent')
+                    return { kind: 'Function', params, body }
+                }
+                return { kind: 'Function', params, body: [], expressionBody: this.expression() }
+            }
+            return { kind: 'Identifier', name, loc }
         }
         if (this.match('LeftParen')) {
             const saved = this.pos

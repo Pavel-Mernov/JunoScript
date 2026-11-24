@@ -1,0 +1,7 @@
+import { console } from 'juno'
+import { Range } from 'juno:types'
+
+for const num of Range(3)
+    console.log(num)
+
+['name', 23, 'age', 'Paul'].forEach(elem => console.log(elem))

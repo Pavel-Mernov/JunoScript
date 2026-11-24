@@ -1147,7 +1147,24 @@ var Parser = class _Parser {
     if (this.match("Keyword", "null")) return { kind: "Literal", value: null, loc: this.loc(this.tokens[this.pos - 1]) };
     if (this.match("Identifier")) {
       const token = this.tokens[this.pos - 1];
-      return { kind: "Identifier", name: String(this.value(token)), loc: this.loc(token) };
+      const name = String(this.value(token));
+      const loc = this.loc(token);
+      if (this.match("FatArrow")) {
+        const params = [{ name, loc }];
+        if (this.match("Newline")) {
+          this.take("Indent", "Expected an indented function body");
+          const body = [];
+          this.separators();
+          while (!this.is("Dedent") && !this.is("EOF")) {
+            body.push(this.statement());
+            this.separators();
+          }
+          this.take("Dedent");
+          return { kind: "Function", params, body };
+        }
+        return { kind: "Function", params, body: [], expressionBody: this.expression() };
+      }
+      return { kind: "Identifier", name, loc };
     }
     if (this.match("LeftParen")) {
       const saved = this.pos;
@@ -5106,6 +5123,61 @@ function exportsForFile(filePath) {
 }
 
 // src/extension.ts
+function moduleSpecifier(documentFile, exportedFile) {
+  let relative2 = path.relative(path.dirname(documentFile), exportedFile).replace(/\\/g, "/");
+  relative2 = relative2.replace(/\.(?:jn|[cm]?[jt]s)$/i, "").replace(/\/index$/i, "");
+  return relative2.startsWith(".") ? relative2 : `./${relative2}`;
+}
+async function importCandidates(document, name) {
+  const candidates = [];
+  const seen = /* @__PURE__ */ new Set();
+  const seenFiles = /* @__PURE__ */ new Set();
+  const addFile = (module2, file) => {
+    const resolvedFile = path.resolve(file);
+    if (seen.has(module2) || seenFiles.has(resolvedFile) || resolvedFile === path.resolve(document.uri.fsPath)) return;
+    const exported = exportsForFile(file).find((symbol) => symbol.name === name);
+    if (!exported) return;
+    seen.add(module2);
+    seenFiles.add(resolvedFile);
+    candidates.push({ module: module2 });
+  };
+  const standardModules = {
+    juno: ["console", "Math", "types", "Error", "Range", "Iterable", "Boolean", "Number", "String"],
+    "juno:node": ["console"],
+    "juno:types": ["Iterable", "Range", "Array", "Set", "ValueSet", "Map", "ValueMap", "Queue", "Object", "Boolean", "Tuple", "Random", "Error", "Result", "ok", "Partial", "Required", "Readonly", "Pick", "Omit", "KeyOf", "Exclude", "Items"]
+  };
+  for (const [module2, exports2] of Object.entries(standardModules)) if (exports2.includes(name)) {
+    seen.add(module2);
+    candidates.push({ module: module2 });
+  }
+  const projectRoot = path.resolve(__dirname, "../..");
+  seenFiles.add(path.join(projectRoot, "Modules", "juno.ts"));
+  seenFiles.add(path.join(projectRoot, "Modules", "juno-node.ts"));
+  seenFiles.add(path.join(projectRoot, "types", "index.jn"));
+  const files = await vscode.workspace.findFiles(
+    "**/*.{jn,ts,js,mts,cts,mjs,cjs}",
+    "**/{node_modules,dist,out,.git,.build-tools}/**",
+    1e3
+  );
+  for (const uri of files) addFile(moduleSpecifier(document.uri.fsPath, uri.fsPath), uri.fsPath);
+  return candidates;
+}
+function addImportEdit(document, name, module2) {
+  const edit = new vscode.WorkspaceEdit();
+  const source = document.getText();
+  const escapedModule = module2.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const existing = new RegExp(`(?:export\\s+)?import\\s*\\{([\\s\\S]*?)\\}\\s*from\\s*(['"])${escapedModule}\\2`).exec(source);
+  if (existing) {
+    const brace = source.indexOf("}", existing.index);
+    const names = existing[1].split(",").map((item) => item.trim()).filter(Boolean);
+    const prefix = names.length ? `${existing[1].trimEnd().endsWith(",") ? "" : ","} ` : "";
+    edit.insert(document.uri, document.positionAt(brace), `${prefix}${name}`);
+    return edit;
+  }
+  edit.insert(document.uri, new vscode.Position(0, 0), `import { ${name} } from '${module2}'
+`);
+  return edit;
+}
 function resolveImportedFile(documentFile, specifier) {
   if (!specifier.startsWith(".")) return void 0;
   const base = path.resolve(path.dirname(documentFile), specifier);
@@ -5285,27 +5357,38 @@ ${info.docs}`);
       }
     }, "[", "{", ",", "'", '"', "/"),
     vscode.languages.registerCodeActionsProvider(selector, {
-      provideCodeActions(document, _range, context2) {
+      async provideCodeActions(document, _range, context2) {
         const result = analyze(document.getText(), document.uri.fsPath);
         if (!result) return [];
         const actions = [];
         for (const diagnostic of context2.diagnostics) {
           const info = result.diagnostics.find((item) => item.fix && item.line === diagnostic.range.start.line + 1 && item.message === diagnostic.message);
-          if (!info?.fix) continue;
-          const action = new vscode.CodeAction(info.fix.title, vscode.CodeActionKind.QuickFix);
-          action.diagnostics = [diagnostic];
-          const insertLine = Math.min(info.fix.line, document.lineCount - 1);
-          const lineText = document.lineAt(insertLine).text;
-          let indent = lineText.match(/^\s*/)?.[0] ?? "";
-          if (lineText.trimStart().startsWith("}")) {
-            const braceIndent = document.lineAt(Math.max(0, insertLine - 1)).text.match(/^\s*/)?.[0] ?? "";
-            indent = `${braceIndent}    `;
-          }
-          const rows = info.fix.fields.map((field2) => `${indent}${field2.name}: ${placeholderFor(field2.type)},
+          if (info?.fix) {
+            const action = new vscode.CodeAction(info.fix.title, vscode.CodeActionKind.QuickFix);
+            action.diagnostics = [diagnostic];
+            const insertLine = Math.min(info.fix.line, document.lineCount - 1);
+            const lineText = document.lineAt(insertLine).text;
+            let indent = lineText.match(/^\s*/)?.[0] ?? "";
+            if (lineText.trimStart().startsWith("}")) {
+              const braceIndent = document.lineAt(Math.max(0, insertLine - 1)).text.match(/^\s*/)?.[0] ?? "";
+              indent = `${braceIndent}    `;
+            }
+            const rows = info.fix.fields.map((field2) => `${indent}${field2.name}: ${placeholderFor(field2.type)},
 `).join("");
-          action.edit = new vscode.WorkspaceEdit();
-          action.edit.insert(document.uri, new vscode.Position(insertLine, 0), rows);
-          actions.push(action);
+            action.edit = new vscode.WorkspaceEdit();
+            action.edit.insert(document.uri, new vscode.Position(insertLine, 0), rows);
+            actions.push(action);
+          }
+          const missingName = /^Cannot find name '([^']+)'\.$/.exec(diagnostic.message)?.[1];
+          if (!missingName) continue;
+          const candidates = await importCandidates(document, missingName);
+          for (const [index, candidate] of candidates.entries()) {
+            const action = new vscode.CodeAction(`Import '${missingName}' from '${candidate.module}'`, vscode.CodeActionKind.QuickFix);
+            action.diagnostics = [diagnostic];
+            action.isPreferred = index === 0;
+            action.edit = addImportEdit(document, missingName, candidate.module);
+            actions.push(action);
+          }
         }
         return actions;
       }
