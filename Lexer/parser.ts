@@ -27,7 +27,7 @@ export type Expression =
     | { kind: 'Member'; object: Expression; property: string; optional: boolean; loc?: Loc }
     | { kind: 'Index'; object: Expression; index: Expression; loc?: Loc }
     | { kind: 'Call'; callee: Expression; args: Expression[]; typeArguments?: TypeNode[] }
-    | { kind: 'Function'; generics?: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params: Parameter[]; returnType?: TypeNode; body: Statement[]; expressionBody?: Expression }
+    | { kind: 'Function'; loc?: Loc; generics?: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params: Parameter[]; returnType?: TypeNode; body: Statement[]; expressionBody?: Expression }
 export type Statement =
     | { kind: 'Variable'; name: string; loc?: Loc; mutable: boolean; type?: TypeNode; initializer?: Expression }
     | { kind: 'Destructure'; bindings: { name: string; loc?: Loc }[]; mutable: boolean; initializer: Expression }
@@ -48,6 +48,7 @@ const assignmentOperators: Partial<Record<TokenType, string>> = { Equal: '=', Pl
 
 export class Parser {
     private pos = 0
+    private softExpressionIndents = 0
     constructor(private readonly tokens: Token[]) {}
     get current(): Token { return this.tokens[this.pos] }
     private is(type: TokenType, value?: string) { const t: any = this.current; return t.type === type && (value === undefined || t.value === value) }
@@ -518,7 +519,20 @@ export class Parser {
     private expression(min = 0): Expression {
         let left = this.prefix()
         let typeArguments: TypeNode[] | undefined
+        let continuationIndents = 0
+        const continuationLine = (requireDot: boolean): boolean => {
+            if (!this.is('Newline')) return false
+            const saved = this.pos
+            while (this.match('Newline')) {}
+            const indented = this.match('Indent')
+            if (requireDot && !this.is('Dot')) { this.pos = saved; return false }
+            if (indented) continuationIndents++
+            return true
+        }
         while (true) {
+            // A member chain may continue on the next indented line either with
+            // a leading dot or after a trailing dot on the previous line.
+            if (continuationLine(true)) continue
             // Generic call type arguments are compile-time only: parse and discard them here.
             if (this.is('Less') && (left.kind === 'Identifier' || left.kind === 'Member')) {
                 const saved = this.pos
@@ -532,6 +546,7 @@ export class Parser {
                 if (typeArguments) continue
             }
             if (this.match('Dot')) {
+                continuationLine(false)
                 const property = this.propertyName()
                 left = { kind: 'Member', object: left, property: property.name, optional: false, loc: property.loc }
                 continue
@@ -581,6 +596,22 @@ export class Parser {
                 const alternate = this.expression()
                 left = { kind: 'Conditional', condition: left, consequent, alternate, loc: this.loc(token) }
                 continue
+            }
+            if (this.softExpressionIndents > 0 && this.is('Newline')) {
+                const saved = this.pos
+                while (this.match('Newline')) {}
+                let consumed = 0
+                while (consumed < this.softExpressionIndents && this.match('Dedent')) consumed++
+                if (consumed > 0) {
+                    this.softExpressionIndents -= consumed
+                    break
+                }
+                this.pos = saved
+            }
+            if (continuationIndents > 0 && this.is('Newline')) {
+                while (this.match('Newline')) {}
+                while (continuationIndents > 0 && this.match('Dedent')) continuationIndents--
+                if (continuationIndents === 0) break
             }
             const op = opTypes[this.current.type], p = op ? precedence[op] : undefined
             if (!op || p === undefined || p < min) break
@@ -698,6 +729,10 @@ export class Parser {
     private prefix(): Expression {
         if (this.match('Keyword', 'try')) return this.tryExpression(this.tokens[this.pos - 1])
         if (this.match('Keyword', 'match')) return this.matchExpression(this.tokens[this.pos - 1])
+        if (this.match('Keyword', 'await')) {
+            const token = this.tokens[this.pos - 1]
+            return { kind: 'Unary', operator: 'await', operand: this.expression(7), loc: this.loc(token) }
+        }
         if (this.match('Increment') || this.match('Decrement')) {
             const token = this.tokens[this.pos - 1]
             const operand = this.expression(8)
@@ -746,6 +781,7 @@ export class Parser {
             return { kind: 'Identifier', name, loc }
         }
         if (this.match('LeftParen')) {
+            const openingParen = this.tokens[this.pos - 1]
             const saved = this.pos
             let arrow = false
             try {
@@ -762,28 +798,40 @@ export class Parser {
                 this.take('RightParen')
                 const hasReturnType = this.match('Colon')
                 const returnType = hasReturnType ? this.type() : undefined
+                const newlineArrowBody = (): { body: Statement[]; expressionBody?: Expression } => {
+                    this.take('Indent', 'Expected an indented function body')
+                    let depth = 0, expressionBody = false
+                    for (let index = this.pos; index < this.tokens.length; index++) {
+                        const type = this.tokens[index].type
+                        if (type === 'LeftParen' || type === 'LeftBracket' || type === 'LeftBrace') depth++
+                        else if (type === 'RightParen' || type === 'RightBracket' || type === 'RightBrace') {
+                            if (depth === 0) { expressionBody = true; break }
+                            depth--
+                        } else if ((type === 'Dedent' || type === 'EOF') && depth === 0) break
+                    }
+                    if (expressionBody) {
+                        this.softExpressionIndents++
+                        return { body: [], expressionBody: this.expression() }
+                    }
+                    const body: Statement[] = []; this.separators()
+                    while (!this.is('Dedent') && !this.is('EOF')) { body.push(this.statement()); this.separators() }
+                    this.take('Dedent')
+                    return { body }
+                }
                 if (hasReturnType && this.match('FatArrow')) {
                     arrow = true
                     if (this.match('Newline')) {
-                        this.take('Indent', 'Expected an indented function body')
-                        const body: Statement[] = []; this.separators()
-                        while (!this.is('Dedent') && !this.is('EOF')) { body.push(this.statement()); this.separators() }
-                        this.take('Dedent')
-                        return { kind: 'Function', params, returnType, body }
+                        return { kind: 'Function', loc: this.loc(openingParen), params, returnType, ...newlineArrowBody() }
                     }
-                    return { kind: 'Function', params, returnType, body: [], expressionBody: this.expression() }
+                    return { kind: 'Function', loc: this.loc(openingParen), params, returnType, body: [], expressionBody: this.expression() }
                 }
                 if (this.match('FatArrow')) {
                     arrow = true
                     if (this.match('Newline')) {
-                        this.take('Indent', 'Expected an indented function body')
-                        const body: Statement[] = []; this.separators()
-                        while (!this.is('Dedent') && !this.is('EOF')) { body.push(this.statement()); this.separators() }
-                        this.take('Dedent')
-                        return { kind: 'Function', params, returnType, body }
+                        return { kind: 'Function', loc: this.loc(openingParen), params, returnType, ...newlineArrowBody() }
                     }
                     const expressionBody = this.expression()
-                    return { kind: 'Function', params, returnType, body: [], expressionBody }
+                    return { kind: 'Function', loc: this.loc(openingParen), params, returnType, body: [], expressionBody }
                 }
             } catch (error) { if (arrow) throw error /* Otherwise try parsing as a grouped expression. */ }
             this.pos = saved
@@ -1243,7 +1291,9 @@ function typeFromNode(type: TypeNode, aliases: Map<string, TypeNode> = new Map()
             next.add(type.name)
             return typeFromNode(alias, aliases, next)
         }
-        return primitive(type.name)
+        return ['string', 'number', 'boolean', 'BigInt', 'null', 'void', 'never', 'RegEx'].includes(type.name)
+            ? primitive(type.name)
+            : unknownType
     }
     if (type.kind === 'ArrayType') return { kind: 'array', element: typeFromNode(type.element, aliases, resolving) }
     if (type.kind === 'TypeOfType') return unknownType

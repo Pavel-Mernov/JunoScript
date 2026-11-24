@@ -1,0 +1,31 @@
+import { console } from 'juno'
+import { Promise, setTimeout, clearTimeout } from 'juno:async'
+
+console.log('sync: before promise')
+
+const cancelled = setTimeout(() => console.log('timeout: cancelled callback must not run'), 25)
+clearTimeout(cancelled)
+
+fun delayed(value: number, delay: number): number =
+    return await Promise<number>((resolve) =>
+        setTimeout(() => resolve(value), delay)
+    )
+
+const chain = Promise.resolve(2)
+    .then(value => value + 3).
+    then((value) => 
+        return delayed(value * 2, 5)
+    )
+    .then((value) => Promise.resolve({
+        ok: false,
+        error: `chain failed after ${value}`
+    }))
+    .catch((error) => 20)
+    .then((value) => value + 1)
+
+chain.then((value) => 
+    console.log('promise chain result:', value)
+    )
+
+setTimeout(() => console.log('timeout: completed'), 10)
+console.log('sync: after promise')

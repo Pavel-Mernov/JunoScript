@@ -2,9 +2,9 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Lexer = Lexer;
 const keywords = new Set([
-    'let', 'const', 'fun', 'type', 'return', 'if', 'else', 'for', 'of',
-    'while', 'true', 'false', 'null', 'readonly', 'static', 'as', 'in',
-    'import', 'from', 'export', 'default', 'constructor'
+    'let', 'const', 'fun', 'type', 'return', 'break', 'if', 'else', 'for', 'of',
+    'while', 'match', 'case', 'when', 'true', 'false', 'null', 'readonly', 'sealed', 'static', 'as', 'in',
+    'import', 'from', 'export', 'default', 'constructor', 'try', 'catch', 'finally', 'await'
 ]);
 function Lexer(source) {
     return {
@@ -22,6 +22,7 @@ function Lexer(source) {
             let line = 1;
             let column = 1;
             let lineStart = true;
+            let continuedLine = false;
             const push = (type, value, l = line, c = column) => {
                 if (type === 'Number') {
                     tokens.push({ type, value: value, line: l, column: c });
@@ -72,18 +73,23 @@ function Lexer(source) {
                             advance();
                         continue;
                     }
-                    const currentIndent = indents[indents.length - 1];
-                    if (width > currentIndent) {
-                        indents.push(width);
-                        push('Indent');
+                    if (continuedLine) {
+                        continuedLine = false;
                     }
-                    else if (width < currentIndent) {
-                        while (indents.length > 1 && width < indents[indents.length - 1]) {
-                            indents.pop();
-                            push('Dedent');
+                    else {
+                        const currentIndent = indents[indents.length - 1];
+                        if (width > currentIndent) {
+                            indents.push(width);
+                            push('Indent');
                         }
-                        if (width !== indents[indents.length - 1]) {
-                            throw new SyntaxError(`Inconsistent indentation at ${line}:${column}`);
+                        else if (width < currentIndent) {
+                            while (indents.length > 1 && width < indents[indents.length - 1]) {
+                                indents.pop();
+                                push('Dedent');
+                            }
+                            if (width !== indents[indents.length - 1]) {
+                                throw new SyntaxError(`Inconsistent indentation at ${line}:${column}`);
+                            }
                         }
                     }
                     lineStart = false;
@@ -106,6 +112,19 @@ function Lexer(source) {
                     advance();
                     push('Newline', undefined, tokenLine, tokenColumn);
                     lineStart = true;
+                    continue;
+                }
+                // A trailing backslash joins the next physical line to the
+                // current expression. Keep indentation processing on the next
+                // line, but do not emit a statement-separating Newline token.
+                if (character === '\\' && (source[this.pos + 1] === '\n' || source[this.pos + 1] === '\r')) {
+                    advance();
+                    if (this.current === '\r')
+                        advance();
+                    if (this.current === '\n')
+                        advance();
+                    lineStart = true;
+                    continuedLine = true;
                     continue;
                 }
                 if (character === '#') {
@@ -279,4 +298,3 @@ function Lexer(source) {
         }
     };
 }
-//# sourceMappingURL=lexer.js.map

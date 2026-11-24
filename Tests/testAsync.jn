@@ -1,0 +1,79 @@
+import { console } from 'juno'
+import { NativeProfile } from './testJnTs/native.ts'
+import {
+    Promise,
+    TimerHandle,
+    setTimeout,
+    setInterval,
+    clearTimeout,
+    clearInterval,
+    setImmediate,
+    clearImmediate,
+    queueMicrotask,
+    fetch
+} from 'juno:async'
+
+fun delayed(value: number, milliseconds: number): number =
+    return await Promise<number>((resolve) =>
+        setTimeout(() => resolve(value), milliseconds)
+    )
+
+fun resultRejection(): number =
+    return await Promise<number>((resolve) => resolve({ ok: false, error: 'resolved Result error' })).catch((error) => 11)
+
+fun nestedPromise(): number =
+    return await Promise.resolve(Promise.resolve(42))
+
+fun runAsyncTests(): number =
+    const profile: NativeProfile = {
+        name: 'runtime type',
+        scores: [1],
+        active: true,
+        metadata: { source: 'TypeScript', version: 1 }
+    }
+    console.log('local TS type in runtime:', isType<NativeProfile>(profile))
+    const delayedValue = await delayed(7, 5)
+    const nestedValue = await nestedPromise()
+    const recoveredResultError = await resultRejection()
+    const recoveredStaticResultError = await Promise.resolve({ ok: false, error: 'static Result error' }).catch((error) => 12)
+    const values = await Promise.all([Promise.resolve(1), Promise.resolve(2), 3])
+    const winner: number = await Promise.race([delayed(9, 5), delayed(10, 20)])
+    const first: number = await Promise.any([Promise.reject<number>('expected'), Promise.resolve(4)])
+    const recovered: number = await Promise.reject<number>('expected').catch(() => 5)
+    const settled = await Promise.allSettled([Promise.resolve(1), Promise.reject('expected')])
+    const controls = Promise.withResolvers<number>()
+    controls.resolve(6)
+    const controlled: number = await controls.promise
+    const errorControls = Promise.withResolvers<number>()
+    errorControls.resolve({ ok: false, error: 'controlled Result error' })
+    const recoveredControlled: number = await errorControls.promise.catch((error) => 13)
+
+    const cancelledTimeout: TimerHandle = setTimeout(() => console.log('cancelled timeout must not run'), 20)
+    console.log('TS type in runtime:', isType<TimerHandle>(cancelledTimeout))
+    clearTimeout(cancelledTimeout)
+
+    let ticks = 0
+    const interval = setInterval(() => ticks++, 2)
+    await delayed(0, 8)
+    clearInterval(interval)
+
+    const cancelledImmediate = setImmediate(() => console.log('cancelled immediate must not run'))
+    clearImmediate(cancelledImmediate)
+    queueMicrotask(() => console.log('microtask: ok'))
+
+    console.log('await:', delayedValue)
+    console.log('nested Promise flatten:', nestedValue)
+    console.log('resolve Result error -> catch:', recoveredResultError)
+    console.log('Promise.resolve Result error -> catch:', recoveredStaticResultError)
+    console.log('Promise.all:', values)
+    console.log('Promise.race:', winner)
+    console.log('Promise.any:', first)
+    console.log('Promise.catch:', recovered)
+    console.log('Promise.allSettled length:', settled.length)
+    console.log('Promise.withResolvers:', controlled)
+    console.log('withResolvers Result error -> catch:', recoveredControlled)
+    console.log('setInterval ticks:', ticks)
+    console.log('fetch available:', fetch != null)
+    return delayedValue + nestedValue + recoveredResultError + recoveredStaticResultError + winner + first + recovered + controlled + recoveredControlled
+
+runAsyncTests().then((result) => console.log('async result:', result))

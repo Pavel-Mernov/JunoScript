@@ -94,9 +94,112 @@ function typeUtilitiesType(): TypeNode {
     }
 }
 
-function moduleType(module: 'juno' | 'juno:node' | 'juno:types' | 'types'): TypeNode {
+function promiseOf(type: TypeNode): TypeNode {
+    return type.kind === 'GenericType' && type.name === 'Promise' ? type : { kind: 'GenericType', name: 'Promise', args: [type] }
+}
+
+function awaitedType(type: TypeNode): TypeNode {
+    if (type.kind === 'GenericType' && type.name === 'Promise') return awaitedType(type.args[0] ?? named('unknown'))
+    if (type.kind === 'UnionType') return unionOf(type.types.map(awaitedType))
+    return type
+}
+
+function promiseConstructor(): Extract<SymbolInfo, { kind: 'constructor' }> {
+    const t = named('T')
+    const u = named('U')
+    const rejectedResult: TypeNode = { kind: 'ObjectType', members: [field('ok', { kind: 'LiteralType', value: false }), field('error', named('unknown'))] }
+    const callback = (input: TypeNode, output: TypeNode): TypeNode => ({ kind: 'FunctionType', params: [input], result: output })
+    return {
+        kind: 'constructor', generics: ['T'], inheritedType: { kind: 'ObjectType', members: [
+            { ...method('then', [{ name: 'onFulfilled', type: callback(t, u) }], promiseOf(u)), generics: ['U'] },
+            { ...method('catch', [{ name: 'onRejected', type: callback(named('unknown'), u) }], promiseOf(u)), generics: ['U'] },
+            method('finally', [{ name: 'onFinally', type: { kind: 'FunctionType', params: [], result: named('void') } }], promiseOf(t))
+        ] },
+        overloads: [{
+            params: [{ name: 'executor', type: { kind: 'FunctionType', params: [
+                { kind: 'FunctionType', params: [{ kind: 'UnionType', types: [t, promiseOf(t), rejectedResult] }], result: named('void') }
+            ], result: named('void') } }],
+            returnType: promiseOf(t)
+        }],
+        methods: [
+            { name: 'resolve', generics: ['U'], params: [{ name: 'value', type: { kind: 'UnionType', types: [u, promiseOf(u)] } }], returnType: promiseOf(u) },
+            { name: 'reject', generics: ['U'], genericDefaults: [named('never')], params: [{ name: 'reason', type: named('unknown') }], returnType: promiseOf(u) },
+            { name: 'all', generics: ['U'], params: [{ name: 'values', type: arrayOf({ kind: 'UnionType', types: [u, promiseOf(u)] }) }], returnType: promiseOf(arrayOf(u)) },
+            { name: 'allSettled', generics: ['U'], params: [{ name: 'values', type: arrayOf({ kind: 'UnionType', types: [u, promiseOf(u)] }) }], returnType: promiseOf(arrayOf({ kind: 'UnionType', types: [
+                { kind: 'ObjectType', members: [field('status', { kind: 'LiteralType', value: 'fulfilled' }), field('value', u)] },
+                { kind: 'ObjectType', members: [field('status', { kind: 'LiteralType', value: 'rejected' }), field('reason', named('unknown'))] }
+            ] })) },
+            { name: 'any', generics: ['U'], params: [{ name: 'values', type: arrayOf({ kind: 'UnionType', types: [u, promiseOf(u)] }) }], returnType: promiseOf(u) },
+            { name: 'race', generics: ['U'], params: [{ name: 'values', type: arrayOf({ kind: 'UnionType', types: [u, promiseOf(u)] }) }], returnType: promiseOf(u) },
+            { name: 'withResolvers', generics: ['U'], params: [], returnType: { kind: 'ObjectType', members: [
+                field('promise', promiseOf(u)),
+                field('resolve', { kind: 'FunctionType', params: [{ kind: 'UnionType', types: [u, promiseOf(u), rejectedResult] }], result: named('void') }),
+                field('reject', { kind: 'FunctionType', params: [named('unknown')], result: named('void') })
+            ] } }
+        ]
+    }
+}
+
+function asyncModuleType(): TypeNode {
+    const timerHandle = named('TimerHandle'), immediateHandle = named('ImmediateHandle')
+    const timer = { kind: 'FunctionType', params: [{ kind: 'FunctionType', params: [], result: named('void') }, named('number')], result: timerHandle } as TypeNode
+    return { kind: 'ObjectType', members: [
+        field('Promise', { kind: 'FunctionType', params: [named('unknown')], result: promiseOf(named('unknown')) }),
+        field('setTimeout', timer), field('setInterval', timer),
+        field('clearTimeout', { kind: 'FunctionType', params: [timerHandle], result: named('void') }),
+        field('clearInterval', { kind: 'FunctionType', params: [timerHandle], result: named('void') }),
+        field('setImmediate', { kind: 'FunctionType', params: [{ kind: 'FunctionType', params: [], result: named('void') }], result: immediateHandle }),
+        field('clearImmediate', { kind: 'FunctionType', params: [immediateHandle], result: named('void') }),
+        field('queueMicrotask', { kind: 'FunctionType', params: [{ kind: 'FunctionType', params: [], result: named('void') }], result: named('void') }),
+        field('fetch', { kind: 'FunctionType', params: [named('FetchInput'), named('FetchOptions')], result: promiseOf(named('FetchResponse')) })
+    ] }
+}
+
+function moduleType(module: 'juno' | 'juno:node' | 'juno:types' | 'juno:async' | 'types'): TypeNode {
+    if (module === 'juno:async') return asyncModuleType()
     if (module === 'juno:types' || module === 'types') return typeUtilitiesType()
     return { kind: 'ObjectType', members: [field('console', consoleType(), true), ...(module === 'juno' ? [field('Math', mathType(), true), field('types', typeUtilitiesType(), true)] : [])] }
+}
+
+function asyncImportedSymbol(name: string): SymbolInfo | undefined {
+    if (name === 'Promise') return promiseConstructor()
+    const callback = { kind: 'FunctionType', params: [], result: named('void') } as TypeNode
+    if (name === 'setTimeout' || name === 'setInterval') return { kind: 'fun', params: [
+        { name: 'callback', type: callback },
+        { name: 'delay', type: named('number'), defaultValue: { kind: 'Literal', value: 0 } },
+        { name: 'args', type: arrayOf(named('unknown')), rest: true }
+    ], returnType: named('TimerHandle') }
+    if (name === 'setImmediate') return { kind: 'fun', params: [{ name: 'callback', type: callback }, { name: 'args', type: arrayOf(named('unknown')), rest: true }], returnType: named('ImmediateHandle') }
+    if (name === 'clearTimeout' || name === 'clearInterval') return { kind: 'fun', params: [{ name: 'handle', type: named('TimerHandle') }], returnType: named('void') }
+    if (name === 'clearImmediate') return { kind: 'fun', params: [{ name: 'handle', type: named('ImmediateHandle') }], returnType: named('void') }
+    if (name === 'queueMicrotask') return { kind: 'fun', params: [{ name: 'callback', type: callback }], returnType: named('void') }
+    if (name === 'fetch') return { kind: 'fun', params: [{ name: 'input', type: named('FetchInput') }, { name: 'init', type: named('FetchOptions'), defaultValue: { kind: 'Literal', value: null } }], returnType: promiseOf(named('FetchResponse')) }
+    const member = asyncModuleType().kind === 'ObjectType' ? asyncModuleType().members.find(item => item.name === name) : undefined
+    if (!member || member.type.kind !== 'FunctionType') return undefined
+    return { kind: 'fun', params: member.type.params.map((type, index) => ({ name: index === 0 ? 'callback' : `arg${index}`, type })), returnType: member.type.result }
+}
+
+let cachedAsyncTypeScriptDeclarations: Map<string, ImportedSymbol> | undefined
+function asyncTypeScriptFile(): string | undefined {
+    const fs = require('node:fs') as typeof import('node:fs')
+    const path = require('node:path') as typeof import('node:path')
+    return [
+        path.resolve(__dirname, '../../Modules/async.ts'),
+        path.resolve(__dirname, '../../../Modules/async.ts'),
+        path.resolve(process.cwd(), 'Modules/async.ts')
+    ].find(candidate => fs.existsSync(candidate))
+}
+
+function asyncTypeScriptSymbol(name: string): SymbolInfo | undefined {
+    if (!cachedAsyncTypeScriptDeclarations) {
+        try {
+            const fs = require('node:fs') as typeof import('node:fs')
+            const file = asyncTypeScriptFile()
+            cachedAsyncTypeScriptDeclarations = file ? hostDeclarations(fs.readFileSync(file, 'utf8')) : new Map()
+        } catch { cachedAsyncTypeScriptDeclarations = new Map() }
+    }
+    const symbol = cachedAsyncTypeScriptDeclarations.get(name)
+    return symbol?.kind === 'var' ? { ...symbol, mutable: false } : symbol
 }
 
 function globals(): Env {
@@ -233,6 +336,7 @@ function resolveType(type: TypeNode, env: Env): TypeNode {
         return type
     }
     if (type.kind === 'GenericType') {
+        if (type.name === 'Promise') return { ...type, args: [awaitedType(type.args[0] ?? named('any'))] }
         const symbol = env.get(type.name)
         if (symbol?.kind === 'type') return resolveType(instantiate(symbol.value, symbol.generics, type.args, symbol.genericDefaults), env)
         if (['Partial', 'Required', 'Readonly', 'Pick', 'Omit', 'KeyOf', 'Exclude'].includes(type.name) && type.args[0]) {
@@ -894,7 +998,7 @@ function hostType(source: string | undefined): TypeNode {
     } catch { return named('any') }
 }
 
-function hostDeclarations(source: string): Map<string, ImportedSymbol> {
+export function hostDeclarations(source: string): Map<string, ImportedSymbol> {
     const result = new Map<string, ImportedSymbol>()
     const localTypes = new Map<string, TypeNode>()
     const numberStatic = (name: string): TypeMember | undefined => {
@@ -923,6 +1027,57 @@ function hostDeclarations(source: string): Map<string, ImportedSymbol> {
         parts.push(value.slice(start).trim())
         return parts.filter(Boolean)
     }
+    const resolveLocalType = (type: TypeNode, resolving = new Set<string>()): TypeNode => {
+        if (type.kind === 'NamedType') {
+            const local = localTypes.get(type.name)
+            if (local?.kind === 'FunctionType' && !resolving.has(type.name)) return resolveLocalType(local, new Set([...resolving, type.name]))
+            return type
+        }
+        if (type.kind === 'GenericType') return { ...type, args: type.args.map(argument => resolveLocalType(argument, resolving)) }
+        if (type.kind === 'ArrayType') return { ...type, element: resolveLocalType(type.element, resolving) }
+        if (type.kind === 'UnionType' || type.kind === 'IntersectionType') return { ...type, types: type.types.map(part => resolveLocalType(part, resolving)) }
+        if (type.kind === 'FunctionType') return { ...type, params: type.params.map(param => resolveLocalType(param, resolving)), result: resolveLocalType(type.result, resolving) }
+        if (type.kind === 'ObjectType') return { ...type, members: type.members.map(member => ({
+            ...member,
+            type: resolveLocalType(member.type, resolving),
+            indexType: member.indexType ? resolveLocalType(member.indexType, resolving) : undefined,
+            params: member.params?.map(param => ({ ...param, type: param.type ? resolveLocalType(param.type, resolving) : undefined }))
+        })) }
+        return type
+    }
+    const exportedTypes: { name: string; generics: string[]; value: TypeNode }[] = []
+    for (const match of source.matchAll(/export\s+type\s+([A-Za-z_$][\w$]*)(?:\s*<([^>]+)>)?\s*=\s*/g)) {
+        const start = match.index! + match[0].length
+        let end = start, depth = 0, quote = ''
+        for (; end < source.length; end++) {
+            const character = source[end]
+            if (quote) { if (character === '\\') end++; else if (character === quote) quote = ''; continue }
+            if (character === "'" || character === '"' || character === '`') { quote = character; continue }
+            if ('{[<('.includes(character)) depth++
+            else if ('}])'.includes(character) || character === '>' && source[end - 1] !== '=') depth--
+            else if ((character === ';' || character === '\n' || character === '\r') && depth === 0) break
+        }
+        const generics = match[2]?.split(',').map(item => item.trim().split(/\s+(?:extends|is)\s+|\s*=/)[0]) ?? []
+        const value = hostType(source.slice(start, end))
+        localTypes.set(match[1], value)
+        exportedTypes.push({ name: match[1], generics, value })
+    }
+    for (const match of source.matchAll(/export\s+interface\s+([A-Za-z_$][\w$]*)(?:\s*<([^>{]+)>)?[^\{]*\{/g)) {
+        const start = match.index! + match[0].length
+        let end = start, depth = 1, quote = ''
+        for (; end < source.length && depth > 0; end++) {
+            const character = source[end]
+            if (quote) { if (character === '\\') end++; else if (character === quote) quote = ''; continue }
+            if (character === "'" || character === '"' || character === '`') { quote = character; continue }
+            if (character === '{') depth++
+            else if (character === '}') depth--
+        }
+        const generics = match[2]?.split(',').map(item => item.trim().split(/\s+(?:extends|is)\s+|\s*=/)[0]) ?? []
+        const value = hostType(`{${source.slice(start, Math.max(start, end - 1))}}`)
+        localTypes.set(match[1], value)
+        exportedTypes.push({ name: match[1], generics, value })
+    }
+    for (const declaration of exportedTypes) result.set(declaration.name, { kind: 'type', generics: declaration.generics, value: resolveLocalType(declaration.value) })
     const inferHostValue = (raw: string): TypeNode => {
         const value = raw.trim().replace(/;$/, '').trim()
         const assertion = /^(.*?)\s+as\s+([\s\S]+)$/.exec(value)
@@ -1123,6 +1278,20 @@ function hostDeclarations(source: string): Map<string, ImportedSymbol> {
         const name = match[1] ?? match[2]
         if (!result.has(name)) result.set(name, { kind: 'var', type: named('any') })
     }
+    for (const [name, symbol] of result) {
+        if (symbol.kind === 'var') result.set(name, { ...symbol, type: resolveLocalType(symbol.type) })
+        else if (symbol.kind === 'fun') result.set(name, {
+            ...symbol,
+            params: symbol.params.map(param => ({ ...param, type: param.type ? resolveLocalType(param.type) : undefined })),
+            returnType: resolveLocalType(symbol.returnType)
+        })
+        else if (symbol.kind === 'constructor') result.set(name, {
+            ...symbol,
+            inheritedType: resolveLocalType(symbol.inheritedType),
+            overloads: symbol.overloads.map(overload => ({ ...overload, params: overload.params.map(param => ({ ...param, type: param.type ? resolveLocalType(param.type) : undefined })), returnType: resolveLocalType(overload.returnType) })),
+            methods: symbol.methods.map(item => ({ ...item, params: item.params.map(param => ({ ...param, type: param.type ? resolveLocalType(param.type) : undefined })), returnType: resolveLocalType(item.returnType) }))
+        })
+    }
     return result
 }
 
@@ -1169,7 +1338,7 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
         else if (declaration.kind === 'FunctionDeclaration' && exported) result.set(declaration.name, {
             kind: 'fun', generics: declaration.generics, genericConstraints: declaration.genericConstraints,
             genericDefaults: declaration.genericDefaults, params: declaration.params,
-            returnType: declaration.returnType ?? inferFunctionReturnType(declaration.body, globals(), declaration.params)
+            returnType: functionReturnType(declaration.body, declaration.returnType ?? inferFunctionReturnType(declaration.body, globals(), declaration.params))
         })
         else if (declaration.kind === 'ConstructorDeclaration' && exported) result.set(declaration.name, {
             kind: 'constructor',
@@ -1185,7 +1354,7 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
                 name: method.name, generics: method.generics ?? [], genericConstraints: method.genericConstraints,
                 genericDefaults: method.genericDefaults,
                 params: method.params.map(param => ({ ...param, type: param.type ? expandLocalAliases(param.type) : undefined })),
-                returnType: expandLocalAliases(method.returnType ?? inferFunctionReturnType(method.body, declarationEnv, method.params))
+                returnType: expandLocalAliases(functionReturnType(method.body, method.returnType ?? inferFunctionReturnType(method.body, declarationEnv, method.params)))
             }))
         })
         else if (declaration.kind === 'Variable' && exported) result.set(declaration.name, { kind: 'var', type: declaration.type ? resolveType(declaration.type, declarationEnv) : declaration.initializer ? inferExpression(declaration.initializer, declarationEnv) : named('any') })
@@ -1200,7 +1369,18 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
     if (!filePath) return result
     for (const statement of statements) {
         const importedStatement = statement.kind === 'Import' ? statement : statement.kind === 'Export' && statement.declaration.kind === 'Import' ? statement.declaration : undefined
-        if (!importedStatement || (!importedStatement.module.startsWith('.') && importedStatement.module !== 'juno:types' && !importedStatement.module.startsWith('juno:types/'))) continue
+        if (!importedStatement || (!importedStatement.module.startsWith('.') && importedStatement.module !== 'juno:async' && importedStatement.module !== 'juno:types' && !importedStatement.module.startsWith('juno:types/'))) continue
+        if (importedStatement.module === 'juno:async') {
+            const asyncFile = asyncTypeScriptFile()
+            let declarations = new Map<string, ImportedSymbol>()
+            try { if (asyncFile) declarations = hostDeclarations(fs.readFileSync(asyncFile, 'utf8')) } catch { /* bundled fallback below */ }
+            for (const name of importedStatement.namedImports) {
+                const symbol = declarations.get(name) ?? asyncImportedSymbol(name)
+                if (symbol && symbol.kind !== 'module' && symbol.kind !== 'type') result.set(name, symbol)
+                else if (symbol?.kind === 'type') result.set(name, symbol)
+            }
+            continue
+        }
         let base: string
         if (importedStatement.module === 'juno:types' || importedStatement.module.startsWith('juno:types/')) {
             const relativeModule = importedStatement.module === 'juno:types' ? 'index' : importedStatement.module.slice('juno:types/'.length)
@@ -1294,6 +1474,54 @@ function inferLiteral(value: string | number | bigint | boolean | null): TypeNod
     if (typeof value === 'number') return named('number')
     if (typeof value === 'bigint') return named('BigInt')
     return named('boolean')
+}
+
+function expressionHasAwait(expression: Expression): boolean {
+    switch (expression.kind) {
+        case 'Unary': return expression.operator === 'await' || expressionHasAwait(expression.operand)
+        case 'Template': return expression.parts.some(part => typeof part !== 'string' && expressionHasAwait(part))
+        case 'Assignment': return expressionHasAwait(expression.value)
+        case 'MemberAssignment': return expressionHasAwait(expression.object) || Boolean(expression.index && expressionHasAwait(expression.index)) || expressionHasAwait(expression.value)
+        case 'Array': return expression.elements.some(expressionHasAwait)
+        case 'Spread': return expressionHasAwait(expression.value)
+        case 'Object': return expression.properties.some(property => property.value.kind !== 'Function' && expressionHasAwait(property.value))
+        case 'Binary': return expressionHasAwait(expression.left) || expressionHasAwait(expression.right)
+        case 'Conditional': return expressionHasAwait(expression.condition) || expressionHasAwait(expression.consequent) || expressionHasAwait(expression.alternate)
+        case 'Match': return expressionHasAwait(expression.value) || expression.cases.some(item => Boolean(item.guard && expressionHasAwait(item.guard)) || statementsHaveAwait(item.body))
+        case 'Try': return Boolean(expression.value && expressionHasAwait(expression.value)) || Boolean(expression.body && statementsHaveAwait(expression.body)) || expression.catches.some(item => statementsHaveAwait(item.body)) || Boolean(expression.finallyBody && statementsHaveAwait(expression.finallyBody))
+        case 'Is': return expressionHasAwait(expression.value)
+        case 'Member': return expressionHasAwait(expression.object)
+        case 'Index': return expressionHasAwait(expression.object) || expressionHasAwait(expression.index)
+        case 'Call': return expressionHasAwait(expression.callee) || expression.args.some(expressionHasAwait)
+        case 'Function': return false
+        default: return false
+    }
+}
+
+function statementsHaveAwait(statements: Statement[]): boolean {
+    return statements.some(statement => {
+        switch (statement.kind) {
+            case 'Variable': return Boolean(statement.initializer && expressionHasAwait(statement.initializer))
+            case 'Destructure':
+            case 'ArrayDestructure': return expressionHasAwait(statement.initializer)
+            case 'Return': return Boolean(statement.value && expressionHasAwait(statement.value))
+            case 'ExpressionStatement': return expressionHasAwait(statement.expression)
+            case 'If': return expressionHasAwait(statement.condition) || statementsHaveAwait(statement.consequent) || Boolean(statement.alternate && statementsHaveAwait(statement.alternate))
+            case 'While': return expressionHasAwait(statement.condition) || statementsHaveAwait(statement.body)
+            case 'ForOf': return expressionHasAwait(statement.iterable) || statementsHaveAwait(statement.body)
+            case 'Export': return statementsHaveAwait([statement.declaration])
+            default: return false
+        }
+    })
+}
+
+function functionReturnType(body: Statement[], declaredOrInferred: TypeNode): TypeNode {
+    return statementsHaveAwait(body) ? promiseOf(awaitedType(declaredOrInferred)) : declaredOrInferred
+}
+
+function expressionFunctionReturnType(expression: Extract<Expression, { kind: 'Function' }>, declaredOrInferred: TypeNode): TypeNode {
+    const async = expression.expressionBody ? expressionHasAwait(expression.expressionBody) : statementsHaveAwait(expression.body)
+    return async ? promiseOf(awaitedType(declaredOrInferred)) : declaredOrInferred
 }
 
 function inferGenericExpression(expression: Expression, env: Env): TypeNode {
@@ -1428,14 +1656,15 @@ function constructorMethodForCall(callee: Expression, args: Expression[], env: E
     if (constructor?.kind !== 'constructor') return undefined
     const method = constructor.methods.find(item => item.name === callee.property)
     if (!method) return undefined
-    const generics = [...constructor.generics, ...method.generics]
-    const constraints = [...(constructor.genericConstraints ?? []), ...(method.genericConstraints ?? [])]
-    const defaults = [...(constructor.genericDefaults ?? []), ...(method.genericDefaults ?? [])]
+    const constructorGenerics = callee.object.name === 'Promise' ? [] : constructor.generics
+    const generics = [...constructorGenerics, ...method.generics]
+    const constraints = [...(callee.object.name === 'Promise' ? [] : constructor.genericConstraints ?? []), ...(method.genericConstraints ?? [])]
+    const defaults = [...(callee.object.name === 'Promise' ? [] : constructor.genericDefaults ?? []), ...(method.genericDefaults ?? [])]
     const inferredCandidates = inferGenericArguments(generics, method.params, args, env)
     const inferred = generics.map((_name, index) => {
-        const methodIndex = index - constructor.generics.length
+        const methodIndex = index - constructorGenerics.length
         const explicit = methodIndex >= 0 ? explicitTypeArguments?.[methodIndex] : undefined
-        return explicit ?? (!isNamedType(inferredCandidates[index], 'any') ? inferredCandidates[index] : undefined) ?? defaults[index] ?? named('any')
+        return explicit ?? (!isNamedType(inferredCandidates[index], 'any') ? inferredCandidates[index] : undefined) ?? defaults[index] ?? (callee.object.name === 'Promise' ? named('unknown') : named('any'))
     })
     if (callee.object.name === 'Set' || callee.object.name === 'ValueSet') {
         for (let index = 0; index < constructor.generics.length; index++) inferred[index] = widenSetElementType(inferred[index])
@@ -1622,6 +1851,27 @@ function pickOmitResult(objectType: TypeNode, args: Expression[], omit: boolean,
     return { ...object, members: object.members.filter(member => member.indexType || (omit ? !keys.has(member.name) : keys.has(member.name))) }
 }
 
+function promiseValueType(type: TypeNode, env: Env): TypeNode | undefined {
+    const resolved = resolveType(type, env)
+    return resolved.kind === 'GenericType' && resolved.name === 'Promise' ? resolved.args[0] ?? named('unknown') : undefined
+}
+
+function callbackResultType(callback: Expression | undefined, input: TypeNode, env: Env): TypeNode {
+    if (!callback || callback.kind !== 'Function') return named('unknown')
+    const local = bindInferredParameters(callback.params, env)
+    if (callback.params[0]) local.set(callback.params[0].name, { kind: 'var', mutable: true, type: input })
+    const result = callback.returnType ?? (callback.expressionBody
+        ? inferExpression(callback.expressionBody, local)
+        : inferFunctionReturnType(callback.body, local, callback.params))
+    return awaitedType(result)
+}
+
+function isRejectedResultExpression(expression: Expression | undefined): boolean {
+    if (!expression || expression.kind !== 'Object') return false
+    const ok = expression.properties.find(property => property.key === 'ok')?.value
+    return ok?.kind === 'Literal' && ok.value === false && expression.properties.some(property => property.key === 'error')
+}
+
 function inferExpression(expression: Expression, env: Env): TypeNode {
     switch (expression.kind) {
         case 'RegEx': return named('RegEx')
@@ -1686,15 +1936,16 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
                 }
                 if (property.accessor === 'get' && property.value.kind === 'Function') {
                     const result = property.value.returnType ?? inferFunctionReturnType(property.value.body, env, property.value.params)
-                    return [{ ...field(property.key, result), sealed: Boolean(property.sealed), accessor: 'get' as const }]
+                    return [{ ...field(property.key, expressionFunctionReturnType(property.value, result)), sealed: Boolean(property.sealed), accessor: 'get' as const }]
                 }
                 if (property.accessor === 'set' && property.value.kind === 'Function') {
                     const setterType = property.value.params[0] ? parameterBodyType(property.value.params[0]) : named('any')
                     return [{ ...field(property.key, setterType), sealed: Boolean(property.sealed), accessor: 'set' as const, params: property.value.params }]
                 }
                 if (property.value.kind === 'Function') {
+                    const result = property.value.returnType ?? (property.value.expressionBody ? inferExpression(property.value.expressionBody, env) : named('any'))
                     return [{
-                        ...method(property.key, property.value.params, property.value.returnType ?? named('any')),
+                        ...method(property.key, property.value.params, expressionFunctionReturnType(property.value, result)),
                         sealed: Boolean(property.sealed),
                         generics: property.value.generics,
                         genericLocs: property.value.genericLocs,
@@ -1711,7 +1962,7 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
                 if (property.accessor === 'set' || property.value.kind !== 'Function' || property.value.returnType) continue
                 const index = members.findLastIndex(member => member.name === property.key)
                 if (index >= 0) {
-                    const inferred = inferFunctionReturnType(property.value.body, methodEnv, property.value.params)
+                    const inferred = expressionFunctionReturnType(property.value, property.value.expressionBody ? inferExpression(property.value.expressionBody, methodEnv) : inferFunctionReturnType(property.value.body, methodEnv, property.value.params))
                     members[index] = property.accessor === 'get'
                         ? { ...field(property.key, inferred), sealed: Boolean(property.sealed), accessor: 'get' }
                         : {
@@ -1730,7 +1981,7 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             })
             return objectType
         }
-        case 'Unary': return expression.operator === 'postfix!' ? removeNull(inferExpression(expression.operand, env)) : expression.operator.endsWith('++') || expression.operator.endsWith('--') ? inferExpression(expression.operand, env) : expression.operator === '-' ? named('number') : named('boolean')
+        case 'Unary': return expression.operator === 'await' ? awaitedType(inferExpression(expression.operand, env)) : expression.operator === 'postfix!' ? removeNull(inferExpression(expression.operand, env)) : expression.operator.endsWith('++') || expression.operator.endsWith('--') ? inferExpression(expression.operand, env) : expression.operator === '-' ? named('number') : named('boolean')
         case 'Conditional':
             return unionOf([inferExpression(expression.consequent, env), inferExpression(expression.alternate, env)])
         case 'Is': return named('boolean')
@@ -1771,6 +2022,36 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
         case 'Call': {
             if (expression.callee.kind === 'Member' && expression.callee.property === 'isType') return named('boolean')
             if (expression.callee.kind === 'Identifier' && expression.callee.name === 'isType') return named('boolean')
+            if (expression.callee.kind === 'Identifier' && expression.callee.name === 'Promise') {
+                return promiseOf(awaitedType(expression.typeArguments?.[0] ?? named('unknown')))
+            }
+            if (expression.callee.kind === 'Member' && expression.callee.object.kind === 'Identifier' && expression.callee.object.name === 'Promise' && expression.callee.property === 'resolve') {
+                if (isRejectedResultExpression(expression.args[0])) return promiseOf(named('never'))
+                const value = expression.typeArguments?.[0] ?? (expression.args[0] ? inferExpression(expression.args[0], env) : named('unknown'))
+                return promiseOf(awaitedType(value))
+            }
+            if (expression.callee.kind === 'Member' && expression.callee.object.kind === 'Identifier' && expression.callee.object.name === 'Promise' && expression.callee.property === 'reject') {
+                return promiseOf(expression.typeArguments?.[0] ?? named('never'))
+            }
+            if (expression.callee.kind === 'Member' && expression.callee.object.kind === 'Identifier' && expression.callee.object.name === 'Promise' && ['all', 'allSettled', 'any', 'race'].includes(expression.callee.property)) {
+                const values = expression.args[0] ? inferExpression(expression.args[0], env) : arrayOf(named('unknown'))
+                const resolved = resolveType(values, env)
+                const element = resolved.kind === 'ArrayType' ? resolved.element : resolved.kind === 'GenericType' && (resolved.name === 'Array' || resolved.name === 'ReadonlyArray') ? resolved.args[0] ?? named('unknown') : named('unknown')
+                if (expression.callee.property === 'all') return promiseOf(arrayOf(awaitedType(element)))
+                if (expression.callee.property === 'allSettled') return promiseOf(arrayOf({ kind: 'UnionType', types: [
+                    { kind: 'ObjectType', members: [field('status', { kind: 'LiteralType', value: 'fulfilled' }), field('value', awaitedType(element))] },
+                    { kind: 'ObjectType', members: [field('status', { kind: 'LiteralType', value: 'rejected' }), field('reason', named('unknown'))] }
+                ] }))
+                return promiseOf(awaitedType(element))
+            }
+            if (expression.callee.kind === 'Member' && expression.callee.property === 'then') {
+                const input = promiseValueType(inferExpression(expression.callee.object, env), env)
+                if (input) return promiseOf(callbackResultType(expression.args[0], input, env))
+            }
+            if (expression.callee.kind === 'Member' && expression.callee.property === 'catch') {
+                const input = promiseValueType(inferExpression(expression.callee.object, env), env)
+                if (input) return promiseOf(unionOf([input, callbackResultType(expression.args[0], named('unknown'), env)]))
+            }
             if (expression.callee.kind === 'Identifier') {
                 const functionSymbol = env.get(expression.callee.name)
                 if (functionSymbol?.kind === 'fun' && functionSymbol.generics?.length) {
@@ -1899,7 +2180,10 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             })
             return unionOf([success, ...caught])
         }
-        case 'Function': return { kind: 'FunctionType', params: expression.params.map(parameterType), result: expression.returnType ?? (expression.expressionBody ? inferExpression(expression.expressionBody, env) : inferFunctionReturnType(expression.body, env, expression.params)) }
+        case 'Function': {
+            const result = expression.returnType ?? (expression.expressionBody ? inferExpression(expression.expressionBody, env) : inferFunctionReturnType(expression.body, env, expression.params))
+            return { kind: 'FunctionType', params: expression.params.map(parameterType), result: expressionFunctionReturnType(expression, result) }
+        }
     }
 }
 
@@ -1982,7 +2266,8 @@ function negatedMemberTypeGuard(condition: Expression): { name: string; type: Ty
 
 function unionOf(types: TypeNode[]): TypeNode {
     const flatten = (type: TypeNode): TypeNode[] => type.kind === 'UnionType' ? type.types.flatMap(flatten) : [type]
-    const flattened = types.flatMap(flatten)
+    const all = types.flatMap(flatten)
+    const flattened = all.length > 1 ? all.filter(type => !isNamedType(type, 'never')) : all
     if (!flattened.length) return named('any')
     const unique = flattened.filter((type, index) => flattened.findIndex(item => printType(item) === printType(type)) === index)
     return unique.length === 1 ? unique[0] : { kind: 'UnionType', types: unique }
@@ -2264,6 +2549,7 @@ class Analyzer {
             case 'Import': {
                 const imported = statement.module === 'juno:node'
                     ? 'Node.js helpers for JunoScript (`console.args`, `console.read`, `console.readLines`).'
+                    : statement.module === 'juno:async' ? 'JavaScript promises, timers, fetch, and microtask helpers.'
                     : statement.module === 'juno:types' || statement.module === 'types' ? 'Runtime type utilities for transforming Juno type declarations.' : 'Standard JunoScript module. `console` mirrors the host console.'
                 if (statement.defaultImport) {
                     const symbol: SymbolInfo = { kind: 'module', module: statement.module, docs: imported }
@@ -2274,13 +2560,16 @@ class Analyzer {
                 statement.namedImports.forEach((name, index) => {
                     const importedAlias = statement.importedTypes?.[name]
                     const importedSymbol = statement.importedSymbols?.[name]
+                    const asyncSymbol = statement.module === 'juno:async'
+                        ? name === 'Promise' ? promiseConstructor() : asyncTypeScriptSymbol(name) ?? asyncImportedSymbol(name)
+                        : undefined
                     const itemsImport = name === 'Items' && (statement.module === 'juno:types' || statement.module === 'types')
                     const type = importedAlias ? resolveType(importedAlias, env) : importedSymbol?.kind === 'var' ? importedSymbol.type ?? named('any') : name === 'console' ? consoleType()
                         : name === 'Math' && statement.module === 'juno' ? mathType()
                         : name === 'types' && statement.module === 'juno' ? typeUtilitiesType()
                         : (statement.module === 'juno:types' || statement.module === 'types') && ['Partial', 'Required', 'Readonly', 'Pick', 'Omit', 'KeyOf', 'Exclude'].includes(name) ? typeUtilitiesType().kind === 'ObjectType' ? typeUtilitiesType().members.find(member => member.name === name)?.type ?? named('any') : named('any')
                         : named('any')
-                    const symbol: SymbolInfo = itemsImport
+                    const symbol: SymbolInfo = asyncSymbol ?? (itemsImport
                         ? { kind: 'fun', generics: ['T'], genericConstraints: [{ kind: 'UnionType', types: [named('string'), named('number')] }], params: [], returnType: arrayOf(named('T')), docs: 'Creates an array from a union of string or number literal types.' }
                         : importedSymbol?.kind === 'fun'
                         ? { kind: 'fun', generics: importedSymbol.generics, genericConstraints: importedSymbol.genericConstraints, genericDefaults: importedSymbol.genericDefaults, params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named('any'), docs: imported }
@@ -2294,7 +2583,7 @@ class Analyzer {
                             ? (statement.module === 'juno:node' ? 'Console with `log`, `args`, `read`, and `readLines`.' : 'Host console (`log`, `error`, `warn`).')
                             : name === 'Math' && statement.module === 'juno' ? 'Standard JavaScript Math constants and functions.'
                             : name === 'types' && statement.module === 'juno' ? 'Runtime type transformation utilities.' : imported
-                    }
+                    })
                     this.bind(env, name, symbol)
                     const printed = printSymbol(name, symbol)
                     this.addHover(name, statement.namedImportLocs?.[index], printed.code, printed.docs, symbolTypeDescription(name, symbol, env))
@@ -2425,7 +2714,7 @@ class Analyzer {
                     kind: 'type', generics: [], value: statement.genericConstraints?.[index] ?? statement.genericDefaults?.[index] ?? named('any'), typeParameter: true
                 }))
                 const inferenceEnv = bindInferredParameters(statement.params, genericEnv)
-                const returnType = statement.returnType ?? inferFunctionReturnType(statement.body, inferenceEnv, statement.params)
+                const returnType = functionReturnType(statement.body, statement.returnType ?? inferFunctionReturnType(statement.body, inferenceEnv, statement.params))
                 const symbol: SymbolInfo = {
                     kind: 'fun', generics: statement.generics, genericConstraints: statement.genericConstraints,
                     genericDefaults: statement.genericDefaults, params: statement.params, returnType
@@ -2477,10 +2766,10 @@ class Analyzer {
                 }
                 const overloads = statement.overloads.map(overload => {
                     const local = constructorEnv(overload.params)
-                    const returnType = overload.returnType ?? inferFunctionReturnType(overload.body, local, overload.params)
+                    const returnType = functionReturnType(overload.body, overload.returnType ?? inferFunctionReturnType(overload.body, local, overload.params))
                     return { params: overload.params, returnType }
                 })
-                const methods = statement.methods.map(method => ({ name: method.name, generics: method.generics ?? [], genericConstraints: method.genericConstraints, genericDefaults: method.genericDefaults, params: method.params, returnType: method.returnType ?? inferFunctionReturnType(method.body, env, method.params) }))
+                const methods = statement.methods.map(method => ({ name: method.name, generics: method.generics ?? [], genericConstraints: method.genericConstraints, genericDefaults: method.genericDefaults, params: method.params, returnType: functionReturnType(method.body, method.returnType ?? inferFunctionReturnType(method.body, env, method.params)) }))
                 const symbol: SymbolInfo = { kind: 'constructor', generics: statement.generics, genericConstraints: statement.genericConstraints, genericDefaults: statement.genericDefaults, inheritedType: statement.inheritedType, overloads, methods }
                 this.bind(env, statement.name, symbol)
                 this.addHover(statement.name, statement.loc, printSymbol(statement.name, symbol).code, undefined, symbolTypeDescription(statement.name, symbol, env))
@@ -2845,7 +3134,8 @@ class Analyzer {
             }
             case 'Unary':
                 this.walkExpression(expression.operand, env, thisType)
-                if (expression.operator !== 'postfix!' && isNullable(inferExpression(expression.operand, env), env)) this.addDiagnostic(expression.loc, 'Nullable value cannot be used with this operator; use ! or ?? to handle null.')
+                if (expression.operator !== 'postfix!' && expression.operator !== 'await' && isNullable(inferExpression(expression.operand, env), env)) this.addDiagnostic(expression.loc, 'Nullable value cannot be used with this operator; use ! or ?? to handle null.')
+                if (expression.operator === 'await' && expression.loc) this.addHover('await', expression.loc, `(await) ${printType(inferExpression(expression, env))}`)
                 return
             case 'Binary': {
                 this.walkExpression(expression.left, env, thisType)
@@ -2951,6 +3241,14 @@ class Analyzer {
             }
             case 'Call': {
                 this.walkExpression(expression.callee, env, thisType)
+                if (expression.callee.kind === 'Identifier' && expression.callee.name === 'Promise') {
+                    if (expression.args.length !== 1) this.addDiagnostic(expressionStart(expression.args[1] ?? expression.callee), 'Promise() accepts exactly one executor callback.')
+                    const executor = expression.args[0]
+                    if (executor?.kind === 'Function' && executor.params.length > 1) this.addDiagnostic(executor.params[1].loc, 'The Promise executor receives only one resolve callback.')
+                }
+                if (expression.callee.kind === 'Member' && expression.callee.property === 'then' && expression.args.length !== 1) {
+                    this.addDiagnostic(expressionStart(expression.args[1] ?? expression.callee), 'Promise.then() accepts exactly one fulfilled callback.')
+                }
                 const calleeType = resolveType(inferExpression(expression.callee, env), env)
                 const directCallable = callableType(calleeType, env)
                 const directFunction = expression.callee.kind === 'Identifier' ? env.get(expression.callee.name) : undefined
@@ -3219,7 +3517,7 @@ function expressionStart(expression: Expression): Loc | undefined {
         case 'Call':
             return expressionStart(expression.callee)
         case 'Function':
-            return expression.params[0]?.loc
+            return expression.loc ?? expression.params[0]?.loc
     }
 }
 

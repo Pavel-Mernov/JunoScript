@@ -9,6 +9,7 @@ const assignmentOperators = { Equal: '=', PlusEqual: '+=', MinusEqual: '-=', Mul
 class Parser {
     tokens;
     pos = 0;
+    softExpressionIndents = 0;
     constructor(tokens) {
         this.tokens = tokens;
     }
@@ -66,7 +67,7 @@ class Parser {
         if (this.match('Keyword', 'export')) {
             const isDefault = this.match('Keyword', 'default');
             const declaration = this.statement();
-            if (!['Import', 'Variable', 'Destructure', 'FunctionDeclaration', 'TypeDeclaration', 'ConstructorDeclaration'].includes(declaration.kind))
+            if (!['Import', 'Variable', 'Destructure', 'ArrayDestructure', 'FunctionDeclaration', 'TypeDeclaration', 'ConstructorDeclaration'].includes(declaration.kind))
                 this.fail('export must precede a declaration');
             return { kind: 'Export', declaration, default: isDefault };
         }
@@ -88,6 +89,28 @@ class Parser {
                 this.take('Equal', "Expected '=' after object destructuring");
                 return { kind: 'Destructure', bindings, mutable, initializer: this.expression() };
             }
+            if (this.match('LeftBracket')) {
+                const bindings = [];
+                let index = 0;
+                while (!this.is('RightBracket')) {
+                    if (this.match('Comma')) {
+                        index++;
+                        continue;
+                    }
+                    const rest = this.match('Ellipsis');
+                    const binding = this.identifier();
+                    bindings.push({ ...binding, index, rest });
+                    if (rest && !this.is('RightBracket'))
+                        this.fail('A rest binding must be the last element');
+                    if (!rest)
+                        index++;
+                    if (!this.match('Comma') && !this.is('RightBracket'))
+                        this.fail("Expected ',' or ']' in array destructuring");
+                }
+                this.take('RightBracket');
+                this.take('Equal', "Expected '=' after array destructuring");
+                return { kind: 'ArrayDestructure', bindings, mutable, initializer: this.expression() };
+            }
             const { name, loc } = this.identifier();
             const type = this.match('Colon') ? this.type() : undefined;
             let initializer;
@@ -108,13 +131,16 @@ class Parser {
             const genericParameters = this.match('Less') ? this.genericParameters() : [];
             const params = this.parameters(), returnType = this.match('Colon') ? this.type() : undefined;
             this.take('Equal', "Expected '=' before function body");
+            const body = this.is('Keyword', 'match')
+                ? [{ kind: 'Return', value: this.expression() }]
+                : this.block();
             return {
                 kind: 'FunctionDeclaration', name, loc,
                 generics: genericParameters.map(item => item.name),
                 genericLocs: genericParameters.map(item => item.loc),
                 genericConstraints: genericParameters.map(item => item.constraint),
                 genericDefaults: genericParameters.map(item => item.defaultType),
-                params, returnType, body: this.block()
+                params, returnType, body
             };
         }
         if (this.match('Keyword', 'type')) {
@@ -135,8 +161,9 @@ class Parser {
         if (this.match('Keyword', 'constructor')) {
             const { name, loc } = this.identifier();
             const genericParameters = this.match('Less') ? this.genericParameters() : [];
-            this.take('Colon', "Expected ':' before inherited constructor type");
-            const inheritedType = this.type();
+            const inheritedType = this.match('Colon')
+                ? this.type()
+                : { kind: 'ObjectType', members: [] };
             this.take('LeftBrace', "Expected '{' before constructor overloads");
             const overloads = [];
             const methods = [];
@@ -168,6 +195,8 @@ class Parser {
         }
         if (this.match('Keyword', 'return'))
             return { kind: 'Return', value: this.is('Newline') || this.is('Dedent') || this.is('EOF') ? undefined : this.expression() };
+        if (this.match('Keyword', 'break'))
+            return { kind: 'Break', loc: this.loc(this.tokens[this.pos - 1]) };
         if (this.is('Identifier') && assignmentOperators[this.tokens[this.pos + 1]?.type]) {
             const { name, loc } = this.identifier(), operatorToken = this.current, operator = assignmentOperators[operatorToken.type];
             this.pos++;
@@ -241,6 +270,7 @@ class Parser {
     }
     block() {
         this.take('Newline', 'Expected a newline before indented block');
+        while (this.match('Newline')) { }
         this.take('Indent', 'Expected an indented block');
         const body = [];
         this.separators();
@@ -250,6 +280,68 @@ class Parser {
         }
         this.take('Dedent');
         return body;
+    }
+    matchPattern() {
+        const patterns = [this.matchPatternAtom()];
+        while (this.match('Pipe'))
+            patterns.push(this.matchPatternAtom());
+        return patterns.length === 1 ? patterns[0] : { kind: 'PatternUnion', patterns, loc: patterns[0].loc };
+    }
+    matchPatternAtom() {
+        if (this.match('String') || this.match('Number') || this.match('BigInt')) {
+            const token = this.tokens[this.pos - 1];
+            return { kind: 'PatternLiteral', value: this.value(token), loc: this.loc(token) };
+        }
+        if (this.match('Keyword', 'true') || this.match('Keyword', 'false') || this.match('Keyword', 'null')) {
+            const token = this.tokens[this.pos - 1];
+            const value = this.value(token);
+            return { kind: 'PatternLiteral', value: value === 'true' ? true : value === 'false' ? false : null, loc: this.loc(token) };
+        }
+        if (this.match('LeftBrace')) {
+            const start = this.tokens[this.pos - 1];
+            const properties = [];
+            this.objectSeparators();
+            while (!this.is('RightBrace')) {
+                const property = this.propertyName();
+                const pattern = this.match('Colon') ? this.matchPatternAtom() : undefined;
+                properties.push({ name: property.name, pattern, loc: property.loc });
+                this.parenthesisSeparators();
+                if (this.match('Comma'))
+                    this.objectSeparators();
+                else if (!this.is('RightBrace'))
+                    this.fail("Expected ',' or '}' in match object pattern");
+            }
+            this.take('RightBrace');
+            return { kind: 'PatternObject', properties, loc: this.loc(start) };
+        }
+        const token = this.take('Identifier', 'Expected a literal, type, variable, or object pattern');
+        return { kind: 'PatternIdentifier', name: String(this.value(token)), nullable: this.match('Question'), loc: this.loc(token) };
+    }
+    matchExpression(token) {
+        const value = this.expression();
+        this.take('Newline', 'Expected a newline after match value');
+        this.take('Indent', 'Expected indented match cases');
+        const cases = [];
+        this.separators();
+        while (!this.is('Dedent') && !this.is('EOF')) {
+            if (this.match('Keyword', 'case')) {
+                const caseToken = this.tokens[this.pos - 1];
+                const pattern = this.matchPattern();
+                const guard = this.match('Keyword', 'when') ? this.expression() : undefined;
+                cases.push({ pattern, guard, body: this.block(), loc: this.loc(caseToken) });
+            }
+            else if (this.match('Keyword', 'default')) {
+                const defaultToken = this.tokens[this.pos - 1];
+                if (cases.some(item => !item.pattern))
+                    this.fail('A match expression can only have one default case');
+                cases.push({ body: this.block(), loc: this.loc(defaultToken) });
+            }
+            else
+                this.fail("Expected 'case' or 'default' in match expression");
+            this.separators();
+        }
+        this.take('Dedent');
+        return { kind: 'Match', value, cases, loc: this.loc(token) };
     }
     parameters() {
         this.take('LeftParen');
@@ -267,8 +359,8 @@ class Parser {
                 this.fail('A rest parameter cannot have a default value');
             if (rest && !type)
                 this.fail('A rest parameter must have an array type');
-            if (rest && type && type.kind !== 'ArrayType' && !(type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray')))
-                this.fail('A rest parameter must have an array type');
+            if (rest && type && type.kind !== 'NamedType' && type.kind !== 'ArrayType' && !(type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray')))
+                this.fail('A rest parameter must have an array type or an array-constrained generic type');
             if (!rest && defaultValue !== undefined)
                 optionalSeen = true;
             else if (!rest && optionalSeen)
@@ -297,7 +389,7 @@ class Parser {
         this.take('Greater');
         return parameters;
     }
-    type() {
+    type(stopAtConditionalQuestion = false) {
         while (this.match('Newline') || this.match('Indent')) { }
         if (this.is('Pipe') || this.is('Ampersand')) {
             const operator = this.current.type;
@@ -313,7 +405,7 @@ class Parser {
         }
         const optional = () => {
             let value = this.typeAtom();
-            if (this.match('Question'))
+            if (!stopAtConditionalQuestion && this.match('Question'))
                 value = { kind: 'UnionType', types: [value, { kind: 'NamedType', name: 'null' }] };
             return value;
         };
@@ -327,6 +419,18 @@ class Parser {
             while (this.match('Newline') || this.match('Indent')) { }
             const right = optional(), kind = operator === 'Pipe' ? 'UnionType' : 'IntersectionType';
             left = left.kind === kind ? { ...left, types: [...left.types, right] } : { kind, types: [left, right] };
+        }
+        if (this.match('Identifier', 'is')) {
+            const token = this.tokens[this.pos - 1];
+            const target = this.type(true);
+            if (left.kind !== 'NamedType' || target.kind !== 'NamedType')
+                this.fail("'is' type operands must be type names");
+            if (this.match('Question')) {
+                const consequent = this.type();
+                this.take('Colon', "Expected ':' in conditional type");
+                return { kind: 'ConditionalType', check: left, target, consequent, alternate: this.type(), loc: this.loc(token) };
+            }
+            return { kind: 'ConditionalType', check: left, target, consequent: { kind: 'LiteralType', value: true }, alternate: { kind: 'LiteralType', value: false }, loc: this.loc(token) };
         }
         return left;
     }
@@ -374,7 +478,16 @@ class Parser {
                     this.objectSeparators();
                     continue;
                 }
-                const readonly = this.match('Keyword', 'readonly'), constant = this.match('Keyword', 'const');
+                let readonly = false, sealed = false, constant = false;
+                while (this.is('Keyword') && ['readonly', 'sealed', 'const'].includes(String(this.value(this.current)))) {
+                    const modifier = String(this.value(this.tokens[this.pos++]));
+                    if (modifier === 'readonly')
+                        readonly = true;
+                    else if (modifier === 'sealed')
+                        sealed = true;
+                    else
+                        constant = true;
+                }
                 const explicitFunction = this.match('Keyword', 'fun');
                 const accessor = this.is('Identifier') && ['get', 'set'].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === 'Identifier'
                     ? String(this.value(this.tokens[this.pos++]))
@@ -421,7 +534,7 @@ class Parser {
                 if (accessor === 'set' && params?.length !== 1)
                     this.fail('A setter must have exactly one parameter');
                 const accessorType = accessor === 'set' ? params?.[0]?.type ?? { kind: 'NamedType', name: 'any' } : type;
-                members.push({ name, loc, optional, readonly, constant, type: accessorType, defaultValue, method, accessor, generics: genericParameters.map(item => item.name), genericLocs: genericParameters.map(item => item.loc), genericConstraints: genericParameters.map(item => item.constraint), genericDefaults: genericParameters.map(item => item.defaultType), params, body });
+                members.push({ name, loc, optional, readonly, sealed, constant, type: accessorType, defaultValue, method, accessor, generics: genericParameters.map(item => item.name), genericLocs: genericParameters.map(item => item.loc), genericConstraints: genericParameters.map(item => item.constraint), genericDefaults: genericParameters.map(item => item.defaultType), params, body });
                 this.objectSeparators();
             }
             this.take('RightBrace');
@@ -440,6 +553,15 @@ class Parser {
                 result = args[0];
             else
                 this.fail('Expected function return type after -> or =>');
+        }
+        else if (this.match('LeftBracket')) {
+            const elements = [];
+            if (!this.is('RightBracket'))
+                do {
+                    elements.push(this.type());
+                } while (this.match('Comma') && !this.is('RightBracket'));
+            this.take('RightBracket', "Expected ']' after tuple type");
+            result = { kind: 'GenericType', name: 'Tuple', args: elements };
         }
         else if (this.match('Keyword', 'null')) {
             result = { kind: 'NamedType', name: 'null', loc: this.loc(this.tokens[this.pos - 1]) };
@@ -470,7 +592,26 @@ class Parser {
     expression(min = 0) {
         let left = this.prefix();
         let typeArguments;
+        let continuationIndents = 0;
+        const continuationLine = (requireDot) => {
+            if (!this.is('Newline'))
+                return false;
+            const saved = this.pos;
+            while (this.match('Newline')) { }
+            const indented = this.match('Indent');
+            if (requireDot && !this.is('Dot')) {
+                this.pos = saved;
+                return false;
+            }
+            if (indented)
+                continuationIndents++;
+            return true;
+        };
         while (true) {
+            // A member chain may continue on the next indented line either with
+            // a leading dot or after a trailing dot on the previous line.
+            if (continuationLine(true))
+                continue;
             // Generic call type arguments are compile-time only: parse and discard them here.
             if (this.is('Less') && (left.kind === 'Identifier' || left.kind === 'Member')) {
                 const saved = this.pos;
@@ -493,6 +634,7 @@ class Parser {
                     continue;
             }
             if (this.match('Dot')) {
+                continuationLine(false);
                 const property = this.propertyName();
                 left = { kind: 'Member', object: left, property: property.name, optional: false, loc: property.loc };
                 continue;
@@ -548,6 +690,25 @@ class Parser {
                 const alternate = this.expression();
                 left = { kind: 'Conditional', condition: left, consequent, alternate, loc: this.loc(token) };
                 continue;
+            }
+            if (this.softExpressionIndents > 0 && this.is('Newline')) {
+                const saved = this.pos;
+                while (this.match('Newline')) { }
+                let consumed = 0;
+                while (consumed < this.softExpressionIndents && this.match('Dedent'))
+                    consumed++;
+                if (consumed > 0) {
+                    this.softExpressionIndents -= consumed;
+                    break;
+                }
+                this.pos = saved;
+            }
+            if (continuationIndents > 0 && this.is('Newline')) {
+                while (this.match('Newline')) { }
+                while (continuationIndents > 0 && this.match('Dedent'))
+                    continuationIndents--;
+                if (continuationIndents === 0)
+                    break;
             }
             const op = opTypes[this.current.type], p = op ? precedence[op] : undefined;
             if (!op || p === undefined || p < min)
@@ -658,6 +819,18 @@ class Parser {
                         shiftExpression(node.consequent);
                         shiftExpression(node.alternate);
                         break;
+                    case 'Match':
+                        shiftExpression(node.value);
+                        node.cases.forEach(item => { if (item.guard)
+                            shiftExpression(item.guard); item.body.forEach(shiftStatement); });
+                        break;
+                    case 'Try':
+                        if (node.value)
+                            shiftExpression(node.value);
+                        node.body?.forEach(shiftStatement);
+                        node.catches.forEach(item => item.body.forEach(shiftStatement));
+                        node.finallyBody?.forEach(shiftStatement);
+                        break;
                     case 'Member':
                         shiftExpression(node.object);
                         break;
@@ -696,6 +869,9 @@ class Parser {
                         if (statement.value)
                             shiftExpression(statement.value);
                         break;
+                    case 'Break':
+                        statement.loc = shiftLoc(statement.loc);
+                        break;
                     case 'If':
                         shiftExpression(statement.condition);
                         statement.consequent.forEach(shiftStatement);
@@ -725,6 +901,14 @@ class Parser {
         return { kind: 'Template', parts, loc };
     }
     prefix() {
+        if (this.match('Keyword', 'try'))
+            return this.tryExpression(this.tokens[this.pos - 1]);
+        if (this.match('Keyword', 'match'))
+            return this.matchExpression(this.tokens[this.pos - 1]);
+        if (this.match('Keyword', 'await')) {
+            const token = this.tokens[this.pos - 1];
+            return { kind: 'Unary', operator: 'await', operand: this.expression(7), loc: this.loc(token) };
+        }
         if (this.match('Increment') || this.match('Decrement')) {
             const token = this.tokens[this.pos - 1];
             const operand = this.expression(8);
@@ -761,9 +945,27 @@ class Parser {
             return { kind: 'Literal', value: null, loc: this.loc(this.tokens[this.pos - 1]) };
         if (this.match('Identifier')) {
             const token = this.tokens[this.pos - 1];
-            return { kind: 'Identifier', name: String(this.value(token)), loc: this.loc(token) };
+            const name = String(this.value(token));
+            const loc = this.loc(token);
+            if (this.match('FatArrow')) {
+                const params = [{ name, loc }];
+                if (this.match('Newline')) {
+                    this.take('Indent', 'Expected an indented function body');
+                    const body = [];
+                    this.separators();
+                    while (!this.is('Dedent') && !this.is('EOF')) {
+                        body.push(this.statement());
+                        this.separators();
+                    }
+                    this.take('Dedent');
+                    return { kind: 'Function', params, body };
+                }
+                return { kind: 'Function', params, body: [], expressionBody: this.expression() };
+            }
+            return { kind: 'Identifier', name, loc };
         }
         if (this.match('LeftParen')) {
+            const openingParen = this.tokens[this.pos - 1];
             const saved = this.pos;
             let arrow = false;
             try {
@@ -782,36 +984,50 @@ class Parser {
                 this.take('RightParen');
                 const hasReturnType = this.match('Colon');
                 const returnType = hasReturnType ? this.type() : undefined;
+                const newlineArrowBody = () => {
+                    this.take('Indent', 'Expected an indented function body');
+                    let depth = 0, expressionBody = false;
+                    for (let index = this.pos; index < this.tokens.length; index++) {
+                        const type = this.tokens[index].type;
+                        if (type === 'LeftParen' || type === 'LeftBracket' || type === 'LeftBrace')
+                            depth++;
+                        else if (type === 'RightParen' || type === 'RightBracket' || type === 'RightBrace') {
+                            if (depth === 0) {
+                                expressionBody = true;
+                                break;
+                            }
+                            depth--;
+                        }
+                        else if ((type === 'Dedent' || type === 'EOF') && depth === 0)
+                            break;
+                    }
+                    if (expressionBody) {
+                        this.softExpressionIndents++;
+                        return { body: [], expressionBody: this.expression() };
+                    }
+                    const body = [];
+                    this.separators();
+                    while (!this.is('Dedent') && !this.is('EOF')) {
+                        body.push(this.statement());
+                        this.separators();
+                    }
+                    this.take('Dedent');
+                    return { body };
+                };
                 if (hasReturnType && this.match('FatArrow')) {
                     arrow = true;
                     if (this.match('Newline')) {
-                        this.take('Indent', 'Expected an indented function body');
-                        const body = [];
-                        this.separators();
-                        while (!this.is('Dedent') && !this.is('EOF')) {
-                            body.push(this.statement());
-                            this.separators();
-                        }
-                        this.take('Dedent');
-                        return { kind: 'Function', params, returnType, body };
+                        return { kind: 'Function', loc: this.loc(openingParen), params, returnType, ...newlineArrowBody() };
                     }
-                    return { kind: 'Function', params, returnType, body: [], expressionBody: this.expression() };
+                    return { kind: 'Function', loc: this.loc(openingParen), params, returnType, body: [], expressionBody: this.expression() };
                 }
                 if (this.match('FatArrow')) {
                     arrow = true;
                     if (this.match('Newline')) {
-                        this.take('Indent', 'Expected an indented function body');
-                        const body = [];
-                        this.separators();
-                        while (!this.is('Dedent') && !this.is('EOF')) {
-                            body.push(this.statement());
-                            this.separators();
-                        }
-                        this.take('Dedent');
-                        return { kind: 'Function', params, returnType, body };
+                        return { kind: 'Function', loc: this.loc(openingParen), params, returnType, ...newlineArrowBody() };
                     }
                     const expressionBody = this.expression();
-                    return { kind: 'Function', params, returnType, body: [], expressionBody };
+                    return { kind: 'Function', loc: this.loc(openingParen), params, returnType, body: [], expressionBody };
                 }
             }
             catch (error) {
@@ -848,6 +1064,17 @@ class Parser {
             const properties = [];
             this.objectSeparators();
             while (!this.is('RightBrace') && !this.is('EOF')) {
+                if (this.match('LeftBracket')) {
+                    const key = this.identifier();
+                    this.take('Colon', "Expected ':' after index parameter");
+                    const indexType = this.type();
+                    this.take('RightBracket', "Expected ']' after index parameter type");
+                    this.take('Colon', "Expected ':' before indexed value type");
+                    const declaredType = this.type();
+                    properties.push({ key: key.name, keyLoc: key.loc, value: { kind: 'Literal', value: null }, typeOnly: true, indexType, declaredType });
+                    this.objectSeparators();
+                    continue;
+                }
                 if (this.match('Ellipsis')) {
                     const value = this.expression();
                     properties.push({ key: '', keyLoc: 'loc' in value ? value.loc : undefined, value, spread: true });
@@ -856,7 +1083,14 @@ class Parser {
                         this.objectSeparators();
                     continue;
                 }
-                const readonly = this.match('Keyword', 'readonly');
+                let readonly = false, sealed = false;
+                while (this.is('Keyword') && ['readonly', 'sealed'].includes(String(this.value(this.current)))) {
+                    const modifier = String(this.value(this.tokens[this.pos++]));
+                    if (modifier === 'readonly')
+                        readonly = true;
+                    else
+                        sealed = true;
+                }
                 const explicitFunction = this.match('Keyword', 'fun');
                 const accessor = this.is('Identifier') && ['get', 'set'].includes(String(this.value(this.current))) && this.tokens[this.pos + 1]?.type === 'Identifier'
                     ? String(this.value(this.tokens[this.pos++]))
@@ -865,6 +1099,7 @@ class Parser {
                 const property = anonymousFunction
                     ? { name: '', loc: this.loc(this.tokens[this.pos - 1]) }
                     : this.propertyName();
+                const genericParameters = explicitFunction && !anonymousFunction && this.match('Less') ? this.genericParameters() : [];
                 let value;
                 if (accessor) {
                     const params = this.parameters();
@@ -888,13 +1123,20 @@ class Parser {
                     if (anonymousFunction && last?.kind === 'ExpressionStatement') {
                         body[body.length - 1] = { kind: 'Return', value: last.expression };
                     }
-                    value = { kind: 'Function', params, returnType, body };
+                    value = {
+                        kind: 'Function',
+                        generics: genericParameters.map(item => item.name),
+                        genericLocs: genericParameters.map(item => item.loc),
+                        genericConstraints: genericParameters.map(item => item.constraint),
+                        genericDefaults: genericParameters.map(item => item.defaultType),
+                        params, returnType, body
+                    };
                 }
                 else if (explicitFunction)
                     this.fail("Expected '(' after object function name");
                 else
                     value = { kind: 'Identifier', name: property.name, loc: property.loc };
-                properties.push({ key: property.name, keyLoc: property.loc, value, accessor, readonly });
+                properties.push({ key: property.name, keyLoc: property.loc, value, accessor, readonly, sealed });
                 this.objectSeparators();
                 if (this.match('Comma'))
                     this.objectSeparators();
@@ -908,6 +1150,40 @@ class Parser {
             return { kind: 'Function', params, returnType, body: this.block() };
         }
         this.fail('Expected expression');
+    }
+    tryExpression(token) {
+        let value, body;
+        if (this.is('Newline'))
+            body = this.block();
+        else {
+            value = this.expression();
+            this.take('Newline', "Expected a newline after try expression");
+        }
+        while (this.match('Newline')) { }
+        const indentedClauses = value !== undefined && this.match('Indent');
+        const catches = [];
+        let finallyBody;
+        while (this.match('Keyword', 'catch')) {
+            const catchToken = this.tokens[this.pos - 1];
+            let binding, bindingLoc, type;
+            if (this.match('LeftParen')) {
+                const identifier = this.identifier();
+                binding = identifier.name;
+                bindingLoc = identifier.loc;
+                if (this.match('Colon'))
+                    type = this.type();
+                this.take('RightParen', "Expected ')' after catch binding");
+            }
+            catches.push({ binding, bindingLoc, type, body: this.block(), loc: this.loc(catchToken) });
+            while (this.match('Newline')) { }
+        }
+        if (this.match('Keyword', 'finally'))
+            finallyBody = this.block();
+        if (!catches.length)
+            this.fail("A try expression needs at least one catch");
+        if (indentedClauses)
+            this.take('Dedent', "Expected the end of the try expression");
+        return { kind: 'Try', value, body, catches, finallyBody, loc: this.loc(token) };
     }
 }
 exports.Parser = Parser;
@@ -925,12 +1201,15 @@ function inferredTypeNode(expression) {
         }
         case 'Object': return { kind: 'ObjectType', members: expression.properties.flatMap(property => property.accessor === 'set' ? [] : [{
                     name: property.key,
-                    type: property.accessor === 'get' && property.value.kind === 'Function' ? property.value.returnType ?? { kind: 'NamedType', name: 'any' } : inferredTypeNode(property.value),
+                    type: property.typeOnly ? property.declaredType ?? { kind: 'NamedType', name: 'any' } : property.accessor === 'get' && property.value.kind === 'Function' ? property.value.returnType ?? { kind: 'NamedType', name: 'any' } : inferredTypeNode(property.value),
                     optional: false,
-                    readonly: false,
-                    constant: false
+                    readonly: Boolean(property.readonly),
+                    sealed: Boolean(property.sealed),
+                    constant: false,
+                    indexType: property.indexType
                 }]) };
         case 'Conditional': return inferredTypeNode(expression.consequent);
+        case 'Is': return { kind: 'NamedType', name: 'boolean' };
         default: return { kind: 'NamedType', name: 'any' };
     }
 }
@@ -978,6 +1257,17 @@ function inferExpressionType(expression, variables) {
             return inferExpressionType(expression.operand, variables);
         case 'Conditional':
             return commonType([inferExpressionType(expression.consequent, variables), inferExpressionType(expression.alternate, variables)]);
+        case 'Match': {
+            const results = expression.cases.map(item => inferFunctionReturnType(item.body, new Map(variables)));
+            if (!expression.cases.some(item => !item.pattern))
+                results.push(primitive('null'));
+            return commonType(results);
+        }
+        case 'Try': {
+            const results = expression.catches.map(item => inferFunctionReturnType(item.body, new Map(variables)));
+            return results.length ? commonType(results) : unknownType;
+        }
+        case 'Is': return primitive('boolean');
         case 'Member': {
             const object = inferExpressionType(expression.object, variables);
             return object.kind === 'object' ? object.fields.get(expression.property) ?? unknownType : unknownType;
@@ -1174,7 +1464,9 @@ function typeFromNode(type, aliases = new Map(), resolving = new Set()) {
             next.add(type.name);
             return typeFromNode(alias, aliases, next);
         }
-        return primitive(type.name);
+        return ['string', 'number', 'boolean', 'BigInt', 'null', 'void', 'never', 'RegEx'].includes(type.name)
+            ? primitive(type.name)
+            : unknownType;
     }
     if (type.kind === 'ArrayType')
         return { kind: 'array', element: typeFromNode(type.element, aliases, resolving) };
@@ -1206,7 +1498,7 @@ function typeFromNode(type, aliases = new Map(), resolving = new Set()) {
         const source = typeFromNode(type.args[0], aliases, resolving);
         if (type.name === 'KeyOf') {
             if (source.kind === 'array') {
-                const names = ['length', 'indices', 'has', 'pick', 'omit', 'at', 'concat', 'copy', 'copyWithin', 'entries', 'enumerate', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'forEach', 'includes', 'indexOf', 'iterator', 'join', 'lastIndexOf', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toArray', 'toReversed', 'toSorted', 'toSpliced', 'toString', 'unshift', 'with'];
+                const names = ['length', 'indices', 'has', 'pick', 'omit', 'deepClone', 'deepFreeze', 'toDeepFreezed', 'at', 'concat', 'copy', 'copyWithin', 'entries', 'enumerate', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'forEach', 'includes', 'indexOf', 'iterator', 'join', 'lastIndexOf', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toArray', 'toReversed', 'toSorted', 'toSpliced', 'toString', 'unshift', 'with'];
                 return { kind: 'union', types: [primitive('number'), ...names.map(value => ({ kind: 'literal', value }))] };
             }
             if (source.kind !== 'object')
@@ -1447,10 +1739,106 @@ function parse(source, options = {}) {
             item.importedTypes = Object.fromEntries([...types].filter(([name]) => item.namedImports.includes(name)));
         }
     if (options.validate !== false) {
+        validateBreakStatements(statements);
         validateDeclarations(statements);
         validateArithmeticTypes(statements);
     }
     return statements;
+}
+function validateBreakStatements(statements, loopDepth = 0) {
+    for (const statement of statements) {
+        if (statement.kind === 'Break') {
+            if (loopDepth === 0)
+                throw new SyntaxError(`'break' is only valid inside a loop at ${statement.loc?.line ?? 1}:${statement.loc?.column ?? 1}`);
+        }
+        else if (statement.kind === 'While' || statement.kind === 'ForOf') {
+            validateBreakStatements(statement.body, loopDepth + 1);
+        }
+        else if (statement.kind === 'If') {
+            validateBreakStatements(statement.consequent, loopDepth);
+            if (statement.alternate)
+                validateBreakStatements(statement.alternate, loopDepth);
+        }
+        else if (statement.kind === 'FunctionDeclaration') {
+            validateBreakStatements(statement.body, 0);
+        }
+        else if (statement.kind === 'ConstructorDeclaration') {
+            for (const overload of statement.overloads)
+                validateBreakStatements(overload.body, 0);
+            for (const method of statement.methods)
+                validateBreakStatements(method.body, 0);
+        }
+        else if (statement.kind === 'Export') {
+            validateBreakStatements([statement.declaration], loopDepth);
+        }
+        else if (statement.kind === 'Variable' && statement.initializer) {
+            validateBreakExpression(statement.initializer, loopDepth);
+        }
+        else if (statement.kind === 'Destructure' || statement.kind === 'ArrayDestructure') {
+            validateBreakExpression(statement.initializer, loopDepth);
+        }
+        else if (statement.kind === 'ExpressionStatement') {
+            validateBreakExpression(statement.expression, loopDepth);
+        }
+        else if (statement.kind === 'Return' && statement.value) {
+            validateBreakExpression(statement.value, loopDepth);
+        }
+    }
+}
+function validateBreakExpression(expression, loopDepth) {
+    if (expression.kind === 'Match') {
+        validateBreakExpression(expression.value, loopDepth);
+        for (const item of expression.cases) {
+            if (item.guard)
+                validateBreakExpression(item.guard, loopDepth);
+            validateBreakStatements(item.body, loopDepth);
+        }
+    }
+    else if (expression.kind === 'Function') {
+        validateBreakStatements(expression.body, 0);
+        if (expression.expressionBody)
+            validateBreakExpression(expression.expressionBody, 0);
+    }
+    else if (expression.kind === 'Array')
+        expression.elements.forEach(item => validateBreakExpression(item, loopDepth));
+    else if (expression.kind === 'Object')
+        expression.properties.forEach(item => validateBreakExpression(item.value, loopDepth));
+    else if (expression.kind === 'Spread')
+        validateBreakExpression(expression.value, loopDepth);
+    else if (expression.kind === 'Template')
+        expression.parts.forEach(item => { if (typeof item !== 'string')
+            validateBreakExpression(item, loopDepth); });
+    else if (expression.kind === 'Unary')
+        validateBreakExpression(expression.operand, loopDepth);
+    else if (expression.kind === 'Assignment')
+        validateBreakExpression(expression.value, loopDepth);
+    else if (expression.kind === 'MemberAssignment') {
+        validateBreakExpression(expression.object, loopDepth);
+        if (expression.index)
+            validateBreakExpression(expression.index, loopDepth);
+        validateBreakExpression(expression.value, loopDepth);
+    }
+    else if (expression.kind === 'Binary') {
+        validateBreakExpression(expression.left, loopDepth);
+        validateBreakExpression(expression.right, loopDepth);
+    }
+    else if (expression.kind === 'Conditional') {
+        validateBreakExpression(expression.condition, loopDepth);
+        validateBreakExpression(expression.consequent, loopDepth);
+        validateBreakExpression(expression.alternate, loopDepth);
+    }
+    else if (expression.kind === 'Is')
+        validateBreakExpression(expression.value, loopDepth);
+    else if (expression.kind === 'Member')
+        validateBreakExpression(expression.object, loopDepth);
+    else if (expression.kind === 'Index') {
+        validateBreakExpression(expression.object, loopDepth);
+        validateBreakExpression(expression.index, loopDepth);
+    }
+    else if (expression.kind === 'Call') {
+        validateBreakExpression(expression.callee, loopDepth);
+        expression.args.forEach(item => validateBreakExpression(item, loopDepth));
+    }
 }
 function validateDeclarations(statements, initialNames = new Set()) {
     const names = new Set(initialNames);
@@ -1460,6 +1848,8 @@ function validateDeclarations(statements, initialNames = new Set()) {
             declarations.push(...(statement.defaultImport ? [statement.defaultImport] : []), ...statement.namedImports);
         else if (statement.kind === 'Variable' || statement.kind === 'FunctionDeclaration' || statement.kind === 'TypeDeclaration')
             declarations.push(statement.name);
+        else if (statement.kind === 'Destructure' || statement.kind === 'ArrayDestructure')
+            declarations.push(...statement.bindings.flatMap(binding => binding.name && binding.name !== '_' ? [binding.name] : []));
         for (const name of declarations) {
             if (names.has(name))
                 throw new SyntaxError(`Duplicate declaration '${name}' in the same scope`);
@@ -1478,4 +1868,3 @@ function validateDeclarations(statements, initialNames = new Set()) {
         }
     }
 }
-//# sourceMappingURL=parser.js.map

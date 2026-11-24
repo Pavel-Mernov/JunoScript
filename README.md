@@ -1279,6 +1279,49 @@ import {
 } from 'juno:types'
 ```
 
+### `juno:async`
+
+```junoscript
+import { Promise, TimerHandle, setTimeout, clearTimeout, fetch } from 'juno:async'
+
+fun delayedValue(): number =
+    return await Promise<number>((resolve) =>
+        setTimeout(() => resolve(42), 10)
+    )
+```
+
+Функцию не нужно помечать как `async`: наличие `await` определяется автоматически, а её внешний тип результата становится `Promise<T>`. Вложенные типы `Promise<Promise<T>>` нормализуются до `Promise<T>`. Модуль также экспортирует `setInterval`, `clearInterval`, `setImmediate`, `clearImmediate`, `queueMicrotask` и `fetch`, а его TypeScript-типы `TimerHandle`, `ImmediateHandle`, `AsyncCallback`, `FetchInput`, `FetchOptions` и `FetchResponse` доступны как обычные Juno-типы, включая runtime-проверки через `isType<T>()`.
+
+`Promise` использует упрощённую модель Juno: конструктор получает один executor, executor получает только `resolve`, а `then` принимает только fulfilled-callback. Ошибки направляются в `catch` через Result-значение `{ ok: false, error }`:
+
+```junoscript
+const chain = Promise.resolve(2)
+    .then(value => value + 3).
+    then((value) => delayed(value * 2, 5)).
+    then((value) => Promise.resolve({
+        ok: false,
+        error: `chain failed after ${value}`
+    }))
+    .catch((error) => 20)
+    .then((value) => value + 1)
+```
+
+Цепочки методов допускают оба варианта переноса: точку в начале следующей строки (`\n    .then`) и точку в конце предыдущей (`.\n    then`). Отступ продолжения не создаёт отдельный блок.
+
+Однострочный arrow callback является expression-body и не требует `return`: `value => value + 3` возвращает вычисленный результат. Для многострочного callback используется блок с явным `return`.
+
+Одно выражение можно перенести на строку после `=>`; оно также остаётся expression-body с неявным возвратом:
+
+```junoscript
+chain.then((value) =>
+    console.log('promise chain result:', value)
+    )
+```
+
+Закрывающая скобка внешнего вызова может находиться как в конце строки выражения, так и на следующей строке с тем же отступом. Если indented body содержит statements (`return`, объявления, условия и другие операторы), он разбирается как обычный блок.
+
+Такое преобразование ошибки работает для executor-функции `Promise`, `Promise.resolve` и `Promise.withResolvers().resolve`. Второй callback у `then` и второй параметр executor-функции запрещены. Полный пример с синхронными вызовами, цепочкой Promise и таймерами находится в [`Tests/testPromise.jn`](./Tests/testPromise.jn).
+
 ## VS Code
 
 Расширение в [`vscode-junoscript`](./vscode-junoscript) предоставляет:
@@ -1316,6 +1359,8 @@ import {
 | [`testGenericTypes3.jn`](./Tests/testGenericTypes3.jn) | Constraints, defaults, KeyOf, typeof, indexed types |
 | [`testGenericTypes4.jn`](./Tests/testGenericTypes4.jn) | Conditional types, Tuple, readonly/mutable copies |
 | [`testTryExpression.jn`](./Tests/testTryExpression.jn) | Result, try, catch, finally |
+| [`testAsync.jn`](./Tests/testAsync.jn) | await, Promise, implicit async functions, timers и microtasks |
+| [`testPromise.jn`](./Tests/testPromise.jn) | Многоступенчатые resolve/then/catch, setTimeout и порядок sync/async вызовов |
 | [`testStrings.jn`](./Tests/testStrings.jn) | Строки, interpolation и string API |
 | [`testRegEx.jn`](./Tests/testRegEx.jn) | RegEx literals и constructor |
 | [`testImportExports.jn`](./Tests/testImportExports.jn) | Imports, exports, re-exports |

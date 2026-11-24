@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { Expression, Loc, MatchPattern, Parameter, Statement, TypeMember, TypeNode, parse } from '../Lexer/parser'
 import { resolveModule } from '../Modules'
-import { analyze } from '../vscode-junoscript/src/language.js'
+import { analyze, hostDeclarations } from '../vscode-junoscript/src/language.js'
 
 type Binding = { value: unknown; mutable: boolean; declaredType?: TypeNode }
 type TypeAlias = { value: TypeNode; generics: string[]; genericDefaults?: (TypeNode | undefined)[] }
@@ -11,6 +11,47 @@ type RuntimeFunction = { __junoFunction: true; params: Parameter[]; body: Statem
 type RuntimeConstructor = { __junoConstructor: true; typeName: string; inheritedType: TypeNode; overloads: RuntimeFunction[]; [name: string]: unknown }
 class ReturnValue { constructor(readonly value: unknown) {} }
 class BreakSignal {}
+
+function expressionContainsAwait(expression: Expression): boolean {
+    switch (expression.kind) {
+        case 'Unary': return expression.operator === 'await' || expressionContainsAwait(expression.operand)
+        case 'Template': return expression.parts.some(part => typeof part !== 'string' && expressionContainsAwait(part))
+        case 'Assignment': return expressionContainsAwait(expression.value)
+        case 'MemberAssignment': return expressionContainsAwait(expression.object) || Boolean(expression.index && expressionContainsAwait(expression.index)) || expressionContainsAwait(expression.value)
+        case 'Array': return expression.elements.some(expressionContainsAwait)
+        case 'Spread': return expressionContainsAwait(expression.value)
+        case 'Object': return expression.properties.some(property => property.value.kind !== 'Function' && expressionContainsAwait(property.value))
+        case 'Binary': return expressionContainsAwait(expression.left) || expressionContainsAwait(expression.right)
+        case 'Conditional': return expressionContainsAwait(expression.condition) || expressionContainsAwait(expression.consequent) || expressionContainsAwait(expression.alternate)
+        case 'Match': return expressionContainsAwait(expression.value) || expression.cases.some(item => Boolean(item.guard && expressionContainsAwait(item.guard)) || statementsContainAwait(item.body))
+        case 'Try': return Boolean(expression.value && expressionContainsAwait(expression.value)) || Boolean(expression.body && statementsContainAwait(expression.body)) || expression.catches.some(item => statementsContainAwait(item.body)) || Boolean(expression.finallyBody && statementsContainAwait(expression.finallyBody))
+        case 'Is': return expressionContainsAwait(expression.value)
+        case 'Member': return expressionContainsAwait(expression.object)
+        case 'Index': return expressionContainsAwait(expression.object) || expressionContainsAwait(expression.index)
+        case 'Call': return expressionContainsAwait(expression.callee) || expression.args.some(expressionContainsAwait)
+        case 'Function': return false
+        default: return false
+    }
+}
+
+function statementContainsAwait(statement: Statement): boolean {
+    switch (statement.kind) {
+        case 'Variable': return Boolean(statement.initializer && expressionContainsAwait(statement.initializer))
+        case 'Destructure':
+        case 'ArrayDestructure': return expressionContainsAwait(statement.initializer)
+        case 'Return': return Boolean(statement.value && expressionContainsAwait(statement.value))
+        case 'ExpressionStatement': return expressionContainsAwait(statement.expression)
+        case 'If': return expressionContainsAwait(statement.condition) || statementsContainAwait(statement.consequent) || Boolean(statement.alternate && statementsContainAwait(statement.alternate))
+        case 'While': return expressionContainsAwait(statement.condition) || statementsContainAwait(statement.body)
+        case 'ForOf': return expressionContainsAwait(statement.iterable) || statementsContainAwait(statement.body)
+        case 'Export': return statementContainsAwait(statement.declaration)
+        default: return false
+    }
+}
+
+function statementsContainAwait(statements: Statement[]): boolean {
+    return statements.some(statementContainsAwait)
+}
 
 export class Interpreter {
     private readonly globals: Environment = { bindings: new Map(), types: new Map() }
@@ -102,9 +143,17 @@ export class Interpreter {
     private execute(statement: Statement, env: Environment): void {
         switch (statement.kind) {
             case 'Import': {
-                const module = ['juno', 'juno:node', 'juno:types', 'types'].includes(statement.module)
+                const module = ['juno', 'juno:node', 'juno:types', 'juno:async', 'types'].includes(statement.module)
                     ? resolveModule(statement.module) as Record<string, unknown>
                     : this.loadLocalModule(statement.module, env)
+                if (statement.module === 'juno:async' && !(module as Record<string, unknown>).__junoTypes) {
+                    const source = readFileSync(resolve(__dirname, '../../Modules/async.ts'), 'utf8')
+                    const runtimeTypes: Record<string, TypeAlias> = {}
+                    for (const [name, symbol] of hostDeclarations(source)) if (symbol.kind === 'type') {
+                        runtimeTypes[name] = { value: symbol.value, generics: symbol.generics, genericDefaults: symbol.genericDefaults }
+                    }
+                    Object.defineProperty(module, '__junoTypes', { value: runtimeTypes, configurable: true })
+                }
                 const adaptedModule = this.adaptModule(module, env)
                 if (statement.defaultImport) this.declare(env, statement.defaultImport, adaptedModule, false)
                 for (const name of statement.namedImports) {
@@ -258,7 +307,19 @@ export class Interpreter {
         if (source === undefined) throw new Error(`Cannot find module '${specifier}'`)
         if (!/\.jn$/i.test(file)) {
             const loaded = require(file) as Record<string, unknown>
-            return loaded && typeof loaded === 'object' ? loaded : { default: loaded }
+            const nativeModule = loaded && (typeof loaded === 'object' || typeof loaded === 'function') ? loaded : { default: loaded }
+            const module: Record<string, unknown> = { ...nativeModule }
+            const declarations = hostDeclarations(source)
+            const runtimeTypes: Record<string, TypeAlias> = {}
+            for (const [name, symbol] of declarations) if (symbol.kind === 'type') {
+                runtimeTypes[name] = { value: symbol.value, generics: symbol.generics, genericDefaults: symbol.genericDefaults }
+            }
+            if (Object.keys(runtimeTypes).length) {
+                const existing = (module as Record<string, unknown>).__junoTypes
+                if (existing && typeof existing === 'object') Object.assign(existing, runtimeTypes)
+                else Object.defineProperty(module, '__junoTypes', { value: runtimeTypes, configurable: true })
+            }
+            return module
         }
         const previousDirectory = this.currentDirectory
         const previousFile = this.currentFile
@@ -752,6 +813,7 @@ export class Interpreter {
     }
 
     private callFunction(fn: RuntimeFunction, args: unknown[], thisValue?: unknown): unknown {
+        if (statementsContainAwait(fn.body)) return this.callFunctionAsync(fn, args, thisValue)
         this.callStack.push({ name: fn.name ?? '<anonymous>', file: fn.file, loc: fn.loc })
         const local = this.childEnvironment(fn.closure)
         if (thisValue !== undefined) local.bindings.set('this', { value: thisValue, mutable: false })
@@ -775,6 +837,184 @@ export class Interpreter {
             throw error
         } finally {
             this.callStack.pop()
+        }
+    }
+
+    private async callFunctionAsync(fn: RuntimeFunction, args: unknown[], thisValue?: unknown): Promise<unknown> {
+        this.callStack.push({ name: fn.name ?? '<anonymous>', file: fn.file, loc: fn.loc })
+        const local = this.childEnvironment(fn.closure)
+        if (thisValue !== undefined) local.bindings.set('this', { value: thisValue, mutable: false })
+        let argumentIndex = 0
+        for (const param of fn.params) {
+            if (param.rest) {
+                if (param.name !== '_') this.declare(local, param.name, args.slice(argumentIndex), true)
+                argumentIndex = args.length
+            } else {
+                const value = argumentIndex < args.length ? args[argumentIndex] : param.defaultValue ? this.evaluate(param.defaultValue, local) : null
+                argumentIndex++
+                if (param.name !== '_') this.declare(local, param.name, value, true, param.type)
+            }
+        }
+        try {
+            await this.executeStatementsAsync(fn.body, local)
+            return null
+        } catch (error) {
+            if (error instanceof ReturnValue) return error.value
+            if (error instanceof BreakSignal) throw new SyntaxError("'break' cannot cross a function boundary")
+            throw error
+        } finally {
+            this.callStack.pop()
+        }
+    }
+
+    private async executeStatementsAsync(statements: Statement[], env: Environment): Promise<void> {
+        for (const statement of statements) await this.executeAsync(statement, env)
+    }
+
+    private async executeAsync(statement: Statement, env: Environment): Promise<void> {
+        if (!statementContainsAwait(statement)) { this.execute(statement, env); return }
+        switch (statement.kind) {
+            case 'Variable': {
+                if (statement.type) this.registerTypeDeclarations(statement.type, env)
+                let value = statement.initializer ? await this.evaluateAsync(statement.initializer, env) : null
+                if (statement.type && value && typeof value === 'object' && !Array.isArray(value)) value = this.applyTypeDefaults(value, statement.type, env)
+                this.declare(env, statement.name, value, statement.mutable, statement.type ?? this.inferRuntimeValueType(value))
+                return
+            }
+            case 'Destructure': {
+                const value = await this.evaluateAsync(statement.initializer, env)
+                if (value === null || typeof value !== 'object') throw new TypeError('Object destructuring requires an object')
+                for (const binding of statement.bindings) this.declare(env, binding.name, (value as any)[binding.name], statement.mutable)
+                return
+            }
+            case 'ArrayDestructure': {
+                const source = await this.evaluateAsync(statement.initializer, env) as any
+                const values = Array.isArray(source) ? [...source] : typeof source?.toArray === 'function' ? await source.toArray() : null
+                if (!values) throw new TypeError('Array destructuring requires an array, tuple, or value with toArray()')
+                for (const binding of statement.bindings) if (binding.name && binding.name !== '_') this.declare(env, binding.name, binding.rest ? values.slice(binding.index) : values[binding.index] ?? null, statement.mutable)
+                return
+            }
+            case 'Return': throw new ReturnValue(statement.value ? await this.evaluateAsync(statement.value, env) : null)
+            case 'ExpressionStatement': await this.evaluateAsync(statement.expression, env); return
+            case 'If': {
+                const body = this.requireCondition(await this.evaluateAsync(statement.condition, env)) ? statement.consequent : (statement.alternate ?? [])
+                await this.executeStatementsAsync(body, this.childEnvironment(env)); return
+            }
+            case 'While': {
+                while (this.requireCondition(await this.evaluateAsync(statement.condition, env))) {
+                    try { await this.executeStatementsAsync(statement.body, this.childEnvironment(env)) }
+                    catch (error) { if (error instanceof BreakSignal) break; throw error }
+                }
+                return
+            }
+            case 'ForOf': {
+                const iterable = await this.evaluateAsync(statement.iterable, env) as any
+                const values = Array.isArray(iterable) || iterable?.[Symbol.iterator] ? iterable : typeof iterable?.toArray === 'function' ? await iterable.toArray() : iterable
+                for (const value of values) {
+                    const local = this.childEnvironment(env)
+                    this.declare(local, statement.binding, value, statement.mutable)
+                    try { await this.executeStatementsAsync(statement.body, local) }
+                    catch (error) { if (error instanceof BreakSignal) break; throw error }
+                }
+                return
+            }
+            case 'Export': await this.executeAsync(statement.declaration, env); return
+            default: this.execute(statement, env)
+        }
+    }
+
+    private async evaluateAsync(expression: Expression, env: Environment): Promise<any> {
+        if (expression.kind === 'Unary' && expression.operator === 'await') return await this.evaluateAsync(expression.operand, env)
+        if (expression.kind === 'Conditional') {
+            return this.requireCondition(await this.evaluateAsync(expression.condition, env))
+                ? this.evaluateAsync(expression.consequent, env)
+                : this.evaluateAsync(expression.alternate, env)
+        }
+        if (expression.kind === 'Match') {
+            const value = await this.evaluateAsync(expression.value, env)
+            for (const item of expression.cases) {
+                const bindings = new Map<string, unknown>()
+                if (item.pattern && !this.matchesPattern(value, item.pattern, env, bindings)) continue
+                const local = this.childEnvironment(env)
+                if (item.pattern && expression.value.kind === 'Identifier') {
+                    const narrowedType = this.patternTypeNode(item.pattern, env)
+                    if (narrowedType) this.declare(local, expression.value.name, value, false, narrowedType)
+                }
+                for (const [name, binding] of bindings) this.declare(local, name, binding, false)
+                if (item.guard && !this.requireCondition(await this.evaluateAsync(item.guard, local))) continue
+                try { await this.executeStatementsAsync(item.body, local); return null }
+                catch (error) { if (error instanceof ReturnValue) return error.value; throw error }
+            }
+            return null
+        }
+        if (expression.kind === 'Try') {
+            let result: unknown
+            try {
+                let attempted: any
+                if (expression.body) {
+                    try { await this.executeStatementsAsync(expression.body, this.childEnvironment(env)); attempted = null }
+                    catch (error) { if (error instanceof ReturnValue) attempted = error.value; else throw error }
+                } else attempted = await this.evaluateAsync(expression.value!, env)
+                if (!attempted || typeof attempted !== 'object' || typeof attempted.ok !== 'boolean') throw new TypeError('try expects a Result value')
+                if (attempted.ok) result = attempted.value
+                else {
+                    let handled = false
+                    for (const clause of expression.catches) {
+                        const taggedMatch = clause.type?.kind === 'NamedType' && attempted.error !== null && typeof attempted.error === 'object' && attempted.error.type === clause.type.name
+                        if (clause.type && !taggedMatch && !this.matchesTypeNode(attempted.error, clause.type, env)) continue
+                        const local = this.childEnvironment(env)
+                        if (clause.binding) this.declare(local, clause.binding, attempted.error, false)
+                        try { await this.executeStatementsAsync(clause.body, local); result = null }
+                        catch (error) { if (error instanceof ReturnValue) result = error.value; else throw error }
+                        handled = true
+                        break
+                    }
+                    if (!handled) throw attempted.error
+                }
+            } finally {
+                if (expression.finallyBody) {
+                    try { await this.executeStatementsAsync(expression.finallyBody, this.childEnvironment(env)) }
+                    catch (error) { if (!(error instanceof ReturnValue)) throw error }
+                }
+            }
+            return result
+        }
+        const resolved = await this.resolveAwaitExpressions(expression, env)
+        return this.evaluate(resolved, env)
+    }
+
+    private async resolveAwaitList(expressions: Expression[], env: Environment): Promise<Expression[]> {
+        const resolved: Expression[] = []
+        for (const expression of expressions) resolved.push(await this.resolveAwaitExpressions(expression, env))
+        return resolved
+    }
+
+    private async resolveAwaitExpressions(expression: Expression, env: Environment): Promise<Expression> {
+        if (expression.kind === 'Unary' && expression.operator === 'await') return { kind: 'Literal', value: await this.evaluateAsync(expression.operand, env) } as Expression
+        switch (expression.kind) {
+            case 'Template': {
+                const parts: (string | Expression)[] = []
+                for (const part of expression.parts) parts.push(typeof part === 'string' ? part : await this.resolveAwaitExpressions(part, env))
+                return { ...expression, parts }
+            }
+            case 'Assignment': return { ...expression, value: await this.resolveAwaitExpressions(expression.value, env) }
+            case 'MemberAssignment': return { ...expression, object: await this.resolveAwaitExpressions(expression.object, env), index: expression.index ? await this.resolveAwaitExpressions(expression.index, env) : undefined, value: await this.resolveAwaitExpressions(expression.value, env) }
+            case 'Array': return { ...expression, elements: await this.resolveAwaitList(expression.elements, env) }
+            case 'Spread': return { ...expression, value: await this.resolveAwaitExpressions(expression.value, env) }
+            case 'Object': {
+                const properties: typeof expression.properties = []
+                for (const property of expression.properties) properties.push({ ...property, value: property.value.kind === 'Function' ? property.value : await this.resolveAwaitExpressions(property.value, env) })
+                return { ...expression, properties }
+            }
+            case 'Unary': return { ...expression, operand: await this.resolveAwaitExpressions(expression.operand, env) }
+            case 'Binary': return { ...expression, left: await this.resolveAwaitExpressions(expression.left, env), right: await this.resolveAwaitExpressions(expression.right, env) }
+            case 'Is': return { ...expression, value: await this.resolveAwaitExpressions(expression.value, env) }
+            case 'Member': return { ...expression, object: await this.resolveAwaitExpressions(expression.object, env) }
+            case 'Index': return { ...expression, object: await this.resolveAwaitExpressions(expression.object, env), index: await this.resolveAwaitExpressions(expression.index, env) }
+            case 'Call': return { ...expression, callee: await this.resolveAwaitExpressions(expression.callee, env), args: await this.resolveAwaitList(expression.args, env) }
+            case 'Conditional': return { kind: 'Literal', value: await this.evaluateAsync(expression, env) } as Expression
+            case 'Function': return expression
+            default: return expression
         }
     }
 
@@ -1698,6 +1938,10 @@ export class Interpreter {
         if (object === null || object === undefined) {
             if (optional) return null
             throw new TypeError(`Cannot read property '${property}' of null`)
+        }
+        if (object instanceof Promise && property === 'then') return (...callbacks: unknown[]) => {
+            if (callbacks.length !== 1 || typeof callbacks[0] !== 'function') throw new TypeError('Promise.then() accepts exactly one fulfilled callback')
+            return object.then(callbacks[0] as (value: unknown) => unknown)
         }
         if (property === 'indices' && (typeof object === 'string' || Array.isArray(object))) {
             return (resolveModule('juno') as Record<string, any>).Range(object.length)

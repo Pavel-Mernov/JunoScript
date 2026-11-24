@@ -1,6 +1,7 @@
 import juno from './juno'
 import junoNode from './juno-node'
 import types from './types'
+import async from './async'
 
 export type {
     Awaited,
@@ -31,13 +32,14 @@ export const modules = {
     juno,
     'juno:node': junoNode,
     'juno:types': types,
+    'juno:async': async,
     types
 } as const
 
 export type ModuleName = keyof typeof modules
 
 export function resolveModule(name: string): (typeof modules)[ModuleName] {
-    if (name !== 'juno' && name !== 'juno:node' && name !== 'juno:types' && name !== 'types') {
+    if (name !== 'juno' && name !== 'juno:node' && name !== 'juno:types' && name !== 'juno:async' && name !== 'types') {
         throw new Error(`Unknown JunoScript module '${name}'`)
     }
     return modules[name]
