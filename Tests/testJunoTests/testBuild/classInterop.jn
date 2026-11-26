@@ -1,0 +1,9 @@
+import { NativeAccumulator } from './nativeClass.ts'
+
+export const sampleAccumulator = NativeAccumulator(1)
+
+export fun createAccumulator(value: number): NativeAccumulator =
+    return NativeAccumulator(value)
+
+export fun createZero(): NativeAccumulator =
+    return NativeAccumulator.zero()

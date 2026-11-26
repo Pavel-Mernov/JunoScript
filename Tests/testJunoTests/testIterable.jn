@@ -1,0 +1,59 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testIterable.jn')
+
+type IterableArray = Iterable<string | number> & {
+    data: (string | number)[]
+    toArray(): (string | number)[] = this.data
+}
+
+const array: IterableArray = {
+    data: ['0', 1, 2, 3, 'four'],
+}
+
+for const item of array
+    checkOutput(item)
+
+checkOutput(array.toArray())
+type ObjectIterable = Iterable<{ id: number }> & {
+    data: { id: number }[]
+    toArray(): { id: number }[] = this.data
+}
+const objectIterable: ObjectIterable = {
+    data: [{ id: 1 }],
+}
+checkOutput("iterable includes uses JN ==:", objectIterable.includes({ id: 1 }))
+
+checkOutput("map:", array.map((item) => item.toString()))
+const mappedObjects = array.map((item) => { value: item.toString() })
+checkOutput("map to objects:", mappedObjects)
+checkOutput("filter:", array.filter((item) => item != 2))
+checkOutput("flatMap:", array.flatMap((item) => [item]))
+checkOutput("join:", array.join(" | "))
+checkOutput("slice:", array.slice(1, 4))
+checkOutput("toReversed:", array.toReversed())
+checkOutput("concat:", array.concat(['five']))
+checkOutput("every:", array.every((item) => item != null))
+# No element matches this predicate, so some() should return false.
+checkOutput("some:", array.some((item) => item == 99))
+array.forEach((item) => checkOutput("forEach:", item))
+
+const numbers = [1, 2]
+const words = ['three', 'four']
+const spreadArray = [0, ...numbers, ...words, 5]
+checkOutput("array spread:", spreadArray)
+
+const iterableSpread = ['before', ...array, 'after']
+checkOutput("iterable spread:", iterableSpread)
+
+fun collect(...values: (string | number)[]): (string | number)[] =
+    return values
+checkOutput("argument spread:", collect(0, ...numbers, ...words, 5))
+checkOutput("iterable argument spread:", collect(...array))
+
+const mixedSpread = [null, ...[1, true], ...'ok', { value: 2 }]
+checkOutput("mixed type spread:", mixedSpread)
+
+fun collectAny(...values: any[]): any[] =
+    return values
+checkOutput("mixed argument spread:", collectAny('start', ...[1, true], ...'ok', { value: 2 }, null))

@@ -1,0 +1,58 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testBoolean.jn')
+import { Math, Boolean } from 'juno'
+
+const ready = true
+const hasName = false
+
+const status = ready ? "ready" : "waiting"
+const alternateStatus = hasName ? "named" : "anonymous"
+checkOutput("ternary:", status, alternateStatus)
+
+let optionalName: string? = null
+let displayName = optionalName ?? "Guest"
+checkOutput("nullish:", displayName)
+let providedName: string? = "Pasha"
+let chosenName = providedName ?? "Guest"
+checkOutput("nullish with a value:", chosenName)
+
+if !hasName
+    checkOutput("not hasName")
+
+if ready & !hasName
+    checkOutput("AND condition")
+
+if hasName | ready
+    checkOutput("OR condition")
+
+if ready & (hasName | !hasName)
+    checkOutput("combined condition")
+
+const number = ready ? 42 : 0
+const fallbackNumber = optionalName == null ? 7 : 8
+checkOutput("ternary values:", number, fallbackNumber)
+
+const defaultTruthyObject = { label: 'default' }
+const customFalsyObject = {
+    fun toBoolean(): boolean =
+        return false
+}
+const customTruthyObject = {
+    fun toBoolean(): boolean =
+        return true
+}
+
+checkOutput("object !!:", !!defaultTruthyObject, !!customFalsyObject, !!customTruthyObject)
+checkOutput("object ternary:", defaultTruthyObject ? 'true' : 'false', customFalsyObject ? 'true' : 'false')
+if customFalsyObject
+    checkOutput("custom falsy object branch must not run")
+else
+    checkOutput("custom falsy object condition: false")
+
+checkOutput("Boolean numbers:", Boolean(0), Boolean(-0), Boolean(1), Boolean(-1), Boolean(Math.NaN), Boolean(Math.Infinity))
+checkOutput("Boolean BigInt:", Boolean(0n), Boolean(1n), Boolean(-1n))
+checkOutput("Boolean strings:", Boolean(''), Boolean('0'), Boolean('false'), Boolean('Juno'))
+checkOutput("Boolean null and booleans:", Boolean(null), Boolean(false), Boolean(true))
+checkOutput("Boolean collections:", Boolean([]), Boolean([0]), Boolean({}), Boolean({ value: 0 }))
+checkOutput("Boolean custom objects:", Boolean(customFalsyObject), Boolean(customTruthyObject), Boolean(defaultTruthyObject))

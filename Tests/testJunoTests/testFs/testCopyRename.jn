@@ -1,0 +1,9 @@
+import { expect } from 'juno:test'
+import { copyFileSync, existsSync, readFileSync, renameSync } from 'juno:node:fs'
+
+copyFileSync('sandbox/nested/source.txt', 'sandbox/copy.txt')
+renameSync('sandbox/copy.txt', 'sandbox/renamed.txt')
+
+const renamed = readFileSync('sandbox/renamed.txt')
+expect.toBeEqual(renamed, "JunoScript")
+expect.toBeEqual(existsSync('sandbox/renamed.txt'), true)

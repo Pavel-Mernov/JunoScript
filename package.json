@@ -9,9 +9,15 @@
     "build": "tsc --target ES2022 --module commonjs --moduleResolution node --strict --skipLibCheck --types node --outDir .build-tools Lexer/lexer.ts Lexer/parser.ts CLI/generate-juno-types.ts && node .build-tools/CLI/generate-juno-types.js && tsc",
     "start": "node ./dist/CLI/junode.js",
     "test:build": "node Tests/testBuild/run.cjs",
-    "test:fs": "node Tests/testFs/run.cjs"
+    "test:fs": "node Tests/testFs/run.cjs",
+    "test:juno": "npm run build && node Tests/testJunoTests/run.cjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.5"
+  },
+  "dependencies": {
+    "@jest/fake-timers": "^30.5.2",
+    "expect": "^30.5.2",
+    "jest-mock": "^30.5.2"
   }
 }

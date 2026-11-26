@@ -1,0 +1,12 @@
+export import {
+    createProfile,
+    formatValue,
+    scaleNumbers,
+    applyMapper,
+    label,
+    version,
+    nestedValue
+} from './native.ts'
+
+const localExports = { runtime: 'Juno', interop: true }
+export const { runtime, interop } = localExports

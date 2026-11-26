@@ -1,0 +1,19 @@
+import { expect } from 'juno:test'
+import { Iterable, Range, Array, Error, Result, ok } from 'juno:types'
+
+const textIndices = "abc".indices
+const arrayIndices = [10, 20].indices
+const filled = Array<number>(3, { fill: (element, index) => index })
+const successful: Result<number> = ok(42)
+fun createTestError(): Error =
+    return Error('Juno types test')
+const failed: Result<null, Error> = Error.result(createTestError())
+
+expect.toBeEqual(textIndices.toArray(), [0, 1, 2])
+expect.toBeEqual(arrayIndices.toArray(), [0, 1])
+expect.toBeEqual(filled.toArray(), [0, 1, 2])
+expect.toHaveProperty(successful, 'ok', true)
+expect.toHaveProperty(successful, 'value', 42)
+expect.toHaveProperty(failed, 'ok', false)
+expect.toHaveProperty(failed, 'error.type', 'Error')
+expect.toHaveProperty(failed, 'error.message', 'Juno types test')

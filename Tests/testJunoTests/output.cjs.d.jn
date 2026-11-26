@@ -1,0 +1,7 @@
+# Static signatures for the CommonJS snapshot helper.
+type OutputCheck = {
+    fun (...values: any[]): null
+}
+
+export fun outputFor(file: string): OutputCheck =
+    return null

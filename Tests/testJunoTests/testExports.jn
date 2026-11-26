@@ -1,0 +1,15 @@
+export const answer = 42
+
+# Destructured Juno export.
+const destructuredSource = { first: 'one', second: 2 }
+export const { first, second } = destructuredSource
+
+# Re-export named functions from a TypeScript module.
+export import { fromCharCode, fromCodePoint } from '../../types/string.ts'
+
+export fun greet(name: string): string =
+    return `Hello, ${name}`
+
+export type Greeting = {
+    text: string
+}

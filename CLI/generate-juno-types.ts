@@ -16,9 +16,7 @@ if (!declaration || declaration.kind !== 'Export' || declaration.declaration.kin
 function printType(type: TypeNode, generics: Set<string>): string {
     switch (type.kind) {
         case 'NamedType':
-            if (type.name === 'string' || type.name === 'number' || type.name === 'boolean' || type.name === 'bigint' || type.name === 'symbol' || type.name === 'unknown' || type.name === 'never' || type.name === 'any' || type.name === 'null') return type.name
-            if (type.name === 'void' || type.name === 'object') return type.name
-            return generics.has(type.name) ? type.name : type.name
+            return type.name === 'any' ? 'unknown' : type.name
         case 'LiteralType': return typeof type.value === 'string' ? JSON.stringify(type.value) : String(type.value)
         case 'GenericType': return `${type.name}<${type.args.map(argument => printType(argument, generics)).join(', ')}>`
         case 'ArrayType': return `Array<${printType(type.element, generics)}>`
@@ -32,11 +30,11 @@ function printType(type: TypeNode, generics: Set<string>): string {
             const prefix = `${member.readonly ? 'readonly ' : ''}${member.name}${member.optional ? '?' : ''}`
             if (member.accessor === 'get') return `get ${member.name}(): ${printType(member.type, generics)}`
             if (member.accessor === 'set') {
-                const params = (member.params ?? []).map(param => `${param.name}: ${param.type ? printType(param.type, generics) : 'any'}`).join(', ')
+                const params = (member.params ?? []).map(param => `${param.name}: ${param.type ? printType(param.type, generics) : 'unknown'}`).join(', ')
                 return `set ${member.name}(${params})`
             }
             if (!member.method) return `${prefix}: ${printType(member.type, generics)}`
-            const params = (member.params ?? []).map((param, index) => `${param.name || `arg${index}`}${param.defaultValue ? '?' : ''}: ${param.type ? printType(param.type, generics) : 'any'}`).join(', ')
+            const params = (member.params ?? []).map((param, index) => `${param.name || `arg${index}`}${param.defaultValue ? '?' : ''}: ${param.type ? printType(param.type, generics) : 'unknown'}`).join(', ')
             return `${prefix}(${params}): ${printType(member.type, generics)}`
         }).join('; ')} }`
     }

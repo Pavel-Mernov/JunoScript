@@ -1,0 +1,15 @@
+import { expect } from 'juno:test'
+import fs, { existsSync, FileStat, removeSync, statSync } from 'juno:node:fs'
+
+const info = statSync('sandbox/renamed.txt')
+const entries = fs.readdirSync('sandbox')
+expect.toBeEqual(isType<FileStat>(info), true)
+expect.toBeEqual(info.isFile, true)
+expect.toBeEqual(info.size, 10)
+expect.toBeEqual(entries.includes('nested'), true)
+expect.toBeEqual(entries.includes('renamed.txt'), true)
+
+removeSync('sandbox/renamed.txt')
+expect.toBeEqual(existsSync('sandbox/renamed.txt'), false)
+removeSync('sandbox', true)
+expect.toBeEqual(existsSync('sandbox'), false)

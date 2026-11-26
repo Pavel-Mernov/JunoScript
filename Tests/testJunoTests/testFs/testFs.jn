@@ -1,0 +1,10 @@
+import { expect } from 'juno:test'
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'juno:node:fs'
+
+mkdirSync('sandbox/nested', true)
+const written = writeFileSync('sandbox/nested/source.txt', 'Juno')
+expect.toBeEqual(written == null, true)
+appendFileSync('sandbox/nested/source.txt', 'Script')
+
+const source = readFileSync('sandbox/nested/source.txt')
+expect.toBeEqual(source, "JunoScript")

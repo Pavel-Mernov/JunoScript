@@ -1,0 +1,156 @@
+# Type declarations for the native juno:test runtime module.
+type Matchers = {
+    that(actual: any): JestMatchers
+    toBe<T>(actual: T, expected: T): void
+    toBeEqual<T>(actual: T, expected: T): void
+    toEqual<T>(actual: T, expected: T): void
+    toStrictEqual<T>(actual: T, expected: T): void
+    toBeTrue(actual: boolean): void
+    toBeTruthy(actual: any): void
+    toBeFalse(actual: boolean): void
+    toBeFalsy(actual: any): void
+    toBeDefined<T>(actual: T): void
+    toBeUndefined(actual: any): void
+    toBeNull<T>(actual: T): void
+    toBeNaN(actual: number): void
+    toBeCloseTo(actual: number, expected: number, precision: number = null): void
+    toBeGreaterThan(actual: number, expected: number): void
+    toBeGreaterThanOrEqual(actual: number, expected: number): void
+    toBeLessThan(actual: number, expected: number): void
+    toBeLessThanOrEqual(actual: number, expected: number): void
+    toContain(actual: any, expected: any): void
+    toContainEqual(actual: any, expected: any): void
+    toHaveLength(actual: any, expected: number): void
+    toHaveProperty(actual: object, path: string, expected: any = null): void
+    toMatch(actual: string, expected: string | RegEx): void
+    toMatchObject(actual: object, expected: object): void
+    toThrow(actual: (any) -> any, expected: any = null): void
+    toBeInstanceOf(actual: any, expected: any): void
+    toHaveBeenCalled(actual: (any) -> any): void
+    toHaveBeenCalledTimes(actual: (any) -> any, count: number): void
+    toHaveBeenCalledWith(actual: (any) -> any, ...args: any[]): void
+    toHaveBeenLastCalledWith(actual: (any) -> any, ...args: any[]): void
+    toHaveBeenNthCalledWith(actual: (any) -> any, nth: number, ...args: any[]): void
+    toHaveReturned(actual: (any) -> any): void
+    toHaveReturnedTimes(actual: (any) -> any, count: number): void
+    toHaveReturnedWith(actual: (any) -> any, value: any): void
+    toHaveLastReturnedWith(actual: (any) -> any, value: any): void
+    toHaveNthReturnedWith(actual: (any) -> any, nth: number, value: any): void
+    any(constructorValue: any): any
+    anything(): any
+    arrayContaining(value: any[]): any
+    arrayOf(value: any): any
+    closeTo(value: number, precision: number = null): any
+    objectContaining(value: object): any
+    stringContaining(value: string): any
+    stringMatching(value: string | RegEx): any
+    assertions(count: number): void
+    hasAssertions(): void
+    extend(matchers: object): void
+}
+
+type JestMatchers = {
+    readonly not: JestMatchers
+    toBe(expected: any): void
+    toEqual(expected: any): void
+    toStrictEqual(expected: any): void
+    toBeTruthy(): void
+    toBeFalsy(): void
+    toBeDefined(): void
+    toBeUndefined(): void
+    toBeNull(): void
+    toBeNaN(): void
+    toBeCloseTo(expected: number, precision: number = null): void
+    toContain(expected: any): void
+    toContainEqual(expected: any): void
+    toHaveLength(expected: number): void
+    toHaveProperty(path: string, expected: any = null): void
+    toMatch(expected: string | RegEx): void
+    toMatchObject(expected: object): void
+    toThrow(expected: any = null): void
+    toHaveBeenCalled(): void
+    toHaveBeenCalledTimes(count: number): void
+    toHaveBeenCalledWith(...args: any[]): void
+    toHaveReturnedWith(value: any): void
+}
+
+type MockFunction = {
+    fun (...args: any[]): any
+    readonly mock: any
+    mockClear(): MockFunction
+    mockReset(): MockFunction
+    mockRestore(): void
+    mockName(name: string): MockFunction
+    getMockName(): string
+    getMockImplementation(): ((any) -> any) | null
+    mockImplementation(implementation: (any) -> any): MockFunction
+    mockImplementationOnce(implementation: (any) -> any): MockFunction
+    mockReturnThis(): MockFunction
+    mockReturnValue(value: any): MockFunction
+    mockReturnValueOnce(value: any): MockFunction
+    mockResolvedValue(value: any): MockFunction
+    mockResolvedValueOnce(value: any): MockFunction
+    mockRejectedValue(value: any): MockFunction
+    mockRejectedValueOnce(value: any): MockFunction
+}
+
+type TestFunction = {
+    fun (name: string, body: () -> any): any
+    only(name: string, body: () -> any): any
+    skip(name: string, body: () -> any): void
+}
+
+export const expect : Matchers & { not: Matchers } = null
+
+export fun Mock(implementation: (any) -> any = null): MockFunction =
+    return null
+
+export fun spyOn(target: object, method: string): MockFunction =
+    return null
+
+export fun replaceProperty(target: object, property: string, value: any): any =
+    return null
+
+export fun isMockFunction(value: any): boolean =
+    return false
+
+export fun clearAllMocks(): void =
+    return null
+export fun resetAllMocks(): void =
+    return null
+export fun restoreAllMocks(): void =
+    return null
+
+export fun describe(name: string, body: () -> any): any =
+    return null
+
+export const test: TestFunction = null
+export const it: TestFunction = null
+
+export fun beforeEach(callback: () -> any): void =
+    return null
+export fun afterEach(callback: () -> any): void =
+    return null
+
+export fun useFakeTimers(): void =
+    return null
+export fun useRealTimers(): void =
+    return null
+export fun clearAllTimers(): void =
+    return null
+export fun runAllTimers(): void =
+    return null
+export fun runAllTimersAsync(): Promise<void> =
+    return null
+export fun runOnlyPendingTimers(): void =
+    return null
+export fun advanceTimersByTime(milliseconds: number): void =
+    return null
+export fun advanceTimersByTimeAsync(milliseconds: number): Promise<void> =
+    return null
+export fun advanceTimersToNextTimer(steps: number = null): void =
+    return null
+export fun setSystemTime(time: number): void =
+    return null
+export fun getTimerCount(): number =
+    return 0

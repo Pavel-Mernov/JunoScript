@@ -1,0 +1,43 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testMap.jn')
+import { Map, ValueMap } from 'juno:types'
+
+const map = Map(['one', 1], ['two', 2])
+# map.set(3, 'invalid')
+checkOutput('initial:', map.length, map.mapKeys(), map.values(), map.toArray())
+checkOutput('get:', map.get('one'), map.get('missing'))
+checkOutput('has key:', map.hasKey('two'), map.hasKey('missing'))
+checkOutput('includes pair:', map.includes(['two', 2]), map.includes(['two', 22]))
+
+map.set('two', 22).set('three', 3)
+checkOutput('set replaces and appends:', map.length, map.toArray())
+checkOutput('delete:', map.delete('one'), map.delete('missing'), map.toArray())
+
+const structural = Map([{ id: 1 }, 'first'], [{ id: 2 }, 'second'])
+checkOutput('structural get:', structural.get({ id: 2 }))
+checkOutput('structural has key:', structural.hasKey({ id: 2 }))
+checkOutput('structural includes pair:', structural.includes([{ id: 2 }, 'second']))
+structural.set({ id: 2 }, 'replaced')
+checkOutput('structural replacement:', structural.length, structural.toArray())
+
+const fromMap = Map.from([['a', 1], ['b', 2]])
+# fromMap.set(3, 'invalid')
+checkOutput('from iterable:', fromMap.toArray())
+
+const object = Map.toObject(Map(['name', 'Ada'], [42, 'answer'], ['__proto__', 'safe']))
+checkOutput('to object:', object['name'], object[42], object['__proto__'])
+
+map.clear()
+checkOutput('clear:', map.length, map.toArray())
+
+const valueMapKey = { id: 1, nested: { active: true } }
+const valueMap = ValueMap([valueMapKey, 'first'], [{ id: 1, nested: { active: true } }, 'duplicate'])
+valueMapKey.id = 2
+valueMapKey.nested.active = false
+checkOutput('value map deduplicates snapshots:', valueMap.length)
+checkOutput('value map retains frozen key:', valueMap.hasKey({ id: 1, nested: { active: true } }))
+checkOutput('value map ignores source mutation:', valueMap.hasKey(valueMapKey))
+valueMap.set(valueMapKey, 'second')
+checkOutput('value map adds changed key:', valueMap.length, valueMap.toArray())
+checkOutput('value map structural get:', valueMap.get({ id: 1, nested: { active: true } }))

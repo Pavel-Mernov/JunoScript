@@ -1,0 +1,12 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testRegEx.jn')
+
+const literal: RegEx = /<...>/
+const constructed: RegEx = RegEx('<...>')
+const flagged: RegEx = /hello/gi
+
+checkOutput(literal.test('<abc>'))
+checkOutput(constructed.test('<xyz>'))
+checkOutput(flagged.test('Hello'))
+checkOutput(12 / 3)

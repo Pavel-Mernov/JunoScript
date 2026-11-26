@@ -1,0 +1,55 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testSet.jn')
+import { Set, ValueSet } from 'juno:types'
+
+const left = Set(1, 2, 3)
+const right = Set(3, 4, 5)
+const inferredNumbers = Set(1, 2, 3)
+inferredNumbers.add(4)
+const inferredFrom = Set.from([10, 20])
+inferredFrom.add(30)
+const inferredUnion = Set.union([1, 2], [3, 4])
+inferredUnion.add(5)
+const inferredMixed = Set(1, 'two')
+inferredMixed.add(3).add('four')
+checkOutput('inferred Set<number>:', inferredNumbers.toArray(), inferredFrom.toArray(), inferredUnion.toArray())
+checkOutput('inferred Set<number | string>:', inferredMixed.toArray())
+# inferredNumbers.add('invalid')
+
+checkOutput('instance union:', left.union(right).toArray())
+checkOutput('instance intersection:', left.intersection(right).toArray())
+checkOutput('instance subtract:', left.subtract(right).toArray())
+checkOutput('instance symmetric difference:', left.symmetricDifference(right).toArray())
+checkOutput('instance subset:', Set(1, 2).isSubset(left), left.isSubset(right))
+checkOutput('instance superset:', left.isSuperset([1, 2]), left.isSuperset(right))
+checkOutput('instance disjoint:', left.isDisjoint([4, 5]), left.isDisjoint(right))
+
+checkOutput('static union:', Set.union([1, 2, 3], [3, 4, 5]).toArray())
+checkOutput('static intersection:', Set.intersection([1, 2, 3], [3, 4, 5]).toArray())
+checkOutput('static subtract:', Set.subtract([1, 2, 3], [3, 4, 5]).toArray())
+checkOutput('static symmetric difference:', Set.symmetricDifference([1, 2, 3], [3, 4, 5]).toArray())
+checkOutput('static subset:', Set.isSubset([1, 2], [1, 2, 3]))
+checkOutput('static superset:', Set.isSuperset([1, 2, 3], [1, 2]))
+checkOutput('static disjoint:', Set.isDisjoint([1, 2], [3, 4]))
+
+const objectLeft = Set({ id: 1 }, { id: 2 })
+const objectRight = Set({ id: 2 }, { id: 3 })
+checkOutput('structural intersection:', objectLeft.intersection(objectRight).toArray())
+checkOutput('structural array intersection:', objectLeft.intersection([{ id: 2 }, { id: 3 }]).toArray())
+checkOutput('static structural array intersection:', Set.intersection([{ id: 1 }, { id: 2 }], [{ id: 2 }, { id: 3 }]).toArray())
+
+const valueSetSource = { nested: { value: 1 }, items: [1, 2] }
+const valueSet = ValueSet(valueSetSource, { nested: { value: 1 }, items: [1, 2] })
+valueSetSource.nested.value = 2
+valueSetSource.items.push(3)
+checkOutput('value set deduplicates snapshots:', valueSet.length)
+checkOutput('value set retains old snapshot:', valueSet.includes({ nested: { value: 1 }, items: [1, 2] }))
+checkOutput('value set ignores source mutation:', valueSet.includes(valueSetSource))
+valueSet.add(valueSetSource)
+checkOutput('value set adds changed snapshot:', valueSet.length, valueSet.toArray())
+const storedValue = valueSet.toArray()[0]
+checkOutput('value set stored snapshot:', storedValue.nested.value, storedValue.items.length)
+# storedValue.nested.value = 99
+# storedValue.items.push(4)
+checkOutput('value set deletes structurally:', valueSet.delete({ nested: { value: 1 }, items: [1, 2] }), valueSet.length)

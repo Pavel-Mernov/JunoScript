@@ -1,0 +1,9 @@
+import { outputFor } from '../../output.cjs'
+
+const checkOutput = outputFor('testBuild/testBuildOutput/testBuildLoop.jn')
+import { Range } from 'juno:types'
+
+for const num of Range(3)
+    checkOutput(num)
+
+['name', 23, 'age', 'Paul'].forEach(elem => checkOutput(elem))

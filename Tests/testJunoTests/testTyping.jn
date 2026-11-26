@@ -1,0 +1,151 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testTyping.jn')
+import { Math, Boolean, Number, String } from 'juno'
+
+checkOutput("special numbers:", Math.NaN, Math.Infinity, -Math.Infinity)
+checkOutput("Boolean constructor:", Boolean(0), Boolean(Math.NaN), Boolean(''), Boolean('Juno'))
+
+type BooleanCallable = {
+    fun (value: any): boolean
+}
+
+const booleanCallable: BooleanCallable = {
+    fun (value: any): boolean =
+        return Boolean(value)
+}
+
+checkOutput("callable object:", booleanCallable(0), booleanCallable(1))
+
+type BooleanOverride = {
+    enabled: boolean
+    fun toBoolean(): boolean
+}
+
+const typedBooleanObject: BooleanOverride = {
+    enabled: false,
+    fun toBoolean(): boolean =
+        return this.enabled
+}
+
+checkOutput("typed object boolean:", typedBooleanObject.toBoolean(), !!typedBooleanObject, typedBooleanObject ? "truthy" : "falsy")
+
+checkOutput("string + number:", "value=" + String(42), String(42) + " is the answer")
+checkOutput("string + boolean:", "enabled=" + String(true), String(false) + " value")
+checkOutput("number + boolean:", 10 + Number(true), Number(false) + 10)
+checkOutput("Number(null):", Number(null), Number.isNaN(Number(null)))
+checkOutput("number + Number(null):", 10 + Number(null), Number(null) + 10)
+
+type NumberValue = {
+    value: number
+    fun valueOf(): number
+}
+
+const numberValueObject: NumberValue = {
+    value: 32,
+    fun valueOf(): number =
+        return this.value
+}
+
+type StringValue = {
+    value: string
+    fun valueOf(): string
+}
+
+const stringValueObject: StringValue = {
+    value: "Juno",
+    fun valueOf(): string =
+        return this.value
+}
+
+checkOutput("number + Number(object):", 10 + Number(numberValueObject), Number(numberValueObject) + 10)
+checkOutput("number + object.valueOf():", 10 + numberValueObject.valueOf(), numberValueObject.valueOf() + 10)
+checkOutput("string + String(object):", "Hello, " + String(stringValueObject), String(stringValueObject) + "Script")
+checkOutput("string + object.valueOf():", "Hello, " + stringValueObject.valueOf(), stringValueObject.valueOf() + "Script")
+
+type StringableValue = {
+    value: string
+    fun toString(): string
+}
+
+const stringableObject: StringableValue = {
+    value: "JunoScript",
+    fun toString(): string =
+        return "Stringable(${this.value})"
+}
+
+checkOutput("string + object.toString():", "value=" + String(stringableObject), String(stringableObject) + "!")
+
+# const result1 = 7 + '1'
+
+# checkOutput(result1)
+
+const bigint1 = 1n
+
+type Person = {
+    name: string
+    surname: string?
+    age: number
+    greet() =
+        return "Hello, " + this.name + " " + (this.surname ?? '')
+}
+
+const paul : Person = {
+    name : 'Paul',
+    surname : 'Mernov',
+    age : 23
+}
+
+# `any` must be narrowed before its properties can be used.
+const unknownPerson: any = paul
+
+# unknownPerson.name # type error: check `any` first
+
+if unknownPerson.isType<Person>()
+    checkOutput("narrowed any by type:", unknownPerson.name, unknownPerson.greet())
+
+const unknownAddress: any = { id: 'home' }
+if unknownAddress.has('id')
+    checkOutput("narrowed any by value:", unknownAddress.id)
+
+# An untyped parameter is inferred as `any` and narrowed in the same way.
+fun printInferredAny(value) =
+    if value.isType<Person>()
+        checkOutput("inferred any narrowed to Person:", value.name)
+
+printInferredAny(paul)
+
+const maria : Person? = {
+    age: 22,
+    name : 'Maria'
+}
+
+let peter : Person?
+
+checkOutput(maria?.surname)
+checkOutput("Person: ${paul.name} ${paul.surname}")
+checkOutput(paul.greet())
+checkOutput(maria?.greet())
+
+checkOutput(peter?.surname)
+checkOutput(peter?.greet())
+
+type Address = {
+    id : string | number
+}
+
+type StringOrConst = string | 0 | 1 | -1
+
+type StringEnum = 'one' | 'two' | 'three'
+
+type MultiEnum = 0 | 'one' | true | 'two'
+
+type Enum2 = 
+    | 'one'
+    | 'two'
+    | 0
+
+type Or2 = { name : string }
+    | string
+
+const ex2 : Enum2 = 0

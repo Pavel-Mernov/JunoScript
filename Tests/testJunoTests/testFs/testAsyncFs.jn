@@ -1,0 +1,23 @@
+import { expect } from 'juno:test'
+import { appendFile, copyFile, exists, mkdir, readFile, readdir, remove, rename, stat, writeFile } from 'juno:node:fs'
+
+fun testAsyncFs(): null =
+    await mkdir('sandbox/nested', true)
+    const written = await writeFile('sandbox/nested/source.txt', 'Juno')
+    await appendFile('sandbox/nested/source.txt', 'Script')
+    await copyFile('sandbox/nested/source.txt', 'sandbox/copy.txt')
+    await rename('sandbox/copy.txt', 'sandbox/renamed.txt')
+    const contents = await readFile('sandbox/renamed.txt')
+    const entries = await readdir('sandbox')
+    expect.toBeEqual(written == null, true)
+    expect.toBeEqual(contents, "JunoScript")
+    expect.toBeEqual(entries.includes('renamed.txt'), true)
+    expect.toBeEqual((await stat('sandbox/renamed.txt')).isFile, true)
+    expect.toBeEqual(await exists('sandbox/renamed.txt'), true)
+    await remove('sandbox/renamed.txt')
+    expect.toBeEqual(await exists('sandbox/renamed.txt'), false)
+    await remove('sandbox', true)
+    expect.toBeEqual(await exists('sandbox'), false)
+    return null
+
+testAsyncFs()

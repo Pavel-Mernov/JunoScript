@@ -1,0 +1,32 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testImportExports.jn')
+import {
+    answer,
+    first,
+    second,
+    greet,
+    Greeting,
+    fromCharCode,
+    fromCodePoint
+} from './testExports'
+import { Error, Result, ok } from 'juno:types'
+
+const message: string = greet('Juno')
+const greeting: Greeting = { text: message }
+const known: Error = Error(message)
+const checked: Error = known
+const success: Result<string> = ok(message)
+const failure: Result<null, Error> = Error.result(known)
+
+const text = message
+
+const greeting2 = Greeting({ text })
+
+checkOutput('imported value:', answer)
+checkOutput('destructured exports:', first, second)
+checkOutput('imported function:', text)
+checkOutput('imported type:', greeting)
+checkOutput('imported Result helpers:', success, failure)
+checkOutput('type constructor:', greeting2)
+checkOutput('TypeScript re-export:', fromCharCode(65, 66, 67), fromCodePoint(128512))

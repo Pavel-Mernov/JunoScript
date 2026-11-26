@@ -1,0 +1,146 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testGenericTypes3.jn')
+import { KeyOf, Exclude } from 'juno:types'
+
+fun identity<T is string | number = string>(value: T): T =
+    return value
+
+const explicitString = identity<string>('Juno')
+const inferredNumber = identity(42)
+
+checkOutput('generic constraint:', explicitString, inferredNumber)
+
+fun chooseKey<T is 'name' | 'age' = 'name'>(key: T = 'name'): T =
+    return key
+
+const defaultKey = chooseKey()
+const explicitKey = chooseKey('age')
+
+checkOutput('literal union constraint:', defaultKey, explicitKey)
+
+fun omit<T is ('name' | 'age') = ('name' | 'age')>(...keys: T[]): T =
+    return keys
+
+const omittedKeys = omit('name', 'age')
+
+checkOutput('array constraint:', omittedKeys)
+
+type KeyType = 'primary' | 'secondary'
+type ValueType = number
+type ConstructedObject = {
+    [key: KeyType]: ValueType
+    label: string
+}
+
+type KeyValueObject = {
+    primary : string,
+    secondary : number
+}
+
+type ConstructedObject2 = {
+    [key : KeyType] : KeyValueObject[key]
+}
+
+const constructedObj2: ConstructedObject2 = {
+    primary: 'mapped',
+    secondary: 42
+}
+const mappedPrimary = constructedObj2.primary
+const mappedSecondary = constructedObj2.secondary
+
+const constructedObj: ConstructedObject = {
+    primary: 10,
+    secondary: 20,
+    label: 'indexed'
+}
+const constructedKey: KeyType = 'primary'
+const constructedValue = constructedObj[constructedKey]
+type ConstructedValue = typeof<constructedObj[constructedKey]>
+type ConstructedKeys = KeyOf<ConstructedObject>
+type NumericConstructedKeys = Exclude<ConstructedKeys, 'label'>
+
+checkOutput('index signature:', constructedValue, isType<ConstructedValue>(constructedValue))
+checkOutput('mapped fields:', mappedPrimary, mappedSecondary)
+checkOutput('Exclude:', isType<NumericConstructedKeys>('primary'), isType<NumericConstructedKeys>('label'))
+
+type Box<T is string | number = string> = {
+    value: T
+}
+
+const defaultBox = Box({ value: 'default' })
+const numberBox = Box({ value: 7 })
+
+checkOutput('generic type defaults:', defaultBox.value, numberBox.value)
+
+type GenericPrototype = {
+    echo<T is 'name' | 'age' = 'name'>(value: T): T
+}
+
+const genericPrototype: GenericPrototype = {
+    fun echo(value: any): any =
+        return value
+}
+
+const b = Box({ value : 7 })
+const val = b['value']
+type BoxType = typeof<b>
+type BKey = KeyOf<BoxType>
+const value: BKey = 'value'
+type T = typeof<b[value]>
+type ValueFromType = BoxType[BKey]
+
+checkOutput('generic method prototype:', genericPrototype.echo('age'))
+
+type Formatter = {
+    prefix: string
+}
+
+constructor FormatterConstructor<T is string = string>: Formatter {
+    fun (prefix: string): Formatter =
+        return { prefix }
+
+    fun format<U is string | number = string>(value: U): string =
+        return value.toString()
+}
+
+checkOutput('generic constructor method:', FormatterConstructor.format(42))
+
+type MixedKeyObject = {
+    name: string
+    7: boolean
+}
+
+type MixedKey = KeyOf<MixedKeyObject>
+type ArrayKey = KeyOf<string[]>
+
+checkOutput('KeyOf object:', isType<MixedKey>('name'), isType<MixedKey>(7), isType<MixedKey>('age'))
+checkOutput('KeyOf array:', isType<ArrayKey>(0), isType<ArrayKey>('length'), isType<ArrayKey>('map'), isType<ArrayKey>('missing'))
+
+const indexedObject: MixedKeyObject = { name: 'indexed', 7: true }
+const indexedKey: MixedKey = 'name'
+const indexedArray = ['zero', 'one']
+
+checkOutput('object index literal:', indexedObject['name'], indexedObject[7])
+checkOutput('object index KeyOf:', indexedObject[indexedKey])
+checkOutput('array index keys:', indexedArray[0], indexedArray['length'], isType<Function>(indexedArray['map']))
+
+checkOutput('Box indexed inference:', val, isType<T>(val), isType<ValueFromType>(val))
+
+const pickedBox = b.pick('value')
+const omittedBox = b.omit('value')
+checkOutput('pick/omit inference:', pickedBox.value, omittedBox.has('value'))
+
+const person = {
+    name: 'Paul',
+    lastName: 'Mernov'
+}
+
+const omitFunction = person.omit
+
+checkOutput('omit function result:', omitFunction('name'))
+
+const pickFunction = person.pick
+
+checkOutput('pick function result:', pickFunction('name'))
+checkOutput('pick function result:', pickFunction('f'))

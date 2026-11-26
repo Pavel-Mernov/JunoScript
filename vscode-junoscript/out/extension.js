@@ -2934,6 +2934,7 @@ function hostType(source) {
     if (declaration.kind !== "TypeDeclaration") return named("any");
     const adapt = (type) => {
       if (type.kind === "NamedType" && type.name === "void") return named("null");
+      if (type.kind === "NamedType" && type.name === "unknown") return named("any");
       if (type.kind === "GenericType" && type.name === "Iterable") {
         const element = adapt(type.args[0] ?? named("any"));
         return { kind: "ObjectType", members: [method("iterator", [], {
@@ -3002,7 +3003,7 @@ function hostDeclarations(source) {
   const resolveLocalType = (type, resolving = /* @__PURE__ */ new Set()) => {
     if (type.kind === "NamedType") {
       const local = localTypes.get(type.name);
-      if (local?.kind === "FunctionType" && !resolving.has(type.name)) return resolveLocalType(local, /* @__PURE__ */ new Set([...resolving, type.name]));
+      if (local && !resolving.has(type.name)) return resolveLocalType(local, /* @__PURE__ */ new Set([...resolving, type.name]));
       return type;
     }
     if (type.kind === "GenericType") return { ...type, args: type.args.map((argument) => resolveLocalType(argument, resolving)) };
@@ -3342,7 +3343,7 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
       genericConstraints: declaration.genericConstraints,
       genericDefaults: declaration.genericDefaults,
       params: declaration.params,
-      returnType: functionReturnType(declaration.body, declaration.returnType ?? inferFunctionReturnType2(declaration.body, globals(), declaration.params))
+      returnType: expandLocalAliases(functionReturnType(declaration.body, declaration.returnType ?? inferFunctionReturnType2(declaration.body, globals(), declaration.params)))
     });
     else if (declaration.kind === "ConstructorDeclaration" && exported) result.set(declaration.name, {
       kind: "constructor",
@@ -3363,7 +3364,7 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
         returnType: expandLocalAliases(functionReturnType(method2.body, method2.returnType ?? inferFunctionReturnType2(method2.body, declarationEnv, method2.params)))
       }))
     });
-    else if (declaration.kind === "Variable" && exported) result.set(declaration.name, { kind: "var", type: declaration.type ? resolveType(declaration.type, declarationEnv) : declaration.initializer ? inferExpression(declaration.initializer, declarationEnv) : named("any") });
+    else if (declaration.kind === "Variable" && exported) result.set(declaration.name, { kind: "var", type: declaration.type ? expandLocalAliases(declaration.type) : declaration.initializer ? inferExpression(declaration.initializer, declarationEnv) : named("any") });
     else if (declaration.kind === "Destructure" && exported) {
       const source = inferExpression(declaration.initializer, globals());
       for (const binding of declaration.bindings) {
@@ -3375,7 +3376,7 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
   if (!filePath) return result;
   for (const statement of statements) {
     const importedStatement = statement.kind === "Import" ? statement : statement.kind === "Export" && statement.declaration.kind === "Import" ? statement.declaration : void 0;
-    if (!importedStatement || !importedStatement.module.startsWith(".") && importedStatement.module !== "juno:async" && importedStatement.module !== "juno:node:fs" && importedStatement.module !== "juno:types" && !importedStatement.module.startsWith("juno:types/")) continue;
+    if (!importedStatement || !importedStatement.module.startsWith(".") && importedStatement.module !== "juno:async" && importedStatement.module !== "juno:node:fs" && importedStatement.module !== "juno:test" && importedStatement.module !== "juno:types" && !importedStatement.module.startsWith("juno:types/")) continue;
     if (importedStatement.module === "juno:async") {
       const asyncFile = asyncTypeScriptFile();
       let declarations = /* @__PURE__ */ new Map();
@@ -3417,6 +3418,34 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
       }
       continue;
     }
+    if (importedStatement.module === "juno:test") {
+      let directory = path2.dirname(path2.resolve(filePath));
+      let workspaceSource;
+      while (true) {
+        const candidate = path2.join(directory, "Modules", "juno-test.jn");
+        if (fs2.existsSync(candidate)) {
+          workspaceSource = candidate;
+          break;
+        }
+        const parent = path2.dirname(directory);
+        if (parent === directory) break;
+        directory = parent;
+      }
+      const candidates2 = [
+        path2.resolve(__dirname, "../../Modules/juno-test.jn"),
+        path2.resolve(__dirname, "../../../Modules/juno-test.jn"),
+        path2.resolve(process.cwd(), "Modules/juno-test.jn")
+      ];
+      const file = workspaceSource ?? candidates2.find((candidate) => fs2.existsSync(candidate));
+      if (file) {
+        const declarations = importedDeclarations(parse(fs2.readFileSync(file, "utf8"), { validate: false, filePath: file }));
+        for (const name of importedStatement.namedImports) {
+          const symbol = declarations.get(name);
+          if (symbol) result.set(name, symbol);
+        }
+      }
+      continue;
+    }
     let base;
     if (importedStatement.module === "juno:types" || importedStatement.module.startsWith("juno:types/")) {
       const relativeModule = importedStatement.module === "juno:types" ? "index" : importedStatement.module.slice("juno:types/".length);
@@ -3448,6 +3477,11 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
     try {
       if (!/\.jn$/i.test(importedFile)) {
         const declarations2 = hostDeclarations(fs2.readFileSync(importedFile, "utf8"));
+        const signatureFile = `${importedFile}.d.jn`;
+        if (fs2.existsSync(signatureFile)) {
+          const signatures = parse(fs2.readFileSync(signatureFile, "utf8"), { validate: false, filePath: signatureFile });
+          for (const [name, symbol] of importedDeclarations(signatures)) declarations2.set(name, symbol);
+        }
         for (const name of importedStatement.namedImports) if (declarations2.has(name)) result.set(name, declarations2.get(name));
         continue;
       }

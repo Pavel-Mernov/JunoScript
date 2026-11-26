@@ -1,0 +1,41 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testVarScope.jn')
+
+let v = 10
+
+fun foo() = 
+    checkOutput(v)
+
+    let v = 12
+
+    if v > 10
+        let v = 14
+
+        checkOutput('greater than 10', 'new v:', v)
+
+    checkOutput(v)
+
+foo()
+
+const b = 10
+
+fun bar() = 
+    checkOutput(b)
+    
+    const b = 12
+    
+    if b > 10
+        const b = 14
+    
+        checkOutput('greater than 10', 'new b:', b)
+    
+    checkOutput(b)
+
+const res = bar()
+
+checkOutput(res)
+
+let c : number
+
+checkOutput(c)

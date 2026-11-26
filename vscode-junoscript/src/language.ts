@@ -979,6 +979,7 @@ function hostType(source: string | undefined): TypeNode {
         if (declaration.kind !== 'TypeDeclaration') return named('any')
         const adapt = (type: TypeNode): TypeNode => {
             if (type.kind === 'NamedType' && type.name === 'void') return named('null')
+            if (type.kind === 'NamedType' && type.name === 'unknown') return named('any')
             if (type.kind === 'GenericType' && type.name === 'Iterable') {
                 const element = adapt(type.args[0] ?? named('any'))
                 return { kind: 'ObjectType', members: [method('iterator', [], {
@@ -1038,7 +1039,7 @@ export function hostDeclarations(source: string): Map<string, ImportedSymbol> {
     const resolveLocalType = (type: TypeNode, resolving = new Set<string>()): TypeNode => {
         if (type.kind === 'NamedType') {
             const local = localTypes.get(type.name)
-            if (local?.kind === 'FunctionType' && !resolving.has(type.name)) return resolveLocalType(local, new Set([...resolving, type.name]))
+            if (local && !resolving.has(type.name)) return resolveLocalType(local, new Set([...resolving, type.name]))
             return type
         }
         if (type.kind === 'GenericType') return { ...type, args: type.args.map(argument => resolveLocalType(argument, resolving)) }
@@ -1346,7 +1347,7 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
         else if (declaration.kind === 'FunctionDeclaration' && exported) result.set(declaration.name, {
             kind: 'fun', generics: declaration.generics, genericConstraints: declaration.genericConstraints,
             genericDefaults: declaration.genericDefaults, params: declaration.params,
-            returnType: functionReturnType(declaration.body, declaration.returnType ?? inferFunctionReturnType(declaration.body, globals(), declaration.params))
+            returnType: expandLocalAliases(functionReturnType(declaration.body, declaration.returnType ?? inferFunctionReturnType(declaration.body, globals(), declaration.params)))
         })
         else if (declaration.kind === 'ConstructorDeclaration' && exported) result.set(declaration.name, {
             kind: 'constructor',
@@ -1365,7 +1366,7 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
                 returnType: expandLocalAliases(functionReturnType(method.body, method.returnType ?? inferFunctionReturnType(method.body, declarationEnv, method.params)))
             }))
         })
-        else if (declaration.kind === 'Variable' && exported) result.set(declaration.name, { kind: 'var', type: declaration.type ? resolveType(declaration.type, declarationEnv) : declaration.initializer ? inferExpression(declaration.initializer, declarationEnv) : named('any') })
+        else if (declaration.kind === 'Variable' && exported) result.set(declaration.name, { kind: 'var', type: declaration.type ? expandLocalAliases(declaration.type) : declaration.initializer ? inferExpression(declaration.initializer, declarationEnv) : named('any') })
         else if (declaration.kind === 'Destructure' && exported) {
             const source = inferExpression(declaration.initializer, globals())
             for (const binding of declaration.bindings) {
@@ -1377,7 +1378,7 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
     if (!filePath) return result
     for (const statement of statements) {
         const importedStatement = statement.kind === 'Import' ? statement : statement.kind === 'Export' && statement.declaration.kind === 'Import' ? statement.declaration : undefined
-        if (!importedStatement || (!importedStatement.module.startsWith('.') && importedStatement.module !== 'juno:async' && importedStatement.module !== 'juno:node:fs' && importedStatement.module !== 'juno:types' && !importedStatement.module.startsWith('juno:types/'))) continue
+        if (!importedStatement || (!importedStatement.module.startsWith('.') && importedStatement.module !== 'juno:async' && importedStatement.module !== 'juno:node:fs' && importedStatement.module !== 'juno:test' && importedStatement.module !== 'juno:types' && !importedStatement.module.startsWith('juno:types/'))) continue
         if (importedStatement.module === 'juno:async') {
             const asyncFile = asyncTypeScriptFile()
             let declarations = new Map<string, ImportedSymbol>()
@@ -1416,6 +1417,31 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
             }
             continue
         }
+        if (importedStatement.module === 'juno:test') {
+            let directory = path.dirname(path.resolve(filePath))
+            let workspaceSource: string | undefined
+            while (true) {
+                const candidate = path.join(directory, 'Modules', 'juno-test.jn')
+                if (fs.existsSync(candidate)) { workspaceSource = candidate; break }
+                const parent = path.dirname(directory)
+                if (parent === directory) break
+                directory = parent
+            }
+            const candidates = [
+                path.resolve(__dirname, '../../Modules/juno-test.jn'),
+                path.resolve(__dirname, '../../../Modules/juno-test.jn'),
+                path.resolve(process.cwd(), 'Modules/juno-test.jn')
+            ]
+            const file = workspaceSource ?? candidates.find(candidate => fs.existsSync(candidate))
+            if (file) {
+                const declarations = importedDeclarations(parse(fs.readFileSync(file, 'utf8'), { validate: false, filePath: file }))
+                for (const name of importedStatement.namedImports) {
+                    const symbol = declarations.get(name)
+                    if (symbol) result.set(name, symbol)
+                }
+            }
+            continue
+        }
         let base: string
         if (importedStatement.module === 'juno:types' || importedStatement.module.startsWith('juno:types/')) {
             const relativeModule = importedStatement.module === 'juno:types' ? 'index' : importedStatement.module.slice('juno:types/'.length)
@@ -1440,6 +1466,11 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
         try {
             if (!/\.jn$/i.test(importedFile)) {
                 const declarations = hostDeclarations(fs.readFileSync(importedFile, 'utf8'))
+                const signatureFile = `${importedFile}.d.jn`
+                if (fs.existsSync(signatureFile)) {
+                    const signatures = parse(fs.readFileSync(signatureFile, 'utf8'), { validate: false, filePath: signatureFile })
+                    for (const [name, symbol] of importedDeclarations(signatures)) declarations.set(name, symbol)
+                }
                 for (const name of importedStatement.namedImports) if (declarations.has(name)) result.set(name, declarations.get(name)!)
                 continue
             }

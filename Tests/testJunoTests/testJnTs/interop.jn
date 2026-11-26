@@ -1,0 +1,65 @@
+import { outputFor } from '../output.cjs'
+
+const checkOutput = outputFor('testJnTs/interop.jn')
+import {
+    createProfile,
+    formatValue,
+    scaleNumbers,
+    applyMapper,
+    label,
+    version,
+    nestedValue,
+    nativeIterable,
+    createNativeIterable,
+    collectIterable,
+    NativeCounter
+} from './native.ts'
+
+type Profile = {
+    name: string
+    scores: number[]
+    active: boolean
+    metadata: {
+        source: string
+        version: number
+    }
+}
+
+type NativeNested = {
+    owner: { name: string }
+    flags: string[]
+    optional: string?
+}
+
+export constructor TsProfile : Profile {
+    fun (name: string, ...scores: number[]): Profile =
+        return createProfile(name, scores).as<Profile>()
+}
+
+const profile = TsProfile('Ada', 10, 20, 30)
+const scaled = scaleNumbers(profile.scores, 2)
+const mapped = applyMapper(scaled, (value: number, index: number) => value + index).as<number[]>()
+
+checkOutput('TS destructured exports:', label, version)
+checkOutput('TS union arguments:', formatValue('Juno'), formatValue(42), formatValue(null))
+checkOutput('TS complex return:', profile.name, profile.active, profile.metadata.source)
+checkOutput('TS arrays:', scaled, mapped)
+if nestedValue.isType<NativeNested>()
+    checkOutput('TS nested value:', nestedValue.owner.name, nestedValue.flags, nestedValue.optional)
+
+const importedIterable = createNativeIterable()
+const nativeNext = importedIterable.iterator()
+checkOutput('TS Symbol.iterator as JN iterator:', nativeNext(), nativeNext(), nativeNext(), nativeNext())
+
+type JnIterable = Iterable<number> & {
+    data: number[]
+    toArray(): number[] = this.data
+}
+const jnIterable: JnIterable = { data: [1, 3, 5] }
+checkOutput('JN toArray as TS Symbol.iterator:', collectIterable(jnIterable))
+
+# Native JS/TS classes are callable as Juno constructors (without `new`).
+const nativeCounter = NativeCounter(5)
+checkOutput('TS class as JN constructor:', nativeCounter.value, nativeCounter.increment(2))
+const staticCounter = NativeCounter.from(10)
+checkOutput('TS class static method:', staticCounter.value)

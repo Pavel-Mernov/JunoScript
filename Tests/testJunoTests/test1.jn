@@ -1,0 +1,128 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('test1.jn')
+# Anonymous arrow functions and nullable types
+
+const foo = (a: number): number? =>
+    return a
+
+const bar = (b: number): number? => b
+
+fun describe(value: number?): string =
+    if value == null
+        return "null"
+    return "number"
+
+const maybeNumber: number? = null
+const anotherMaybe: number? = foo(10)
+const directResult = bar(20)
+
+checkOutput("foo(10):", foo(10))
+checkOutput("bar(20):", directResult)
+checkOutput("nullable value:", maybeNumber)
+checkOutput("foo result:", anotherMaybe)
+checkOutput("describe null:", describe(maybeNumber))
+checkOutput("describe number:", describe(directResult))
+
+# Default parameters are evaluated when the corresponding argument is omitted.
+fun greetWithDefault(name: string = "friend"): string =
+    return "Hello, " + name
+checkOutput("default parameter:", greetWithDefault())
+checkOutput("provided parameter:", greetWithDefault("Ada"))
+
+# Rest parameters collect the remaining arguments into a typed array.
+fun sum(first: number, ...rest: number[]): number =
+    let total = first
+    for const value of rest
+        total = total + value
+    return total
+
+checkOutput("rest arguments:", sum(1, 2, 3, 4))
+checkOutput("rest with no extras:", sum(5))
+
+# Required parameters precede defaults; rest parameters follow both.
+fun format(prefix: string, suffix: string = "!", ...parts: string[]): string =
+    let result = prefix
+    for const part of parts
+        result = result + " " + part
+    return result + suffix
+
+checkOutput("defaults and rest:", format("Hi", "!", "there", "Ada"))
+
+# Inference uses the declared parameter and return types when checking calls.
+fun inferredDefault(value = 7) =
+    return value + 1
+
+fun inferredRest(...values: number[]) =
+    return values[0] + values[1]
+
+const defaultResult: number = inferredDefault()
+const restResult: number = inferredRest(3, 4)
+checkOutput("inferred default result:", defaultResult)
+checkOutput("inferred rest result:", restResult)
+
+# break exits the nearest while loop.
+let whileCount = 0
+while true
+    whileCount++
+    if whileCount == 3
+        break
+checkOutput("while break:", whileCount)
+
+# break exits the nearest for-of loop.
+let forTotal = 0
+for const value of [1, 2, 3, 4]
+    if value == 3
+        break
+    forTotal += value
+checkOutput("for-of break:", forTotal)
+
+# A nested break must not terminate the outer loop.
+let nestedCount = 0
+for const outer of [1, 2, 3]
+    for const inner of [1, 2, 3]
+        if inner == 2
+            break
+        nestedCount++
+checkOutput("nested break:", nestedCount)
+
+# match is an expression; case returns are local to the selected branch.
+fun describeMatch(arg: string | number) = match arg
+    case "hello"
+        return "literal"
+    case string when arg.length > 3
+        return "long string"
+    case string
+        return "string"
+    case number
+        return "number"
+
+const expectedMatchValue = 7
+const literalMatch = describeMatch("hello")
+const guardedMatch = describeMatch("Juno")
+const typeMatch = describeMatch(42)
+const variableMatch = match 7
+    case expectedMatchValue
+        return "variable"
+    default
+        return "default"
+
+const optionalBindingMatch = match "error"
+    case "error" | { error: string?, code: number? }
+        return error ?? "missing error"
+
+const objectBindingMatch = match { error: "failed", code: 500 }
+    case "error" | { error: string?, code: number? } when code != null
+        return error
+
+const unmatchedMatch = match true
+    case false
+        return "false"
+
+checkOutput("match literal:", literalMatch)
+checkOutput("match guard:", guardedMatch)
+checkOutput("match type:", typeMatch)
+checkOutput("match variable:", variableMatch)
+checkOutput("match optional binding:", optionalBindingMatch)
+checkOutput("match object binding:", objectBindingMatch)
+checkOutput("match without default:", unmatchedMatch)

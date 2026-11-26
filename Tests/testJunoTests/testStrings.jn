@@ -1,0 +1,70 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testStrings.jn')
+import { String } from 'juno'
+
+checkOutput("=== String constructor tests ===")
+checkOutput("String values:", String(null), String('Juno'), String(42), String(-7), String(10n), String(true), String(false))
+checkOutput("String arrays and objects:", String([1, 2, 3]), String({ name: 'Juno' }))
+
+const customStringObject = {
+    value: 'custom',
+    fun toString(): string =
+        return "String(${this.value})"
+}
+checkOutput("String custom toString:", String(customStringObject))
+
+checkOutput("String.fromCharCode:", String.fromCharCode(65, 66, 67), String.fromCharCode(74, 117, 110, 111))
+checkOutput("String.fromCodePoint:", String.fromCodePoint(128512), String.fromCodePoint(128640, 10024))
+checkOutput("String.raw:", String.raw({ raw: ['line\\n', ' = ', ''] }, 'value', 42))
+
+const name = "Ada"
+const age = 36
+const punctuation = "!"
+const greeting = `Hello, ${name}${punctuation}`
+const plainBacktick = `This backtick string has no interpolation.`
+const quotedGreeting = 'Welcome, ${name}'
+const escapedInterpolation = "This stays literal: \${name}"
+
+checkOutput(greeting)
+checkOutput(plainBacktick)
+checkOutput(quotedGreeting)
+checkOutput(escapedInterpolation)
+checkOutput(`Name: ${name}, next year: ${age + 1}`)
+
+const multiline = `Hello, ${name}!
+Your current age is ${age}.
+Next year you will be ${age + 1}.`
+checkOutput(multiline)
+
+const str = 'My test string'
+
+for const char of str
+    checkOutput(char)
+
+# Strings are iterable and expose the TypeScript string API.
+checkOutput(str.toArray().join("|"))
+checkOutput(str.join("|"))
+checkOutput(str.includes("test"))
+checkOutput(str.includes(/TEST/i))
+checkOutput(str.find("test"))
+checkOutput(str.find(/t.st/))
+checkOutput(str.findLast(/st/))
+checkOutput(str.findIndex("string"))
+checkOutput(str.findIndex(/t.st/))
+checkOutput(str.findLastIndex(/st/))
+checkOutput(str.startsWith("My"))
+checkOutput(str.endsWith("string"))
+checkOutput(str.toUpperCase())
+checkOutput("  padded  ".trim().padStart(10, "."))
+checkOutput("a,b,c".split(",").join("-"))
+checkOutput("hello".replace(/l/g, "L"))
+checkOutput("prefix <Juno> suffix".test(/<([a-z]+)>/i))
+checkOutput("prefix <Juno> suffix".test("<Juno>"))
+checkOutput("prefix <Juno> suffix".match(/<([a-z]+)>/i)?.at(0) ?? "not found")
+checkOutput("prefix <Juno> suffix".exec(/<([a-z]+)>/i)?.at(1) ?? "not found")
+
+const regexpLiteral: RegEx = /<([a-z]+)>/i
+const regexpConstructed: RegEx = RegEx("<([a-z]+)>", "i")
+checkOutput(regexpLiteral.test("<Juno>"))
+checkOutput(regexpConstructed.exec("prefix <Script> suffix")?.at(0) ?? "not found")

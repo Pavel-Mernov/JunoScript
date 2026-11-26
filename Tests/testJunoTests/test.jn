@@ -1,0 +1,102 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('test.jn')
+# JunoScript statement smoke-test file
+
+import juno from 'juno'
+import node from 'juno:node'
+import { console } from 'juno:node'
+import { Number } from 'juno'
+import { Error, Result, ok } from 'juno:types'
+
+checkOutput("=== JunoScript smoke tests ===")
+checkOutput("Imports parsed successfully")
+checkOutput("CLI arguments:", console.args)
+
+type User =
+    {
+        name: string
+        age: number = 18
+        readonly id: number
+        greet(): string
+    }
+
+checkOutput("Type declarations: Error, Result<T>, User")
+
+const successful: Result<number> = ok(42)
+const failed: Result<null, Error> = Error.result(Error('Test error'))
+checkOutput("Result helpers:", successful, failed)
+
+let answer: number = 40 + 2
+checkOutput("let answer =", answer)
+
+const convertedNumber: number = Number('42')
+const numberValue: number = convertedNumber.valueOf()
+checkOutput("Number constructor:", convertedNumber, Number(false), Number(null))
+checkOutput("Number statics:", Number.isInteger(convertedNumber), Number.isNaN(Number.NaN), Number.parseInt('101', 2))
+checkOutput("number.valueOf():", numberValue)
+
+const greeting = "Hello, " + "JunoScript"
+checkOutput("const greeting =", greeting)
+
+let items = [1, 2, 3]
+checkOutput("Array items:", items)
+
+let empty: null = null
+checkOutput("Null value:", empty)
+
+fun add(x: number, y: number): number =
+    return x + y
+
+checkOutput("add(2, 3) =", add(2, 3))
+
+fun greet(name: string) =
+    return "Hello, " + name
+
+checkOutput(greet("Pasha"))
+
+let person = User(
+    {
+        name: "Pasha"
+        id: 1
+        greet() =
+            return "Hello, " + this.name
+    }
+)
+
+checkOutput("Person name:", person.name)
+checkOutput("Formatted greeting: Hello, ${person.name}!")
+checkOutput("Object method:", person.greet())
+
+let boundGreet = person.greet
+checkOutput("Saved method keeps context:", boundGreet())
+
+if answer == 42
+    checkOutput("if branch: answer is 42")
+    let message = greet(person.name)
+    checkOutput(message)
+else
+    checkOutput("else branch: unexpected answer")
+    let message = "Unexpected result"
+    checkOutput(message)
+
+for const item of items
+    checkOutput("for-of item:", item)
+    let doubled = item * 2
+    checkOutput("doubled:", doubled)
+
+let isNumber = isType<number>(answer)
+checkOutput("isType<number>(answer):", isNumber)
+
+let combined: User & { active: boolean? } = person
+checkOutput("Intersection-typed value:", combined)
+
+checkOutput("Введите имя:")
+let userName: string = console.read()
+checkOutput("Привет, " + userName)
+
+checkOutput("Введите несколько строк (завершите ввод EOF):")
+let inputLines: string[] = console.readLines()
+checkOutput("Прочитанные строки:", inputLines)
+
+checkOutput("=== Smoke tests complete ===")

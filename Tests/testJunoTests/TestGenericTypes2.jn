@@ -1,0 +1,41 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('TestGenericTypes2.jn')
+import { Partial, Required, Readonly, Pick, Omit } from 'juno:types'
+
+type User = {
+    name: string
+    age?: number
+    active: boolean
+}
+
+type Box<T> = {
+    value: T
+}
+
+type PartialUser = Partial<User>
+type RequiredUser = Required<User>
+type ReadonlyUser = Readonly<User>
+type NamedUser = Pick<User, "name">
+type UserWithoutAge = Omit<User, "age">
+type StringBox = Box<string>
+
+const partialUser: PartialUser = { name: "Ada" }
+checkOutput("Partial allows omitted fields =", isType<PartialUser>(partialUser))
+
+const completeUser: RequiredUser = { name: "Grace", age: 37, active: true }
+checkOutput("Required accepts complete fields =", isType<RequiredUser>(completeUser))
+checkOutput("Required rejects omitted optional field =", isType<RequiredUser>({ name: "Grace", active: true }))
+
+const readonlyUser: ReadonlyUser = { name: "Lin", active: true }
+checkOutput("Readonly preserves the object shape =", isType<ReadonlyUser>(readonlyUser))
+
+const namedUser: NamedUser = { name: "Pasha", extra: "preserved" }
+checkOutput("Pick checks selected fields and allows extras =", isType<NamedUser>(namedUser))
+checkOutput("Pick does not remove extra fields =", namedUser.toString())
+
+const userWithoutAge: UserWithoutAge = { name: "Sam", active: true }
+checkOutput("Omit removes the selected requirement =", isType<UserWithoutAge>(userWithoutAge))
+
+const stringBox: StringBox = { value: "generic alias" }
+checkOutput("Generic aliases substitute their type argument =", isType<StringBox>(stringBox))

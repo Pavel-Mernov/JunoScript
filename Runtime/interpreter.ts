@@ -57,6 +57,8 @@ export class Interpreter {
     private readonly globals: Environment = { bindings: new Map(), types: new Map() }
     private currentDirectory = process.cwd()
     private currentFile?: string
+    private readonly sourceFiles = new WeakMap<Environment, string>()
+    private readonly errorTraces = new WeakMap<Error, { stack: string; frames: string[] }>()
     private readonly callStack: { name: string; file?: string; loc?: Loc }[] = []
     constructor() {
         ;(globalThis as any)[Symbol.for('junoscript.captureStackTrace')] = () => this.captureStackTrace()
@@ -70,6 +72,8 @@ export class Interpreter {
 
     run(source: string, filePath?: string): void {
         this.currentFile = filePath
+        if (filePath) this.sourceFiles.set(this.globals, filePath)
+        else this.sourceFiles.delete(this.globals)
         const statements = parse(source, { filePath })
         for (const statement of statements) {
             if (statement.kind === 'TypeDeclaration') {
@@ -89,6 +93,7 @@ export class Interpreter {
         this.currentDirectory = resolve(filePath, '..')
         this.currentFile = filePath
         const env: Environment = { bindings: new Map(), types: new Map(), parent: this.globals }
+        this.sourceFiles.set(env, filePath)
         const exported: Record<string, unknown> = {}
         const statements = parse(source, { filePath })
         try {
@@ -143,7 +148,7 @@ export class Interpreter {
     private execute(statement: Statement, env: Environment): void {
         switch (statement.kind) {
             case 'Import': {
-                const module = ['juno', 'juno:node', 'juno:types', 'juno:async', 'juno:node:fs', 'types'].includes(statement.module)
+                const module = ['juno', 'juno:node', 'juno:types', 'juno:async', 'juno:node:fs', 'juno:test', 'types'].includes(statement.module)
                     ? resolveModule(statement.module) as Record<string, unknown>
                     : this.loadLocalModule(statement.module, env)
                 if ((statement.module === 'juno:async' || statement.module === 'juno:node:fs') && !(module as Record<string, unknown>).__junoTypes) {
@@ -327,6 +332,7 @@ export class Interpreter {
         this.currentDirectory = resolve(base, '..')
         this.currentFile = file
         const moduleEnv: Environment = { bindings: new Map(), types: new Map(), parent: env }
+        this.sourceFiles.set(moduleEnv, file)
         const importedModule = (specifier: string, importer: Environment): Record<string, unknown> => {
             if (specifier === 'juno:types' || specifier.startsWith('juno:types/')) return this.loadLocalModule(specifier, importer)
             const moduleBase = resolve(this.currentDirectory, specifier)
@@ -374,7 +380,7 @@ export class Interpreter {
                     if (alias) (exported as any).__types ??= {}, (exported as any).__types[declaration.name] = alias
                 }
             } else if (statement.kind === 'Import') {
-                const dependency = ['juno', 'juno:node', 'juno:types', 'juno:node:fs', 'types'].includes(statement.module)
+                const dependency = ['juno', 'juno:node', 'juno:types', 'juno:async', 'juno:node:fs', 'juno:test', 'types'].includes(statement.module)
                     ? resolveModule(statement.module) as Record<string, unknown>
                     : importedModule(statement.module, moduleEnv)
                 if (statement.defaultImport) this.declare(moduleEnv, statement.defaultImport, this.adaptModule(dependency, moduleEnv), false)
@@ -417,7 +423,41 @@ export class Interpreter {
         return result
     }
 
+    private addExpressionFrame(error: unknown, expression: Expression, env: Environment): void {
+        if (!(error instanceof Error)) return
+        const trace = this.errorTraces.get(error)
+        if (trace && expression.kind !== 'Call') return
+        let site = expression
+        while (site.kind === 'Call') site = site.callee
+        const loc = site.loc
+        if (!loc) return
+        let scope: Environment | undefined = env
+        let file: string | undefined
+        while (scope && !file) {
+            file = this.sourceFiles.get(scope)
+            scope = scope.parent
+        }
+        if (!file) return
+        const entry = trace ?? { stack: error.stack ?? error.toString(), frames: [] }
+        const frame = `    at ${file}:${loc.line}:${loc.column}`
+        if (entry.frames.at(-1) === frame) return
+        entry.frames.push(frame)
+        this.errorTraces.set(error, entry)
+        const hostStart = entry.stack.indexOf('\n    at ')
+        const split = hostStart < 0 ? entry.stack.length : hostStart
+        error.stack = entry.stack.slice(0, split) + '\n' + entry.frames.join('\n') + entry.stack.slice(split)
+    }
+
     private evaluate(expression: Expression, env: Environment): any {
+        try {
+            return this.evaluateExpression(expression, env)
+        } catch (error) {
+            this.addExpressionFrame(error, expression, env)
+            throw error
+        }
+    }
+
+    private evaluateExpression(expression: Expression, env: Environment): any {
         switch (expression.kind) {
             case 'Literal': return expression.value
             case 'RegEx': return new RegExp(expression.source, expression.flags)
@@ -925,6 +965,15 @@ export class Interpreter {
     }
 
     private async evaluateAsync(expression: Expression, env: Environment): Promise<any> {
+        try {
+            return await this.evaluateExpressionAsync(expression, env)
+        } catch (error) {
+            this.addExpressionFrame(error, expression, env)
+            throw error
+        }
+    }
+
+    private async evaluateExpressionAsync(expression: Expression, env: Environment): Promise<any> {
         if (expression.kind === 'Unary' && expression.operator === 'await') return (await this.evaluateAsync(expression.operand, env)) ?? null
         if (expression.kind === 'Conditional') {
             return this.requireCondition(await this.evaluateAsync(expression.condition, env))
@@ -1756,7 +1805,9 @@ export class Interpreter {
             }
             return value
         }
-        if (type.kind !== 'ObjectType') return value
+        // A frozen value is already finalized. Applying defaults must not
+        // mutate it or replace it with a mutable copy.
+        if (type.kind !== 'ObjectType' || Object.isFrozen(value)) return value
         const runtimeValue = value as Record<string, any>
         const resolvedType = this.resolveAliasType(type, env)
         if (resolvedType.kind === 'ObjectType') type = resolvedType

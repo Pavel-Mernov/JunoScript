@@ -1,0 +1,18 @@
+import { outputFor } from '../../output.cjs'
+
+const checkOutput = outputFor('testBuild/testBuildOutput/testBuildOutput.jn')
+import { answer, Counter, greet } from '../testBuild'
+
+checkOutput('answer:', answer)
+
+checkOutput('greet:', greet('Paul'))
+
+const counter = Counter.zero()
+
+checkOutput('counter.zero():', counter)
+
+counter.increment(2)
+
+checkOutput('counter.increment(2):', counter)
+
+checkOutput('counter.value:', counter.value)

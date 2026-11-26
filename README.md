@@ -1338,6 +1338,27 @@ chain.then((value) =>
 
 Такое преобразование ошибки работает для executor-функции `Promise`, `Promise.resolve` и `Promise.withResolvers().resolve`. Второй callback у `then` и второй параметр executor-функции запрещены. Полный пример с синхронными вызовами, цепочкой Promise и таймерами находится в [`Tests/testPromise.jn`](./Tests/testPromise.jn).
 
+### `juno:test`
+
+`juno:test` использует matcher и mock-движок Jest, но запускается прямо в обычном `.jn`-файле:
+
+```junoscript
+import { expect, Mock } from 'juno:test'
+
+expect.toBeEqual<number>(2 + 2, 4)
+expect.not.toBeNull('value')
+
+const load = Mock((id: number) => id * 2)
+expect.toBeEqual(load(21), 42)
+expect.toHaveBeenCalledWith(load, 21)
+load.mockReturnValue(7)
+
+# Доступен и классический Jest-style API.
+expect.that(load()).toBe(7)
+```
+
+Кроме основных matcher-ов доступны asymmetric matchers (`anything`, `objectContaining`, `arrayContaining`), `spyOn`, управление mock-ами, `describe`/`test`/`it`, hooks и fake timers. Ошибка assertion завершает `junode` с ненулевым exit code.
+
 ## VS Code
 
 Расширение в [`vscode-junoscript`](./vscode-junoscript) предоставляет:
@@ -1377,6 +1398,7 @@ chain.then((value) =>
 | [`testTryExpression.jn`](./Tests/testTryExpression.jn) | Result, try, catch, finally |
 | [`testAsync.jn`](./Tests/testAsync.jn) | await, Promise, implicit async functions, timers и microtasks |
 | [`testPromise.jn`](./Tests/testPromise.jn) | Многоступенчатые resolve/then/catch, setTimeout и порядок sync/async вызовов |
+| [`testJunoTest.jn`](./Tests/testJunoTest.jn) | Jest matchers, `expect.not` и mock-функции `juno:test` |
 | [`testStrings.jn`](./Tests/testStrings.jn) | Строки, interpolation и string API |
 | [`testRegEx.jn`](./Tests/testRegEx.jn) | RegEx literals и constructor |
 | [`testImportExports.jn`](./Tests/testImportExports.jn) | Imports, exports, re-exports |

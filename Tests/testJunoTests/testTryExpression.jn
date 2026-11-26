@@ -1,0 +1,35 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testTryExpression.jn')
+import { Error, Result, ok } from 'juno:types'
+
+const successful : Result<number> = ok(42)
+const failed : Result<number, Error> = Error.result(Error('failed'))
+
+let finalized = 0
+const success : number | string = try successful
+    catch (e : Error)
+        return e.message
+    finally
+        finalized += 1
+
+const recovered : number | string = try failed
+    catch (e : Error)
+        return e.message
+    catch
+        return 'fallback'
+    finally
+        finalized += 1
+        return 'ignored'
+
+const blockResult = try
+    const intermediate = 40 + 2
+    return ok(intermediate)
+catch (e : Error)
+    return e.message
+
+const inferredCatch = try failed
+    catch (e)
+        return e.message
+
+checkOutput(success, recovered, finalized, blockResult, inferredCatch)

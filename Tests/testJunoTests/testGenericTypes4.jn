@@ -1,0 +1,59 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testGenericTypes4.jn')
+import { Items, KeyOf, Exclude, Tuple } from 'juno:types'
+
+const literalItems = Items<'name' | 7 | 'active'>()
+checkOutput('Items literal union:', literalItems)
+
+type IsString<T> = T is string ? true : false
+type StringAlias = string
+type StringIsString = StringAlias is string
+type StringResult = IsString<'Juno'>
+type NumberResult = IsString<42>
+
+checkOutput('boolean and conditional types:', isType<StringIsString>(true), isType<StringResult>(true), isType<NumberResult>(false))
+
+const stringCheck = isType<string>('Juno')
+const numberCheck = isType<number>('Juno')
+const conditionalValue = isType<number>(42) ? 'number' : 'other'
+
+checkOutput('is expressions:', stringCheck, numberCheck, conditionalValue)
+
+fun identityUnion<T is string | number>(value: T): T =
+    return value
+
+const mixedString = identityUnion<'left' | 10>('left')
+const mixedNumber = identityUnion<'left' | 10>(10)
+
+checkOutput('union constraint:', mixedString, mixedNumber)
+
+fun identityArray<T is (string | number)[]>(...items: T): T =
+    return items
+
+const stringItems = identityArray<string[]>('one', 'two')
+const numberItems = identityArray<number[]>(1, 2)
+const unionItems = identityArray<(string | number)[]>('one', 2)
+
+checkOutput('array constraint:', stringItems, numberItems, unionItems)
+
+const tuple = Tuple('first', 2, true)
+const tupleText = tuple[0]
+const tupleNumber = tuple[1]
+const tupleBoolean = tuple[2]
+
+const [text, _number,] = tuple
+
+const [_, ...rest] = tuple
+
+checkOutput('readonly tuple:', tupleText, tupleNumber, tupleBoolean, tuple.length)
+
+const readonlyArray = [1, 2].asReadonly()
+const mutableArray = readonlyArray.asMutable()
+mutableArray.push(3)
+
+const readonlyObject = { name: 'Paul' }.asReadonly()
+const mutableObject = readonlyObject.asMutable()
+mutableObject.name = 'Grace'
+
+checkOutput('readonly/mutable copies:', readonlyArray, mutableArray, readonlyObject, mutableObject)

@@ -1,0 +1,26 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testEq.jn')
+
+checkOutput(5 == '5')
+checkOutput(5 == 5)
+
+checkOutput(0 == false)
+
+checkOutput(null == null)
+
+type Person = {
+    name : string
+}
+
+const person1 : Person = {
+    name : 'Paul',
+}
+
+const person2 : Person = {
+    name : 'Paul',
+}
+
+checkOutput(person1 == person2)
+
+checkOutput(person1)

@@ -1,0 +1,226 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testObject.jn')
+import { Object } from 'juno:types'
+
+checkOutput('=== Object tests ===')
+
+const source = Object({ name: 'Ada', age: 36, nested: { active: true } })
+checkOutput('keys:', source.keys())
+checkOutput('values:', source.values())
+checkOutput('entries:', source.entries())
+checkOutput('has:', source.has('name'))
+checkOutput('pick:', source.pick('name'))
+checkOutput('omit:', source.omit('age'))
+checkOutput('json:', source.toJSON(), source.toJson(), source.toString())
+
+const clone = source.deepClone()
+clone.nested.active = false
+checkOutput('deep clone:', source.nested.active, clone.nested.active)
+checkOutput('readonly:', source.asReadonly().name)
+checkOutput('mutable:', source.asMutable().name)
+checkOutput('deep frozen copy:', source.toDeepFreezed().name)
+
+const fromEntries = Object.from([['one', 1], ['two', 2]])
+checkOutput('from entries:', fromEntries)
+checkOutput('from json:', Object.fromJSON('{"ok":true,"count":2}'))
+
+const sealedObject = {
+    sealed value: 1
+    sealed get doubled(): number =
+        return this.value * 2
+    sealed fun describe(prefix: string): string =
+        return '${prefix}:${this.value}'
+}
+checkOutput('sealed members:', sealedObject.value, sealedObject.doubled, sealedObject.describe('value'))
+
+# Negative sealed checks. Uncomment one at a time to inspect diagnostics/runtime errors.
+# sealedObject.value = 2
+# const invalidSealedOverride = { ...sealedObject, value: 2 }
+
+let person = {
+    name: 'Pasha'
+    age: 30
+    greet() =
+        return 'Hello, ' + this.name
+}
+
+checkOutput('isType<object>(person) =', isType<object>(person))
+checkOutput('person.name =', person.name)
+checkOutput("person['name'] =", person['name'])
+checkOutput('person.greet() =', person.greet())
+checkOutput('person.toString() =', person.toString())
+checkOutput('person in a template = ${person}')
+checkOutput('person sent to console =', person)
+
+let namedObject = {
+    name: 'Ada'
+    toString() =
+        return 'Person: ' + this.name
+}
+checkOutput('custom toString() =', namedObject.toString())
+checkOutput('custom object in a template = ${namedObject}')
+checkOutput('custom object sent to console =', namedObject)
+
+type PlainPerson = { name: string }
+let typedPerson: PlainPerson = { name: 'Grace' }
+checkOutput('typed object default toString() =', typedPerson.toString())
+
+type HasName = { name: string }
+let extendedPerson = { name: 'Ada', role: 'admin', employeeId: 42 }
+let personView = extendedPerson.as<HasName>()
+checkOutput('as<T>() retains extra fields =', personView.toString())
+
+const extendedInfo = { ...typedPerson, surname: 'Sullivan' }
+checkOutput('ExtendedInfo:', extendedInfo)
+
+# Invalid-index case. Uncomment to inspect the error.
+# person[true]
+
+type Getter = {
+    get value(): string =
+        return 'Hello, world!'
+    set value(value: string) =
+        checkOutput('value set to', value)
+}
+
+let getter = Getter()
+checkOutput('getter.value =', getter.value)
+getter.value = 'Hello, world!'
+
+type Functional = {
+    fun (arg: string | number) =
+        'Anonymous method. param: ${this.param}. arg: ${arg}.'
+    readonly prop = 'prop'
+    readonly param: string | number
+}
+
+const funcObject = {
+    field: 'something...'
+    fun (arg: string | number) =
+        return 'func object. field:${this.field}. arg:${arg}'
+}
+
+type FunctionPrototype = {
+    fun (arg: string | number): string
+    fun describe(arg: string): string
+}
+
+const typedFunc = Functional({ param: 'typed' })
+const prototypeFunc: FunctionPrototype = {
+    fun (arg: string | number) =
+        return 'prototype call. arg:${arg}'
+    fun describe(arg: string) =
+        return 'prototype method. arg:${arg}'
+}
+
+checkOutput(typedFunc)
+checkOutput(funcObject)
+checkOutput(prototypeFunc)
+checkOutput(typedFunc('argument'))
+checkOutput(funcObject(42))
+checkOutput(prototypeFunc('anonymous'))
+checkOutput(prototypeFunc.describe('named'))
+
+const callableContext = { field: 'call context' }
+const boundFuncObject = funcObject.bind(callableContext)
+checkOutput(funcObject.call(callableContext, 'call'))
+checkOutput(funcObject.apply(callableContext, ['apply']))
+checkOutput(boundFuncObject('bind'))
+
+const overriddenCallable = {
+    fun (arg: string) =
+        return 'anonymous:${arg}'
+    fun call(thisArg: any, arg: string) =
+        return 'overridden call:${arg}'
+    fun apply(thisArg: any, args: any[]) =
+        return 'overridden apply:${args[0]}'
+    fun bind(thisArg: any) =
+        return 'overridden bind'
+}
+
+checkOutput(overriddenCallable.call(null, 'value'))
+checkOutput(overriddenCallable.apply(null, ['value']))
+checkOutput(overriddenCallable.bind(null))
+
+fun invokeCallback(callback: (string | number) -> string, arg: string | number): string =
+    return callback(arg)
+
+const assignedCallable: (string | number) -> string = funcObject
+checkOutput(assignedCallable('assigned'))
+checkOutput(invokeCallback(funcObject, 'argument'))
+
+fun regularCallback(arg: string | number): string =
+    return 'regular callback:${arg}'
+
+fun callTwice(callback: (string | number) -> string, first: string | number, second: string | number): string[] =
+    return [callback(first), callback(second)]
+
+fun callbackFactory(callback: (string | number) -> string): (string | number) -> string =
+    return callback
+
+const returnedFunction = callbackFactory(regularCallback)
+const returnedCallable = callbackFactory(funcObject)
+checkOutput(callTwice(regularCallback, 'first', 2))
+checkOutput(callTwice(funcObject, 'first', 2))
+checkOutput(returnedFunction('returned function'))
+checkOutput(returnedCallable('returned callable'))
+
+fun addNumbers(left: number, right: number): number =
+    return left + right
+
+const callableAdder = {
+    offset: 10
+    fun (left: number, right: number): number =
+        return this.offset + left + right
+}
+
+fun calculate(callback: (number, number) -> number, left: number, right: number): number =
+    return callback(left, right)
+
+checkOutput(calculate(addNumbers, 3, 4))
+checkOutput(calculate(callableAdder, 3, 4))
+
+const defaultBooleanObject = { value: 1 }
+const overriddenBooleanObject = {
+    value: 0
+    fun toBoolean(): boolean =
+        return this.value > 0
+}
+checkOutput('default object boolean:', !!defaultBooleanObject, defaultBooleanObject ? 'truthy' : 'falsy')
+checkOutput('overridden object boolean:', !!overriddenBooleanObject, overriddenBooleanObject ? 'truthy' : 'falsy')
+
+const pickSource = { name: 'Ada', age: 36, language: 'Juno' }
+const pickedObject = pickSource.pick('name', 'age')
+const omittedObject = pickSource.omit('age')
+checkOutput('object pick:', pickedObject.name, pickedObject.age, pickedObject.has('language'))
+checkOutput('object omit:', omittedObject.name, omittedObject.language, omittedObject.has('age'))
+
+const readonlyObjectCopy = { name: 'Ada', age: 36 }.asReadonly()
+const mutableObjectCopy = readonlyObjectCopy.asMutable()
+mutableObjectCopy.name = 'Grace'
+mutableObjectCopy.age = 37
+checkOutput('readonly object copy:', readonlyObjectCopy)
+checkOutput('mutable object copy:', mutableObjectCopy)
+
+const deepSource = { nested: { value: 1 }, items: [1, 2] }
+const deepClone = deepSource.deepClone()
+deepClone.nested.value = 2
+deepClone.items.push(3)
+checkOutput('deep clone source unchanged:', deepSource.nested.value, deepSource.items.length)
+checkOutput('deep clone changed independently:', deepClone.nested.value, deepClone.items.length)
+
+const deeplyFrozen = deepSource.deepFreeze()
+checkOutput('deep freeze values:', deeplyFrozen.nested.value, deeplyFrozen.items.length)
+# deeplyFrozen.nested.value = 2
+# deeplyFrozen.items.push(3)
+
+const frozenCopy = deepSource.toDeepFreezed()
+checkOutput('deep frozen copy:', frozenCopy.nested.value, frozenCopy.items.length)
+# frozenCopy.nested.value = 2
+# frozenCopy.items.push(3)
+
+# Negative readonly check. Uncomment to inspect diagnostics.
+# readonlyObjectCopy.name = 'Changed'
+
+checkOutput('=== Object tests complete ===')

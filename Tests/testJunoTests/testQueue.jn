@@ -1,0 +1,32 @@
+import { outputFor } from './output.cjs'
+
+const checkOutput = outputFor('testQueue.jn')
+import { Queue } from 'juno:types'
+
+checkOutput('=== Queue tests ===')
+
+const queue = Queue(1, 2, 3)
+checkOutput('initial:', queue.length, queue.toArray())
+
+checkOutput('pop:', queue.pop(), queue.length, queue.toArray())
+checkOutput('push:', queue.push(4, 5), queue.length, queue.toArray())
+
+const copy = queue.copy()
+checkOutput('copy:', copy.length, copy.toArray())
+checkOutput('copy pop:', copy.pop(), copy.toArray())
+checkOutput('source unchanged:', queue.length, queue.toArray())
+
+checkOutput('iterable methods:', queue.at(0), queue.includes(4), queue.indexOf(5))
+checkOutput('iterable map:', queue.map((value) => value * 2))
+
+const strings = Queue('first', 'second')
+const first: string? = strings.pop()
+checkOutput('generic inference:', first, strings.toArray())
+
+# Negative generic check. Uncomment to inspect the diagnostic.
+# strings.push(42)
+
+const empty = Queue<number>()
+checkOutput('empty:', empty.length, empty.pop(), empty.toArray())
+
+checkOutput('=== Queue tests complete ===')

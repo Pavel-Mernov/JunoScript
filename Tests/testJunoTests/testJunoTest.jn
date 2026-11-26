@@ -1,0 +1,17 @@
+import { expect, Mock } from 'juno:test'
+
+expect.toBeEqual<number>(2 + 2, 4)
+expect.not.toBeEqual<string>('Juno', 'Java')
+expect.toBeTrue(true)
+expect.toBeFalse(false)
+expect.toBeDefined<string>('value')
+expect.toBeNull<null>(null)
+expect.toContain([1, 2, 3], 2)
+expect.toMatch('JunoScript', 'Script')
+
+const mocked = Mock((value : number) => value * 2)
+expect.toBeEqual(mocked(5), 10)
+expect.toHaveBeenCalledTimes(mocked, 1)
+expect.toHaveBeenCalledWith(mocked, 5)
+mocked.mockReturnValue(7)
+expect.that(mocked()).toBe(7)
