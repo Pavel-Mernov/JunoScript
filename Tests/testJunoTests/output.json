@@ -1,4 +1,50 @@
 {
+  "testGenericTypes3.jn": [
+    ["'generic constraint:'","'Juno'","42"],
+    ["'literal union constraint:'","'name'","'age'"],
+    ["'array constraint:'","[ 'name', 'age' ]"],
+    ["'index signature:'","10","true"],
+    ["'mapped fields:'","'mapped'","42"],
+    ["'Exclude:'","true","false"],
+    ["'generic type defaults:'","'default'","7"],
+    ["'generic method prototype:'","'age'"],
+    ["'generic constructor method:'","'42'"],
+    ["'KeyOf object:'","true","true","false"],
+    ["'KeyOf array:'","true","true","true","false"],
+    ["'object index literal:'","'indexed'","true"],
+    ["'object index KeyOf:'","'indexed'"],
+    ["'array index keys:'","'zero'","2","true"],
+    ["'Box indexed inference:'","7","true","true"],
+    ["'pick/omit inference:'","7","false"],
+    ["'omit function result:'","{ lastName: 'Mernov', toString: [Function: method] }"],
+    ["'pick function result:'","{ name: 'Paul', toString: [Function: method] }"],
+    ["'pick function result:'","{ lastName: 'Mernov', toString: [Function: method] }"]
+  ],
+  "testJnTs/importReexports.jn": [
+    ["'re-exported TS:'","'JN/TS interop'","1","'[Grace]'","[ 21, 24 ]"],
+    ["'destructured Juno export:'","'Juno'","true"]
+  ],
+  "testJnTs/interop.jn": [
+    ["'TS destructured exports:'","'JN/TS interop'","1"],
+    ["'TS union arguments:'","'[Juno]'","'[42]'","'null'"],
+    ["'TS complex return:'","'Ada'","true","'TypeScript'"],
+    ["'TS arrays:'","[ 20, 40, 60 ]","[ 20, 41, 62 ]"],
+    ["'TS nested value:'","'Juno'","[ 'typed', 'native' ]","null"],
+    ["'TS Symbol.iterator as JN iterator:'","{ value: 2 }","{ value: 4 }","{ value: 6 }","null"],
+    ["'JN toArray as TS Symbol.iterator:'","[ 1, 3, 5 ]"],
+    ["'TS class as JN constructor:'","5","7"],
+    ["'TS class static method:'","10"]
+  ],
+  "testTypeInference.jn": [
+    ["'=== Array and object type inference ==='"],
+    ["'Inferred number values:'","10","30"],
+    ["'Inferred object fields:'","'Pasha'","31","true"],
+    ["'Inferred array of objects:'","'Linus'"],
+    ["{ age: 36, name: 'Ada', toString: [Function: method] }","'Ada'","36"],
+    ["{ age: 56, name: 'Linus', toString: [Function: method] }","'Linus'","56"],
+    ["{ name: 'Paul', toString: [Function: method] }","'Paul'","null"],
+    ["'=== Inference tests complete ==='"]
+  ],
   "test.jn": [
     ["'=== JunoScript smoke tests ==='"],
     ["'Imports parsed successfully'"],

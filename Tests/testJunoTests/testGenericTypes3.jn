@@ -143,4 +143,4 @@ checkOutput('omit function result:', omitFunction('name'))
 const pickFunction = person.pick
 
 checkOutput('pick function result:', pickFunction('name'))
-checkOutput('pick function result:', pickFunction('f'))
+checkOutput('pick function result:', pickFunction('lastName'))

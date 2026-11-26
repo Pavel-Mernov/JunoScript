@@ -11,10 +11,7 @@ import {
     interop
 } from './reexports.jn'
 
-const profile = createProfile('Grace', [7, 8]).as<{
-    name: string
-    scores: number[]
-}>()
+const profile = createProfile('Grace', [7, 8])
 
 checkOutput('re-exported TS:', label, version, formatValue(profile.name), scaleNumbers(profile.scores, 3))
 checkOutput('destructured Juno export:', runtime, interop)

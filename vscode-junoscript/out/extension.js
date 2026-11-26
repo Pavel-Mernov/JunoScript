@@ -2930,7 +2930,11 @@ function isAssignableTo(expected, actual, env) {
 function hostType(source) {
   if (!source) return named("any");
   try {
-    const declaration = parse(`type __HostType = ${source.trim()}`, { validate: false })[0];
+    const normalized = source.trim().replace(
+      /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|;/g,
+      (token) => token === ";" ? "," : token
+    );
+    const declaration = parse(`type __HostType = ${normalized}`, { validate: false })[0];
     if (declaration.kind !== "TypeDeclaration") return named("any");
     const adapt = (type) => {
       if (type.kind === "NamedType" && type.name === "void") return named("null");
@@ -3364,11 +3368,14 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
         returnType: expandLocalAliases(functionReturnType(method2.body, method2.returnType ?? inferFunctionReturnType2(method2.body, declarationEnv, method2.params)))
       }))
     });
-    else if (declaration.kind === "Variable" && exported) result.set(declaration.name, { kind: "var", type: declaration.type ? expandLocalAliases(declaration.type) : declaration.initializer ? inferExpression(declaration.initializer, declarationEnv) : named("any") });
-    else if (declaration.kind === "Destructure" && exported) {
-      const source = inferExpression(declaration.initializer, globals());
+    else if (declaration.kind === "Variable") {
+      const type = declaration.type ? expandLocalAliases(declaration.type) : declaration.initializer ? inferExpression(declaration.initializer, declarationEnv) : named("any");
+      declarationEnv.set(declaration.name, { kind: "var", mutable: declaration.mutable, type });
+      if (exported) result.set(declaration.name, { kind: "var", type });
+    } else if (declaration.kind === "Destructure" && exported) {
+      const source = inferExpression(declaration.initializer, declarationEnv);
       for (const binding of declaration.bindings) {
-        const member = lookupMember(source, binding.name, globals());
+        const member = lookupMember(source, binding.name, declarationEnv);
         result.set(binding.name, { kind: "var", type: member && !isFunctionSymbol(member) ? member : named("any") });
       }
     }
@@ -5546,7 +5553,9 @@ function analyze(source, filePath) {
         if (iterable2?.kind === "type") imported.set("Iterable", iterable2);
       }
     }
-    for (const statement of statements) if (statement.kind === "Import") {
+    for (const item of statements) {
+      const statement = item.kind === "Export" ? item.declaration : item;
+      if (statement.kind !== "Import") continue;
       const selected = [...imported].filter(([name, symbol]) => statement.namedImports.includes(name) || statement.module === "juno:node:fs" && (name === "FileStat" || statement.defaultImport && symbol.kind === "fun"));
       statement.importedTypes = Object.fromEntries(selected.flatMap(([name, symbol]) => symbol.kind === "type" ? [[name, symbol.value]] : []));
       statement.importedSymbols = Object.fromEntries(selected);

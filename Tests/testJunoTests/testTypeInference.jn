@@ -1,4 +1,5 @@
 import { outputFor } from './output.cjs'
+import { expect } from 'juno:test'
 
 const checkOutput = outputFor('testTypeInference.jn')
 
@@ -41,5 +42,6 @@ let people2 = [
 for const person of people2
     checkOutput(person, person.name, person.age)
 
+expect.toBeNull(people2[2].age)
 
 checkOutput("=== Inference tests complete ===")

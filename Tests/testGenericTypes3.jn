@@ -141,4 +141,4 @@ console.log('omit function result:', omitFunction('name'))
 const pickFunction = person.pick
 
 console.log('pick function result:', pickFunction('name'))
-console.log('pick function result:', pickFunction('f'))
+console.log('pick function result:', pickFunction('lastName'))

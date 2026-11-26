@@ -2045,13 +2045,15 @@ export class Interpreter {
                 }
             }
         }
+        const hasProperty = property in Object(object)
+        if (!hasProperty && (typeof object === 'object' || typeof object === 'function')) return null
         const declaredType = this.typeOf(owner, env)
         const memberLookupType = declaredType && optional ? this.nonNullableType(declaredType) : declaredType
         const declaredMember = memberLookupType ? this.findTypeMember(memberLookupType, property, env) : null
         if (declaredType && !(declaredType.kind === 'NamedType' && declaredType.name === 'any') && !declaredMember) {
             throw new TypeError(`Property '${property}' does not exist on declared type`)
         }
-        if (!(property in Object(object))) {
+        if (!hasProperty) {
             if (optional || declaredMember?.optional) return null
             throw new TypeError(`Property '${property}' does not exist on value`)
         }

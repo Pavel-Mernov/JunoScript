@@ -385,6 +385,8 @@ const length = selectedName?.length
 
 Перед обычным обращением nullable-значение нужно проверить. Примеры: [`Tests/test1.jn`](./Tests/test1.jn) и [`Tests/testBoolean.jn`](./Tests/testBoolean.jn).
 
+Если анализатор разрешает чтение поля, а у объекта этого поля нет, результатом будет `null`. Например, в массиве объектов с разным набором полей чтение `person.age` вернёт `null` для элемента без `age`. Недопустимое по типу обращение по-прежнему вызывает диагностику. Пример есть в [`Tests/testTypeInference.jn`](./Tests/testTypeInference.jn).
+
 ### Object types
 
 ```junoscript
@@ -1246,7 +1248,11 @@ const profile = createProfile('Ada', [10, 20, 30])
 const scaled = scaleNumbers(profile.scores, 2)
 ```
 
-Type declarations экспортированных TypeScript-значений используются для hover и inference. Примеры: [`Tests/testJnTs`](./Tests/testJnTs).
+Анализатор использует декларации TypeScript для hover и вывода типов, в том числе через `export import` в промежуточном `.jn`-модуле. Тип результата `createProfile` выводится и при прямом импорте, и через реэкспорт. Примеры есть в [`Tests/testJnTs`](./Tests/testJnTs).
+
+При импорте TypeScript-тип `unknown` становится JunoScript-типом `any`, в том числе внутри массивов и обобщённых типов. При генерации TypeScript-деклараций стандартной библиотеки JunoScript-тип `any` становится `unknown`.
+
+Для нативного модуля можно задать сигнатуры в соседнем файле `<имя модуля>.d.jn`. Например, подсказки типов для `output.cjs` берутся из [`output.cjs.d.jn`](./Tests/testJunoTests/output.cjs.d.jn).
 
 ## Стандартные модули
 
@@ -1355,7 +1361,15 @@ load.mockReturnValue(7)
 
 # Доступен и классический Jest-style API.
 expect.that(load()).toBe(7)
+
+# Матчёр сам вызывает переданную функцию.
+expect.toThrow(() => RegEx('['))
+expect.not.toThrow(() => RegEx('abc'))
 ```
+
+В Juno-форме `expect.toBeDefined(value)` проверяет, что значение отличается от `null`. `toBeTrue` и `toBeFalse` проверяют точные значения `true` и `false`. Для проверки результата преобразования к boolean используйте `toBeTruthy` и `toBeFalsy`.
+
+`toThrow` проверяет исключение во время выполнения. Ошибка статического анализа останавливает запуск до вызова матчёра. Для функции, возвращающей `Result`, можно проверить поля `ok` и `error`.
 
 Кроме основных matcher-ов доступны asymmetric matchers (`anything`, `objectContaining`, `arrayContaining`), `spyOn`, управление mock-ами, `describe`/`test`/`it`, hooks и fake timers. Ошибка assertion завершает `junode` с ненулевым exit code.
 
@@ -1378,6 +1392,16 @@ expect.that(load()).toBe(7)
 Анализатор восстанавливается после нескольких синтаксических ошибок, поэтому hover и inference продолжают работать в остальных частях файла.
 
 ## Тестовые программы
+
+Из корня проекта выполните:
+
+```sh
+npm run test:juno
+```
+
+Команда собирает проект и запускает [`Tests/testJunoTests`](./Tests/testJunoTests), включая файловые тесты, тесты сборки и проверку TypeScript-деклараций. Набор использует прямые проверки через `juno:test` и сравнение с сохранёнными ожидаемыми результатами. После ошибки прогон продолжается, а в конце команда печатает число успешных и упавших проверок и возвращает ненулевой код при падении.
+
+В стеке ошибки выводятся путь, строка и колонка исходного `.jn`-файла. Если для ошибки есть кадры JunoScript, тестовый отчёт выводит их.
 
 | Файл | Содержание |
 | --- | --- |
