@@ -28,6 +28,7 @@ async function importCandidates(document: vscode.TextDocument, name: string): Pr
     const standardModules: Record<string, string[]> = {
         juno: ['console', 'Math', 'types', 'Error', 'Range', 'Iterable', 'Boolean', 'Number', 'String'],
         'juno:node': ['console'],
+        'juno:node:fs': ['FileStat', ...['readFile', 'writeFile', 'appendFile', 'exists', 'mkdir', 'readdir', 'remove', 'rename', 'copyFile', 'stat'].flatMap(name => [name, `${name}Sync`])],
         'juno:async': ['Promise', 'RejectedResult', 'TimerHandle', 'ImmediateHandle', 'AsyncCallback', 'FetchInput', 'FetchOptions', 'FetchResponse', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'setImmediate', 'clearImmediate', 'queueMicrotask', 'fetch'],
         'juno:types': ['Iterable', 'Range', 'Array', 'Set', 'ValueSet', 'Map', 'ValueMap', 'Queue', 'Object', 'Boolean', 'Tuple', 'Random', 'Error', 'Result', 'ok', 'Partial', 'Required', 'Readonly', 'Pick', 'Omit', 'KeyOf', 'Exclude', 'Items']
     }
@@ -39,6 +40,7 @@ async function importCandidates(document: vscode.TextDocument, name: string): Pr
     const projectRoot = path.resolve(__dirname, '../..')
     seenFiles.add(path.join(projectRoot, 'Modules', 'juno.ts'))
     seenFiles.add(path.join(projectRoot, 'Modules', 'juno-node.ts'))
+    seenFiles.add(path.join(projectRoot, 'Modules', 'juno-node-fs.ts'))
     seenFiles.add(path.join(projectRoot, 'types', 'index.jn'))
 
     const files = await vscode.workspace.findFiles(
@@ -101,7 +103,7 @@ function importCompletions(document: vscode.TextDocument, position: vscode.Posit
     if (!moduleMatch) return undefined
     const typed = moduleMatch[2]
     const start = new vscode.Position(position.line, position.character - typed.length)
-    const modules = new Set(['juno', 'juno:node', 'juno:types', 'juno:async', 'types'])
+    const modules = new Set(['juno', 'juno:node', 'juno:node:fs', 'juno:types', 'juno:async', 'types'])
     if (typed.startsWith('.')) {
         const slash = Math.max(typed.lastIndexOf('/'), typed.lastIndexOf('\\'))
         const directoryPart = slash < 0 ? '.' : typed.slice(0, slash + 1)

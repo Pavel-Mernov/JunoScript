@@ -38,7 +38,7 @@ type SymbolInfo =
     | { kind: 'fun'; generics?: string[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params: Parameter[]; returnType: TypeNode; docs?: string }
     | { kind: 'type'; generics: string[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; value: TypeNode; docs?: string; typeParameter?: boolean }
     | { kind: 'constructor'; generics: string[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; inheritedType: TypeNode; overloads: { params: Parameter[]; returnType: TypeNode }[]; methods: { name: string; generics: string[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params: Parameter[]; returnType: TypeNode }[]; docs?: string }
-    | { kind: 'module'; module: string; docs?: string }
+    | { kind: 'module'; module: string; type?: TypeNode; docs?: string }
 
 type Env = Map<string, SymbolInfo>
 
@@ -978,6 +978,7 @@ function hostType(source: string | undefined): TypeNode {
         const declaration = parse(`type __HostType = ${source.trim()}`, { validate: false })[0]
         if (declaration.kind !== 'TypeDeclaration') return named('any')
         const adapt = (type: TypeNode): TypeNode => {
+            if (type.kind === 'NamedType' && type.name === 'void') return named('null')
             if (type.kind === 'GenericType' && type.name === 'Iterable') {
                 const element = adapt(type.args[0] ?? named('any'))
                 return { kind: 'ObjectType', members: [method('iterator', [], {
@@ -991,7 +992,14 @@ function hostType(source: string | undefined): TypeNode {
             if (type.kind === 'ArrayType') return { ...type, element: adapt(type.element) }
             if (type.kind === 'UnionType' || type.kind === 'IntersectionType') return { ...type, types: type.types.map(adapt) }
             if (type.kind === 'FunctionType') return { ...type, params: type.params.map(adapt), result: adapt(type.result) }
-            if (type.kind === 'ObjectType') return { ...type, members: type.members.map(member => ({ ...member, type: adapt(member.type) })) }
+            if (type.kind === 'ObjectType') return { ...type, members: type.members.map(member => ({
+                ...member,
+                type: adapt(member.type),
+                indexType: member.indexType && adapt(member.indexType),
+                params: member.params?.map(param => ({ ...param, type: param.type && adapt(param.type) }))
+            })) }
+            if (type.kind === 'IndexedAccessType') return { ...type, object: adapt(type.object), index: adapt(type.index) }
+            if (type.kind === 'ConditionalType') return { ...type, check: adapt(type.check), target: adapt(type.target), consequent: adapt(type.consequent), alternate: adapt(type.alternate) }
             return type
         }
         return adapt(declaration.value)
@@ -1369,7 +1377,7 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
     if (!filePath) return result
     for (const statement of statements) {
         const importedStatement = statement.kind === 'Import' ? statement : statement.kind === 'Export' && statement.declaration.kind === 'Import' ? statement.declaration : undefined
-        if (!importedStatement || (!importedStatement.module.startsWith('.') && importedStatement.module !== 'juno:async' && importedStatement.module !== 'juno:types' && !importedStatement.module.startsWith('juno:types/'))) continue
+        if (!importedStatement || (!importedStatement.module.startsWith('.') && importedStatement.module !== 'juno:async' && importedStatement.module !== 'juno:node:fs' && importedStatement.module !== 'juno:types' && !importedStatement.module.startsWith('juno:types/'))) continue
         if (importedStatement.module === 'juno:async') {
             const asyncFile = asyncTypeScriptFile()
             let declarations = new Map<string, ImportedSymbol>()
@@ -1378,6 +1386,33 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
                 const symbol = declarations.get(name) ?? asyncImportedSymbol(name)
                 if (symbol && symbol.kind !== 'module' && symbol.kind !== 'type') result.set(name, symbol)
                 else if (symbol?.kind === 'type') result.set(name, symbol)
+            }
+            continue
+        }
+        if (importedStatement.module === 'juno:node:fs') {
+            let directory = path.dirname(path.resolve(filePath))
+            let workspaceSource: string | undefined
+            while (true) {
+                const candidate = path.join(directory, 'Modules', 'juno-node-fs.ts')
+                if (fs.existsSync(candidate)) {
+                    workspaceSource = candidate
+                    break
+                }
+                const parent = path.dirname(directory)
+                if (parent === directory) break
+                directory = parent
+            }
+            const candidates = [
+                path.resolve(__dirname, '../../Modules/juno-node-fs.ts'),
+                path.resolve(__dirname, '../../../Modules/juno-node-fs.ts'),
+                path.resolve(process.cwd(), 'Modules/juno-node-fs.ts')
+            ]
+            const file = workspaceSource ?? candidates.find(candidate => fs.existsSync(candidate))
+            if (file) {
+                const declarations = hostDeclarations(fs.readFileSync(file, 'utf8'))
+                for (const [name, symbol] of declarations) {
+                    if (importedStatement.defaultImport || name === 'FileStat' || importedStatement.namedImports.includes(name)) result.set(name, symbol)
+                }
             }
             continue
         }
@@ -1888,7 +1923,7 @@ function inferExpression(expression: Expression, env: Env): TypeNode {
             if (!symbol) return named('any')
             if (symbol.kind === 'var') return symbol.type
             if (symbol.kind === 'fun') return { kind: 'FunctionType', params: symbol.params.map(parameterType), result: symbol.returnType }
-            if (symbol.kind === 'module') return moduleType(symbol.module)
+            if (symbol.kind === 'module') return symbol.type ?? moduleType(symbol.module)
             if (symbol.kind === 'constructor') return { kind: 'FunctionType', params: symbol.overloads[0]?.params.map(parameterType) ?? [], result: named(expression.name) }
             return named(expression.name)
         }
@@ -2406,7 +2441,7 @@ class Analyzer {
         for (const statement of statements) if (statement.kind === 'Import') {
             for (const [name, symbol] of Object.entries(statement.importedSymbols ?? {})) {
                 if (symbol.kind === 'type' && symbol.value) env.set(name, { kind: 'type', generics: symbol.generics ?? [], genericConstraints: symbol.genericConstraints, genericDefaults: symbol.genericDefaults, value: symbol.value })
-                else if (symbol.kind === 'fun') env.set(name, { kind: 'fun', generics: symbol.generics, genericConstraints: symbol.genericConstraints, genericDefaults: symbol.genericDefaults, params: symbol.params ?? [], returnType: symbol.returnType ?? named('any') })
+                else if (symbol.kind === 'fun' && statement.namedImports.includes(name)) env.set(name, { kind: 'fun', generics: symbol.generics, genericConstraints: symbol.genericConstraints, genericDefaults: symbol.genericDefaults, params: symbol.params ?? [], returnType: symbol.returnType ?? named('any') })
                 else if (symbol.kind === 'var') env.set(name, { kind: 'var', mutable: false, type: symbol.type ?? named('any') })
             }
             for (const [name, value] of Object.entries(statement.importedTypes ?? {})) {
@@ -2552,7 +2587,11 @@ class Analyzer {
                     : statement.module === 'juno:async' ? 'JavaScript promises, timers, fetch, and microtask helpers.'
                     : statement.module === 'juno:types' || statement.module === 'types' ? 'Runtime type utilities for transforming Juno type declarations.' : 'Standard JunoScript module. `console` mirrors the host console.'
                 if (statement.defaultImport) {
-                    const symbol: SymbolInfo = { kind: 'module', module: statement.module, docs: imported }
+                    const type: TypeNode | undefined = statement.module === 'juno:node:fs'
+                        ? { kind: 'ObjectType', members: Object.entries(statement.importedSymbols ?? {}).flatMap(([name, declaration]) =>
+                            declaration.kind === 'fun' ? [method(name, declaration.params ?? [], declaration.returnType ?? named('any'))] : []) }
+                        : undefined
+                    const symbol: SymbolInfo = { kind: 'module', module: statement.module, type, docs: imported }
                     this.bind(env, statement.defaultImport, symbol)
                     const printed = printSymbol(statement.defaultImport, symbol)
                     this.addHover(statement.defaultImport, statement.defaultImportLoc, printed.code, printed.docs)
@@ -3601,7 +3640,8 @@ export function analyze(source: string, filePath?: string): { hovers: HoverInfo[
             }
         }
         for (const statement of statements) if (statement.kind === 'Import') {
-            const selected = [...imported].filter(([name]) => statement.namedImports.includes(name))
+            const selected = [...imported].filter(([name, symbol]) => statement.namedImports.includes(name)
+                || (statement.module === 'juno:node:fs' && (name === 'FileStat' || (statement.defaultImport && symbol.kind === 'fun'))))
             statement.importedTypes = Object.fromEntries(selected.flatMap(([name, symbol]) => symbol.kind === 'type' ? [[name, symbol.value]] : []))
             statement.importedSymbols = Object.fromEntries(selected)
         }

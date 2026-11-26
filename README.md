@@ -1266,6 +1266,22 @@ const lines = console.readLines()
 const args = console.args
 ```
 
+### `juno:node:fs`
+
+Файловые операции без суффикса возвращают `Promise`. Для синхронного вызова добавьте `Sync` к имени функции.
+
+```junoscript
+import { mkdirSync, writeFileSync, readFile } from 'juno:node:fs'
+
+mkdirSync('data', true)
+writeFileSync('data/example.txt', 'JunoScript')
+
+fun loadExample(): string =
+    return await readFile('data/example.txt')
+```
+
+`statSync` возвращает `FileStat`, а `stat` возвращает `Promise<FileStat>`. Поля `FileStat` включают `size`, `createdAt`, `modifiedAt`, `isFile`, `isDirectory` и `isSymbolicLink`.
+
 ### `juno:types`
 
 ```junoscript

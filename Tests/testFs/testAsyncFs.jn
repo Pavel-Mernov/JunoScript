@@ -1,0 +1,23 @@
+import { console } from 'juno:node'
+import { appendFile, copyFile, exists, mkdir, readFile, readdir, remove, rename, stat, writeFile } from 'juno:node:fs'
+
+fun testAsyncFs(): null =
+    await mkdir('sandbox/nested', true)
+    const written = await writeFile('sandbox/nested/source.txt', 'Juno')
+    await appendFile('sandbox/nested/source.txt', 'Script')
+    await copyFile('sandbox/nested/source.txt', 'sandbox/copy.txt')
+    await rename('sandbox/copy.txt', 'sandbox/renamed.txt')
+    const contents = await readFile('sandbox/renamed.txt')
+    const entries = await readdir('sandbox')
+    console.log(written == null)
+    console.log(contents)
+    console.log(entries.includes('renamed.txt'))
+    console.log((await stat('sandbox/renamed.txt')).isFile)
+    console.log(await exists('sandbox/renamed.txt'))
+    await remove('sandbox/renamed.txt')
+    console.log(await exists('sandbox/renamed.txt'))
+    await remove('sandbox', true)
+    console.log(await exists('sandbox'))
+    return null
+
+testAsyncFs()

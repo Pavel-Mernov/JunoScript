@@ -143,11 +143,12 @@ export class Interpreter {
     private execute(statement: Statement, env: Environment): void {
         switch (statement.kind) {
             case 'Import': {
-                const module = ['juno', 'juno:node', 'juno:types', 'juno:async', 'types'].includes(statement.module)
+                const module = ['juno', 'juno:node', 'juno:types', 'juno:async', 'juno:node:fs', 'types'].includes(statement.module)
                     ? resolveModule(statement.module) as Record<string, unknown>
                     : this.loadLocalModule(statement.module, env)
-                if (statement.module === 'juno:async' && !(module as Record<string, unknown>).__junoTypes) {
-                    const source = readFileSync(resolve(__dirname, '../../Modules/async.ts'), 'utf8')
+                if ((statement.module === 'juno:async' || statement.module === 'juno:node:fs') && !(module as Record<string, unknown>).__junoTypes) {
+                    const filename = statement.module === 'juno:async' ? 'async.ts' : 'juno-node-fs.ts'
+                    const source = readFileSync(resolve(__dirname, '../../Modules', filename), 'utf8')
                     const runtimeTypes: Record<string, TypeAlias> = {}
                     for (const [name, symbol] of hostDeclarations(source)) if (symbol.kind === 'type') {
                         runtimeTypes[name] = { value: symbol.value, generics: symbol.generics, genericDefaults: symbol.genericDefaults }
@@ -373,7 +374,7 @@ export class Interpreter {
                     if (alias) (exported as any).__types ??= {}, (exported as any).__types[declaration.name] = alias
                 }
             } else if (statement.kind === 'Import') {
-                const dependency = ['juno', 'juno:node', 'juno:types', 'types'].includes(statement.module)
+                const dependency = ['juno', 'juno:node', 'juno:types', 'juno:node:fs', 'types'].includes(statement.module)
                     ? resolveModule(statement.module) as Record<string, unknown>
                     : importedModule(statement.module, moduleEnv)
                 if (statement.defaultImport) this.declare(moduleEnv, statement.defaultImport, this.adaptModule(dependency, moduleEnv), false)
@@ -924,7 +925,7 @@ export class Interpreter {
     }
 
     private async evaluateAsync(expression: Expression, env: Environment): Promise<any> {
-        if (expression.kind === 'Unary' && expression.operator === 'await') return await this.evaluateAsync(expression.operand, env)
+        if (expression.kind === 'Unary' && expression.operator === 'await') return (await this.evaluateAsync(expression.operand, env)) ?? null
         if (expression.kind === 'Conditional') {
             return this.requireCondition(await this.evaluateAsync(expression.condition, env))
                 ? this.evaluateAsync(expression.consequent, env)
@@ -990,7 +991,7 @@ export class Interpreter {
     }
 
     private async resolveAwaitExpressions(expression: Expression, env: Environment): Promise<Expression> {
-        if (expression.kind === 'Unary' && expression.operator === 'await') return { kind: 'Literal', value: await this.evaluateAsync(expression.operand, env) } as Expression
+        if (expression.kind === 'Unary' && expression.operator === 'await') return { kind: 'Literal', value: (await this.evaluateAsync(expression.operand, env)) ?? null } as Expression
         switch (expression.kind) {
             case 'Template': {
                 const parts: (string | Expression)[] = []

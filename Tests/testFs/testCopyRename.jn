@@ -1,0 +1,9 @@
+import { console } from 'juno:node'
+import { copyFileSync, existsSync, readFileSync, renameSync } from 'juno:node:fs'
+
+copyFileSync('sandbox/nested/source.txt', 'sandbox/copy.txt')
+renameSync('sandbox/copy.txt', 'sandbox/renamed.txt')
+
+const renamed = readFileSync('sandbox/renamed.txt')
+console.log(renamed)
+console.log(existsSync('sandbox/renamed.txt'))

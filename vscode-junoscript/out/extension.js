@@ -2933,6 +2933,7 @@ function hostType(source) {
     const declaration = parse(`type __HostType = ${source.trim()}`, { validate: false })[0];
     if (declaration.kind !== "TypeDeclaration") return named("any");
     const adapt = (type) => {
+      if (type.kind === "NamedType" && type.name === "void") return named("null");
       if (type.kind === "GenericType" && type.name === "Iterable") {
         const element = adapt(type.args[0] ?? named("any"));
         return { kind: "ObjectType", members: [method("iterator", [], {
@@ -2948,7 +2949,14 @@ function hostType(source) {
       if (type.kind === "ArrayType") return { ...type, element: adapt(type.element) };
       if (type.kind === "UnionType" || type.kind === "IntersectionType") return { ...type, types: type.types.map(adapt) };
       if (type.kind === "FunctionType") return { ...type, params: type.params.map(adapt), result: adapt(type.result) };
-      if (type.kind === "ObjectType") return { ...type, members: type.members.map((member) => ({ ...member, type: adapt(member.type) })) };
+      if (type.kind === "ObjectType") return { ...type, members: type.members.map((member) => ({
+        ...member,
+        type: adapt(member.type),
+        indexType: member.indexType && adapt(member.indexType),
+        params: member.params?.map((param) => ({ ...param, type: param.type && adapt(param.type) }))
+      })) };
+      if (type.kind === "IndexedAccessType") return { ...type, object: adapt(type.object), index: adapt(type.index) };
+      if (type.kind === "ConditionalType") return { ...type, check: adapt(type.check), target: adapt(type.target), consequent: adapt(type.consequent), alternate: adapt(type.alternate) };
       return type;
     };
     return adapt(declaration.value);
@@ -3367,7 +3375,7 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
   if (!filePath) return result;
   for (const statement of statements) {
     const importedStatement = statement.kind === "Import" ? statement : statement.kind === "Export" && statement.declaration.kind === "Import" ? statement.declaration : void 0;
-    if (!importedStatement || !importedStatement.module.startsWith(".") && importedStatement.module !== "juno:async" && importedStatement.module !== "juno:types" && !importedStatement.module.startsWith("juno:types/")) continue;
+    if (!importedStatement || !importedStatement.module.startsWith(".") && importedStatement.module !== "juno:async" && importedStatement.module !== "juno:node:fs" && importedStatement.module !== "juno:types" && !importedStatement.module.startsWith("juno:types/")) continue;
     if (importedStatement.module === "juno:async") {
       const asyncFile = asyncTypeScriptFile();
       let declarations = /* @__PURE__ */ new Map();
@@ -3379,6 +3387,33 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
         const symbol = declarations.get(name) ?? asyncImportedSymbol(name);
         if (symbol && symbol.kind !== "module" && symbol.kind !== "type") result.set(name, symbol);
         else if (symbol?.kind === "type") result.set(name, symbol);
+      }
+      continue;
+    }
+    if (importedStatement.module === "juno:node:fs") {
+      let directory = path2.dirname(path2.resolve(filePath));
+      let workspaceSource;
+      while (true) {
+        const candidate = path2.join(directory, "Modules", "juno-node-fs.ts");
+        if (fs2.existsSync(candidate)) {
+          workspaceSource = candidate;
+          break;
+        }
+        const parent = path2.dirname(directory);
+        if (parent === directory) break;
+        directory = parent;
+      }
+      const candidates2 = [
+        path2.resolve(__dirname, "../../Modules/juno-node-fs.ts"),
+        path2.resolve(__dirname, "../../../Modules/juno-node-fs.ts"),
+        path2.resolve(process.cwd(), "Modules/juno-node-fs.ts")
+      ];
+      const file = workspaceSource ?? candidates2.find((candidate) => fs2.existsSync(candidate));
+      if (file) {
+        const declarations = hostDeclarations(fs2.readFileSync(file, "utf8"));
+        for (const [name, symbol] of declarations) {
+          if (importedStatement.defaultImport || name === "FileStat" || importedStatement.namedImports.includes(name)) result.set(name, symbol);
+        }
       }
       continue;
     }
@@ -3893,7 +3928,7 @@ function inferExpression(expression, env) {
       if (!symbol) return named("any");
       if (symbol.kind === "var") return symbol.type;
       if (symbol.kind === "fun") return { kind: "FunctionType", params: symbol.params.map(parameterType), result: symbol.returnType };
-      if (symbol.kind === "module") return moduleType(symbol.module);
+      if (symbol.kind === "module") return symbol.type ?? moduleType(symbol.module);
       if (symbol.kind === "constructor") return { kind: "FunctionType", params: symbol.overloads[0]?.params.map(parameterType) ?? [], result: named(expression.name) };
       return named(expression.name);
     }
@@ -4364,7 +4399,7 @@ var Analyzer = class {
     for (const statement of statements) if (statement.kind === "Import") {
       for (const [name, symbol] of Object.entries(statement.importedSymbols ?? {})) {
         if (symbol.kind === "type" && symbol.value) env.set(name, { kind: "type", generics: symbol.generics ?? [], genericConstraints: symbol.genericConstraints, genericDefaults: symbol.genericDefaults, value: symbol.value });
-        else if (symbol.kind === "fun") env.set(name, { kind: "fun", generics: symbol.generics, genericConstraints: symbol.genericConstraints, genericDefaults: symbol.genericDefaults, params: symbol.params ?? [], returnType: symbol.returnType ?? named("any") });
+        else if (symbol.kind === "fun" && statement.namedImports.includes(name)) env.set(name, { kind: "fun", generics: symbol.generics, genericConstraints: symbol.genericConstraints, genericDefaults: symbol.genericDefaults, params: symbol.params ?? [], returnType: symbol.returnType ?? named("any") });
         else if (symbol.kind === "var") env.set(name, { kind: "var", mutable: false, type: symbol.type ?? named("any") });
       }
       for (const [name, value] of Object.entries(statement.importedTypes ?? {})) {
@@ -4485,7 +4520,8 @@ var Analyzer = class {
       case "Import": {
         const imported = statement.module === "juno:node" ? "Node.js helpers for JunoScript (`console.args`, `console.read`, `console.readLines`)." : statement.module === "juno:async" ? "JavaScript promises, timers, fetch, and microtask helpers." : statement.module === "juno:types" || statement.module === "types" ? "Runtime type utilities for transforming Juno type declarations." : "Standard JunoScript module. `console` mirrors the host console.";
         if (statement.defaultImport) {
-          const symbol = { kind: "module", module: statement.module, docs: imported };
+          const type = statement.module === "juno:node:fs" ? { kind: "ObjectType", members: Object.entries(statement.importedSymbols ?? {}).flatMap(([name, declaration]) => declaration.kind === "fun" ? [method(name, declaration.params ?? [], declaration.returnType ?? named("any"))] : []) } : void 0;
+          const symbol = { kind: "module", module: statement.module, type, docs: imported };
           this.bind(env, statement.defaultImport, symbol);
           const printed = printSymbol(statement.defaultImport, symbol);
           this.addHover(statement.defaultImport, statement.defaultImportLoc, printed.code, printed.docs);
@@ -5477,7 +5513,7 @@ function analyze(source, filePath) {
       }
     }
     for (const statement of statements) if (statement.kind === "Import") {
-      const selected = [...imported].filter(([name]) => statement.namedImports.includes(name));
+      const selected = [...imported].filter(([name, symbol]) => statement.namedImports.includes(name) || statement.module === "juno:node:fs" && (name === "FileStat" || statement.defaultImport && symbol.kind === "fun"));
       statement.importedTypes = Object.fromEntries(selected.flatMap(([name, symbol]) => symbol.kind === "type" ? [[name, symbol.value]] : []));
       statement.importedSymbols = Object.fromEntries(selected);
     }
@@ -5535,6 +5571,7 @@ async function importCandidates(document, name) {
   const standardModules = {
     juno: ["console", "Math", "types", "Error", "Range", "Iterable", "Boolean", "Number", "String"],
     "juno:node": ["console"],
+    "juno:node:fs": ["FileStat", ...["readFile", "writeFile", "appendFile", "exists", "mkdir", "readdir", "remove", "rename", "copyFile", "stat"].flatMap((name2) => [name2, `${name2}Sync`])],
     "juno:async": ["Promise", "RejectedResult", "TimerHandle", "ImmediateHandle", "AsyncCallback", "FetchInput", "FetchOptions", "FetchResponse", "setTimeout", "setInterval", "clearTimeout", "clearInterval", "setImmediate", "clearImmediate", "queueMicrotask", "fetch"],
     "juno:types": ["Iterable", "Range", "Array", "Set", "ValueSet", "Map", "ValueMap", "Queue", "Object", "Boolean", "Tuple", "Random", "Error", "Result", "ok", "Partial", "Required", "Readonly", "Pick", "Omit", "KeyOf", "Exclude", "Items"]
   };
@@ -5545,6 +5582,7 @@ async function importCandidates(document, name) {
   const projectRoot = path.resolve(__dirname, "../..");
   seenFiles.add(path.join(projectRoot, "Modules", "juno.ts"));
   seenFiles.add(path.join(projectRoot, "Modules", "juno-node.ts"));
+  seenFiles.add(path.join(projectRoot, "Modules", "juno-node-fs.ts"));
   seenFiles.add(path.join(projectRoot, "types", "index.jn"));
   const files = await vscode.workspace.findFiles(
     "**/*.{jn,ts,js,mts,cts,mjs,cjs}",
@@ -5608,7 +5646,7 @@ function importCompletions(document, position) {
   if (!moduleMatch) return void 0;
   const typed = moduleMatch[2];
   const start = new vscode.Position(position.line, position.character - typed.length);
-  const modules = /* @__PURE__ */ new Set(["juno", "juno:node", "juno:types", "juno:async", "types"]);
+  const modules = /* @__PURE__ */ new Set(["juno", "juno:node", "juno:node:fs", "juno:types", "juno:async", "types"]);
   if (typed.startsWith(".")) {
     const slash = Math.max(typed.lastIndexOf("/"), typed.lastIndexOf("\\"));
     const directoryPart = slash < 0 ? "." : typed.slice(0, slash + 1);

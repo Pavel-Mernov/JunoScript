@@ -1,0 +1,15 @@
+import { console } from 'juno:node'
+import fs, { existsSync, FileStat, removeSync, statSync } from 'juno:node:fs'
+
+const info = statSync('sandbox/renamed.txt')
+const entries = fs.readdirSync('sandbox')
+console.log(isType<FileStat>(info))
+console.log(info.isFile)
+console.log(info.size)
+console.log(entries.includes('nested'))
+console.log(entries.includes('renamed.txt'))
+
+removeSync('sandbox/renamed.txt')
+console.log(existsSync('sandbox/renamed.txt'))
+removeSync('sandbox', true)
+console.log(existsSync('sandbox'))

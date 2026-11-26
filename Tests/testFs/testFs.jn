@@ -1,0 +1,10 @@
+import { console } from 'juno:node'
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'juno:node:fs'
+
+mkdirSync('sandbox/nested', true)
+const written = writeFileSync('sandbox/nested/source.txt', 'Juno')
+console.log(written == null)
+appendFileSync('sandbox/nested/source.txt', 'Script')
+
+const source = readFileSync('sandbox/nested/source.txt')
+console.log(source)
