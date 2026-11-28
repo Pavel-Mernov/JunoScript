@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testTyping.jn')
+const recordOutput = outputFor('testTyping.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { Math, Boolean, Number, String } from 'juno'
 
 checkOutput("special numbers:", Math.NaN, Math.Infinity, -Math.Infinity)

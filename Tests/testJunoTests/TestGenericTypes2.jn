@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('TestGenericTypes2.jn')
+const recordOutput = outputFor('TestGenericTypes2.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { Partial, Required, Readonly, Pick, Omit } from 'juno:types'
 
 type User = {

@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testBoolean.jn')
+const recordOutput = outputFor('testBoolean.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { Math, Boolean } from 'juno'
 
 const ready = true

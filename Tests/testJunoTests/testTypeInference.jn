@@ -1,7 +1,8 @@
 import { outputFor } from './output.cjs'
 import { expect } from 'juno:test'
 
-const checkOutput = outputFor('testTypeInference.jn')
+const recordOutput = outputFor('testTypeInference.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 
 checkOutput("=== Array and object type inference ===")
 

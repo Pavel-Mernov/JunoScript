@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testIterable.jn')
+const recordOutput = outputFor('testIterable.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 
 type IterableArray = Iterable<string | number> & {
     data: (string | number)[]

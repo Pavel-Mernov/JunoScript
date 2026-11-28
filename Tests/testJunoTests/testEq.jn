@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testEq.jn')
+const recordOutput = outputFor('testEq.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 
 checkOutput(5 == '5')
 checkOutput(5 == 5)

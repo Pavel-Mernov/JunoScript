@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testMath.jn')
+const recordOutput = outputFor('testMath.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { Math, Number } from 'juno'
 import { Random } from 'juno:types'
 import { random } from '../../types/random.ts'

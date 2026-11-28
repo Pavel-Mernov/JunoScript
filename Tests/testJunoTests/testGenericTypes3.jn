@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testGenericTypes3.jn')
+const recordOutput = outputFor('testGenericTypes3.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { KeyOf, Exclude } from 'juno:types'
 
 fun identity<T is string | number = string>(value: T): T =

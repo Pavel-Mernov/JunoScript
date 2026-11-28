@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testStrings.jn')
+const recordOutput = outputFor('testStrings.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { String } from 'juno'
 
 checkOutput("=== String constructor tests ===")

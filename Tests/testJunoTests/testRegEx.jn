@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testRegEx.jn')
+const recordOutput = outputFor('testRegEx.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 
 const literal: RegEx = /<...>/
 const constructed: RegEx = RegEx('<...>')

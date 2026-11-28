@@ -1,6 +1,7 @@
 import { outputFor } from '../../output.cjs'
 
-const checkOutput = outputFor('testBuild/testBuildOutput/testBuildOutput.jn')
+const recordOutput = outputFor('testBuild/testBuildOutput/testBuildOutput.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { answer, Counter, greet } from '../testBuild'
 
 checkOutput('answer:', answer)

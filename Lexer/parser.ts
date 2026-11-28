@@ -1,7 +1,7 @@
 import { Lexer, Token, TokenType } from './lexer'
 
 export type Loc = { line: number; column: number }
-export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'LiteralType'; value: string | number | boolean; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'IndexedAccessType'; object: TypeNode; index: TypeNode; loc?: Loc } | { kind: 'TypeOfType'; expression: Expression; loc?: Loc } | { kind: 'ConditionalType'; check: TypeNode; target: TypeNode; consequent: TypeNode; alternate: TypeNode; loc?: Loc } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; result: TypeNode }
+export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'LiteralType'; value: string | number | boolean; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'IndexedAccessType'; object: TypeNode; index: TypeNode; loc?: Loc } | { kind: 'TypeOfType'; expression: Expression; loc?: Loc } | { kind: 'ConditionalType'; check: TypeNode; target: TypeNode; consequent: TypeNode; alternate: TypeNode; loc?: Loc } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; rest?: TypeNode; result: TypeNode }
 export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; sealed?: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; accessor?: 'get' | 'set'; indexType?: TypeNode; generics?: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params?: Parameter[]; body?: Statement[] }
 export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression; rest?: boolean }
 export type MatchPattern =
@@ -491,8 +491,17 @@ export class Parser {
             }
             this.take('RightBrace'); result = { kind: 'ObjectType', members }
         } else if (this.match('LeftParen')) {
-            const args: TypeNode[] = []; if (!this.is('RightParen')) do { args.push(this.type()) } while (this.match('Comma'))
-            this.take('RightParen'); if (this.match('Arrow') || this.match('FatArrow')) result = { kind: 'FunctionType', params: args, result: this.type() }; else if (args.length === 1) result = args[0]; else this.fail('Expected function return type after -> or =>')
+            const args: TypeNode[] = []
+            let rest: TypeNode | undefined
+            if (!this.is('RightParen')) do {
+                if (rest) this.fail('A rest parameter must be the last parameter')
+                const variadic = this.match('Ellipsis')
+                if (this.is('Identifier') && this.tokens[this.pos + 1]?.type === 'Colon') this.pos += 2
+                const argument = this.type()
+                if (variadic) rest = argument
+                else args.push(argument)
+            } while (this.match('Comma'))
+            this.take('RightParen'); if (this.match('Arrow') || this.match('FatArrow')) result = { kind: 'FunctionType', params: args, ...(rest ? { rest } : {}), result: this.type() }; else if (!rest && args.length === 1) result = args[0]; else this.fail('Expected function return type after -> or =>')
         } else if (this.match('LeftBracket')) {
             const elements: TypeNode[] = []
             if (!this.is('RightBracket')) do { elements.push(this.type()) } while (this.match('Comma') && !this.is('RightBracket'))
@@ -533,8 +542,8 @@ export class Parser {
             // A member chain may continue on the next indented line either with
             // a leading dot or after a trailing dot on the previous line.
             if (continuationLine(true)) continue
-            // Generic call type arguments are compile-time only: parse and discard them here.
-            if (this.is('Less') && (left.kind === 'Identifier' || left.kind === 'Member')) {
+            // A generic call can also follow a grouped arrow or a factory call.
+            if (this.is('Less') && (left.kind === 'Identifier' || left.kind === 'Member' || left.kind === 'Function' || left.kind === 'Call')) {
                 const saved = this.pos
                 try {
                     this.pos++
@@ -780,24 +789,15 @@ export class Parser {
             }
             return { kind: 'Identifier', name, loc }
         }
-        if (this.match('LeftParen')) {
-            const openingParen = this.tokens[this.pos - 1]
+        if (this.is('LeftParen') || this.is('Less')) {
+            const opening = this.current
+            const generic = this.match('Less')
+            const generics = generic ? this.genericParameters() : []
             const saved = this.pos
             let arrow = false
             try {
-                const params: Parameter[] = []
-                if (!this.is('RightParen')) {
-                    do {
-                        const rest = this.is('Dot') && this.tokens[this.pos + 1]?.type === 'Dot' && this.tokens[this.pos + 2]?.type === 'Dot'
-                        if (rest) this.pos += 3
-                        const { name, loc } = this.identifier(), type = this.match('Colon') ? this.type() : undefined
-                        if (rest && (!type || (type.kind !== 'ArrayType' && !(type.kind === 'GenericType' && (type.name === 'Array' || type.name === 'ReadonlyArray'))))) this.fail('A rest parameter must have an array type')
-                        params.push({ name, loc, type, rest })
-                    } while (this.match('Comma'))
-                }
-                this.take('RightParen')
-                const hasReturnType = this.match('Colon')
-                const returnType = hasReturnType ? this.type() : undefined
+                const params = this.parameters()
+                const returnType = this.match('Colon') ? this.type() : undefined
                 const newlineArrowBody = (): { body: Statement[]; expressionBody?: Expression } => {
                     this.take('Indent', 'Expected an indented function body')
                     let depth = 0, expressionBody = false
@@ -818,23 +818,21 @@ export class Parser {
                     this.take('Dedent')
                     return { body }
                 }
-                if (hasReturnType && this.match('FatArrow')) {
-                    arrow = true
-                    if (this.match('Newline')) {
-                        return { kind: 'Function', loc: this.loc(openingParen), params, returnType, ...newlineArrowBody() }
-                    }
-                    return { kind: 'Function', loc: this.loc(openingParen), params, returnType, body: [], expressionBody: this.expression() }
-                }
                 if (this.match('FatArrow')) {
                     arrow = true
-                    if (this.match('Newline')) {
-                        return { kind: 'Function', loc: this.loc(openingParen), params, returnType, ...newlineArrowBody() }
+                    const body = this.match('Newline') ? newlineArrowBody() : { body: [], expressionBody: this.expression() }
+                    return {
+                        kind: 'Function', loc: this.loc(opening), params, returnType, ...body,
+                        generics: generics.map(item => item.name),
+                        genericLocs: generics.map(item => item.loc),
+                        genericConstraints: generics.map(item => item.constraint),
+                        genericDefaults: generics.map(item => item.defaultType)
                     }
-                    const expressionBody = this.expression()
-                    return { kind: 'Function', loc: this.loc(openingParen), params, returnType, body: [], expressionBody }
                 }
-            } catch (error) { if (arrow) throw error /* Otherwise try parsing as a grouped expression. */ }
+                if (generic) this.fail("Expected '=>' after generic arrow parameters")
+            } catch (error) { if (generic || arrow) throw error /* Otherwise try parsing as a grouped expression. */ }
             this.pos = saved
+            this.take('LeftParen')
             const value = this.expression(); this.take('RightParen'); return value
         }
         if (this.match('LeftBracket')) {

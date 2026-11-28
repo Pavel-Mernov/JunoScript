@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testAsync.jn')
+const recordOutput = outputFor('testAsync.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { NativeProfile } from './testJnTs/native.ts'
 import {
     Promise,

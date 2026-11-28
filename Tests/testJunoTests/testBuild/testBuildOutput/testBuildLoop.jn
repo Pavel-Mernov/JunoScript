@@ -1,6 +1,7 @@
 import { outputFor } from '../../output.cjs'
 
-const checkOutput = outputFor('testBuild/testBuildOutput/testBuildLoop.jn')
+const recordOutput = outputFor('testBuild/testBuildOutput/testBuildLoop.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { Range } from 'juno:types'
 
 for const num of Range(3)

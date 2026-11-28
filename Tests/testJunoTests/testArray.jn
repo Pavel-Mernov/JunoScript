@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testArray.jn')
+const recordOutput = outputFor('testArray.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { Array, Range, Tuple } from 'juno:types'
 import { console, Math } from 'juno'
 

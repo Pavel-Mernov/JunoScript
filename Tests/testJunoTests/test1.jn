@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('test1.jn')
+const recordOutput = outputFor('test1.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 # Anonymous arrow functions and nullable types
 
 const foo = (a: number): number? =>

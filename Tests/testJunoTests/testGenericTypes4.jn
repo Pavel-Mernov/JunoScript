@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testGenericTypes4.jn')
+const recordOutput = outputFor('testGenericTypes4.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { Items, KeyOf, Exclude, Tuple } from 'juno:types'
 
 const literalItems = Items<'name' | 7 | 'active'>()

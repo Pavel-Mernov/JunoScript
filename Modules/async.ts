@@ -49,11 +49,11 @@ function isRejectedResult(value: unknown): value is { ok: false; error: unknown 
 
 export { PromiseFactory as Promise }
 
-export function setTimeout(callback: AsyncCallback, delay?: number, ...args: unknown[]): TimerHandle {
-    return globalThis.setTimeout(callback, delay ?? 0, ...args)
+export function setTimeout<T, TArgs extends any[]>(callback: (...args: TArgs) => T, delay: number, ...args: TArgs): T {
+    return globalThis.setTimeout(callback, delay, ...args) as unknown as T
 }
 
-export function setInterval(callback: AsyncCallback, delay?: number, ...args: unknown[]): TimerHandle {
+export function setInterval<T, TArgs extends any[]>(callback: (...args: TArgs) => T, delay?: number, ...args: TArgs): TimerHandle {
     return globalThis.setInterval(callback, delay ?? 0, ...args)
 }
 

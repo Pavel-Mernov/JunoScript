@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testSet.jn')
+const recordOutput = outputFor('testSet.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { Set, ValueSet } from 'juno:types'
 
 const left = Set(1, 2, 3)

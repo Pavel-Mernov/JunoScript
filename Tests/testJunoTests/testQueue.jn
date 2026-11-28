@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testQueue.jn')
+const recordOutput = outputFor('testQueue.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { Queue } from 'juno:types'
 
 checkOutput('=== Queue tests ===')

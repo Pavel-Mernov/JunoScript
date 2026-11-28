@@ -840,12 +840,18 @@ var Parser = class _Parser {
       result = { kind: "ObjectType", members };
     } else if (this.match("LeftParen")) {
       const args = [];
+      let rest;
       if (!this.is("RightParen")) do {
-        args.push(this.type());
+        if (rest) this.fail("A rest parameter must be the last parameter");
+        const variadic = this.match("Ellipsis");
+        if (this.is("Identifier") && this.tokens[this.pos + 1]?.type === "Colon") this.pos += 2;
+        const argument = this.type();
+        if (variadic) rest = argument;
+        else args.push(argument);
       } while (this.match("Comma"));
       this.take("RightParen");
-      if (this.match("Arrow") || this.match("FatArrow")) result = { kind: "FunctionType", params: args, result: this.type() };
-      else if (args.length === 1) result = args[0];
+      if (this.match("Arrow") || this.match("FatArrow")) result = { kind: "FunctionType", params: args, ...rest ? { rest } : {}, result: this.type() };
+      else if (!rest && args.length === 1) result = args[0];
       else this.fail("Expected function return type after -> or =>");
     } else if (this.match("LeftBracket")) {
       const elements = [];
@@ -896,7 +902,7 @@ var Parser = class _Parser {
     };
     while (true) {
       if (continuationLine(true)) continue;
-      if (this.is("Less") && (left.kind === "Identifier" || left.kind === "Member")) {
+      if (this.is("Less") && (left.kind === "Identifier" || left.kind === "Member" || left.kind === "Function" || left.kind === "Call")) {
         const saved = this.pos;
         try {
           this.pos++;
@@ -1219,24 +1225,15 @@ var Parser = class _Parser {
       }
       return { kind: "Identifier", name, loc };
     }
-    if (this.match("LeftParen")) {
-      const openingParen = this.tokens[this.pos - 1];
+    if (this.is("LeftParen") || this.is("Less")) {
+      const opening = this.current;
+      const generic = this.match("Less");
+      const generics = generic ? this.genericParameters() : [];
       const saved = this.pos;
       let arrow = false;
       try {
-        const params = [];
-        if (!this.is("RightParen")) {
-          do {
-            const rest = this.is("Dot") && this.tokens[this.pos + 1]?.type === "Dot" && this.tokens[this.pos + 2]?.type === "Dot";
-            if (rest) this.pos += 3;
-            const { name, loc } = this.identifier(), type = this.match("Colon") ? this.type() : void 0;
-            if (rest && (!type || type.kind !== "ArrayType" && !(type.kind === "GenericType" && (type.name === "Array" || type.name === "ReadonlyArray")))) this.fail("A rest parameter must have an array type");
-            params.push({ name, loc, type, rest });
-          } while (this.match("Comma"));
-        }
-        this.take("RightParen");
-        const hasReturnType = this.match("Colon");
-        const returnType = hasReturnType ? this.type() : void 0;
+        const params = this.parameters();
+        const returnType = this.match("Colon") ? this.type() : void 0;
         const newlineArrowBody = () => {
           this.take("Indent", "Expected an indented function body");
           let depth = 0, expressionBody = false;
@@ -1264,25 +1261,27 @@ var Parser = class _Parser {
           this.take("Dedent");
           return { body };
         };
-        if (hasReturnType && this.match("FatArrow")) {
-          arrow = true;
-          if (this.match("Newline")) {
-            return { kind: "Function", loc: this.loc(openingParen), params, returnType, ...newlineArrowBody() };
-          }
-          return { kind: "Function", loc: this.loc(openingParen), params, returnType, body: [], expressionBody: this.expression() };
-        }
         if (this.match("FatArrow")) {
           arrow = true;
-          if (this.match("Newline")) {
-            return { kind: "Function", loc: this.loc(openingParen), params, returnType, ...newlineArrowBody() };
-          }
-          const expressionBody = this.expression();
-          return { kind: "Function", loc: this.loc(openingParen), params, returnType, body: [], expressionBody };
+          const body = this.match("Newline") ? newlineArrowBody() : { body: [], expressionBody: this.expression() };
+          return {
+            kind: "Function",
+            loc: this.loc(opening),
+            params,
+            returnType,
+            ...body,
+            generics: generics.map((item) => item.name),
+            genericLocs: generics.map((item) => item.loc),
+            genericConstraints: generics.map((item) => item.constraint),
+            genericDefaults: generics.map((item) => item.defaultType)
+          };
         }
+        if (generic) this.fail("Expected '=>' after generic arrow parameters");
       } catch (error) {
-        if (arrow) throw error;
+        if (generic || arrow) throw error;
       }
       this.pos = saved;
+      this.take("LeftParen");
       const value = this.expression();
       this.take("RightParen");
       return value;
@@ -2050,12 +2049,12 @@ function promiseConstructor() {
     inheritedType: { kind: "ObjectType", members: [
       { ...method("then", [{ name: "onFulfilled", type: callback(t, u) }], promiseOf(u)), generics: ["U"] },
       { ...method("catch", [{ name: "onRejected", type: callback(named("unknown"), u) }], promiseOf(u)), generics: ["U"] },
-      method("finally", [{ name: "onFinally", type: { kind: "FunctionType", params: [], result: named("void") } }], promiseOf(t))
+      method("finally", [{ name: "onFinally", type: { kind: "FunctionType", params: [], result: named("null") } }], promiseOf(t))
     ] },
     overloads: [{
       params: [{ name: "executor", type: { kind: "FunctionType", params: [
-        { kind: "FunctionType", params: [{ kind: "UnionType", types: [t, promiseOf(t), rejectedResult] }], result: named("void") }
-      ], result: named("void") } }],
+        { kind: "FunctionType", params: [{ kind: "UnionType", types: [t, promiseOf(t), rejectedResult] }], result: named("null") }
+      ], result: named("null") } }],
       returnType: promiseOf(t)
     }],
     methods: [
@@ -2070,24 +2069,27 @@ function promiseConstructor() {
       { name: "race", generics: ["U"], params: [{ name: "values", type: arrayOf({ kind: "UnionType", types: [u, promiseOf(u)] }) }], returnType: promiseOf(u) },
       { name: "withResolvers", generics: ["U"], params: [], returnType: { kind: "ObjectType", members: [
         field("promise", promiseOf(u)),
-        field("resolve", { kind: "FunctionType", params: [{ kind: "UnionType", types: [u, promiseOf(u), rejectedResult] }], result: named("void") }),
-        field("reject", { kind: "FunctionType", params: [named("unknown")], result: named("void") })
+        field("resolve", { kind: "FunctionType", params: [{ kind: "UnionType", types: [u, promiseOf(u), rejectedResult] }], result: named("null") }),
+        field("reject", { kind: "FunctionType", params: [named("unknown")], result: named("null") })
       ] } }
     ]
   };
 }
 function asyncModuleType() {
   const timerHandle = named("TimerHandle"), immediateHandle = named("ImmediateHandle");
-  const timer = { kind: "FunctionType", params: [{ kind: "FunctionType", params: [], result: named("void") }, named("number")], result: timerHandle };
+  const timerMethods = ["setTimeout", "setInterval"].map((name) => {
+    const symbol = asyncImportedSymbol(name);
+    if (symbol?.kind !== "fun") throw new Error("Missing async timer declaration");
+    return { ...method(name, symbol.params, symbol.returnType), generics: symbol.generics, genericConstraints: symbol.genericConstraints };
+  });
   return { kind: "ObjectType", members: [
     field("Promise", { kind: "FunctionType", params: [named("unknown")], result: promiseOf(named("unknown")) }),
-    field("setTimeout", timer),
-    field("setInterval", timer),
-    field("clearTimeout", { kind: "FunctionType", params: [timerHandle], result: named("void") }),
-    field("clearInterval", { kind: "FunctionType", params: [timerHandle], result: named("void") }),
-    field("setImmediate", { kind: "FunctionType", params: [{ kind: "FunctionType", params: [], result: named("void") }], result: immediateHandle }),
-    field("clearImmediate", { kind: "FunctionType", params: [immediateHandle], result: named("void") }),
-    field("queueMicrotask", { kind: "FunctionType", params: [{ kind: "FunctionType", params: [], result: named("void") }], result: named("void") }),
+    ...timerMethods,
+    field("clearTimeout", { kind: "FunctionType", params: [timerHandle], result: named("null") }),
+    field("clearInterval", { kind: "FunctionType", params: [timerHandle], result: named("null") }),
+    field("setImmediate", { kind: "FunctionType", params: [{ kind: "FunctionType", params: [], result: named("null") }], result: immediateHandle }),
+    field("clearImmediate", { kind: "FunctionType", params: [immediateHandle], result: named("null") }),
+    field("queueMicrotask", { kind: "FunctionType", params: [{ kind: "FunctionType", params: [], result: named("null") }], result: named("null") }),
     field("fetch", { kind: "FunctionType", params: [named("FetchInput"), named("FetchOptions")], result: promiseOf(named("FetchResponse")) })
   ] };
 }
@@ -2098,16 +2100,22 @@ function moduleType(module2) {
 }
 function asyncImportedSymbol(name) {
   if (name === "Promise") return promiseConstructor();
-  const callback = { kind: "FunctionType", params: [], result: named("void") };
-  if (name === "setTimeout" || name === "setInterval") return { kind: "fun", params: [
-    { name: "callback", type: callback },
-    { name: "delay", type: named("number"), defaultValue: { kind: "Literal", value: 0 } },
-    { name: "args", type: arrayOf(named("unknown")), rest: true }
-  ], returnType: named("TimerHandle") };
+  const callback = { kind: "FunctionType", params: [], result: named("null") };
+  if (name === "setTimeout" || name === "setInterval") return {
+    kind: "fun",
+    generics: ["T", "TArgs"],
+    genericConstraints: [void 0, arrayOf(named("any"))],
+    params: [
+      { name: "callback", type: { kind: "FunctionType", params: [], rest: named("TArgs"), result: named("T") } },
+      { name: "delay", type: named("number"), ...name === "setInterval" ? { defaultValue: { kind: "Literal", value: 0 } } : {} },
+      { name: "args", type: named("TArgs"), rest: true }
+    ],
+    returnType: named(name === "setTimeout" ? "T" : "TimerHandle")
+  };
   if (name === "setImmediate") return { kind: "fun", params: [{ name: "callback", type: callback }, { name: "args", type: arrayOf(named("unknown")), rest: true }], returnType: named("ImmediateHandle") };
-  if (name === "clearTimeout" || name === "clearInterval") return { kind: "fun", params: [{ name: "handle", type: named("TimerHandle") }], returnType: named("void") };
-  if (name === "clearImmediate") return { kind: "fun", params: [{ name: "handle", type: named("ImmediateHandle") }], returnType: named("void") };
-  if (name === "queueMicrotask") return { kind: "fun", params: [{ name: "callback", type: callback }], returnType: named("void") };
+  if (name === "clearTimeout" || name === "clearInterval") return { kind: "fun", params: [{ name: "handle", type: named("TimerHandle") }], returnType: named("null") };
+  if (name === "clearImmediate") return { kind: "fun", params: [{ name: "handle", type: named("ImmediateHandle") }], returnType: named("null") };
+  if (name === "queueMicrotask") return { kind: "fun", params: [{ name: "callback", type: callback }], returnType: named("null") };
   if (name === "fetch") return { kind: "fun", params: [{ name: "input", type: named("FetchInput") }, { name: "init", type: named("FetchOptions"), defaultValue: { kind: "Literal", value: null } }], returnType: promiseOf(named("FetchResponse")) };
   const member = asyncModuleType().kind === "ObjectType" ? asyncModuleType().members.find((item) => item.name === name) : void 0;
   if (!member || member.type.kind !== "FunctionType") return void 0;
@@ -2124,6 +2132,7 @@ function asyncTypeScriptFile() {
   ].find((candidate) => fs2.existsSync(candidate));
 }
 function asyncTypeScriptSymbol(name) {
+  if (name === "setTimeout" || name === "setInterval") return asyncImportedSymbol(name);
   if (!cachedAsyncTypeScriptDeclarations) {
     try {
       const fs2 = require("node:fs");
@@ -2187,7 +2196,7 @@ function printType(type) {
       return members.length ? `{ ${members.join(", ")} }` : "{}";
     }
     case "FunctionType":
-      return `(${type.params.map(printType).join(", ")}) -> ${printType(type.result)}`;
+      return `(${[...type.params.map(printType), ...type.rest ? [`...args: ${printType(type.rest)}`] : []].join(", ")}) -> ${printType(type.result)}`;
   }
 }
 function printParam(param) {
@@ -2253,7 +2262,11 @@ function instantiate(type, generics, args, defaults = []) {
     if (node.kind === "ArrayType") return { ...node, element: replace(node.element) };
     if (node.kind === "IndexedAccessType") return { ...node, object: replace(node.object), index: replace(node.index) };
     if (node.kind === "ConditionalType") return { ...node, check: replace(node.check), target: replace(node.target), consequent: replace(node.consequent), alternate: replace(node.alternate) };
-    if (node.kind === "FunctionType") return { ...node, params: node.params.map(replace), result: replace(node.result) };
+    if (node.kind === "FunctionType") {
+      const rest = node.rest && replace(node.rest);
+      const tuple = rest?.kind === "ObjectType" ? rest.members.filter((member) => /^\d+$/.test(member.name)).map((member) => member.type) : rest?.kind === "GenericType" && rest.name === "Tuple" ? rest.args : void 0;
+      return { ...node, params: [...node.params.map(replace), ...tuple ?? []], rest: tuple ? void 0 : rest, result: replace(node.result) };
+    }
     if (node.kind === "ObjectType") return { ...node, members: node.members.map((member) => ({ ...member, type: replace(member.type), indexType: member.indexType ? replace(member.indexType) : void 0, params: member.params?.map((param) => ({ ...param, type: param.type ? replace(param.type) : void 0 })) })) };
     return node;
   };
@@ -2905,9 +2918,9 @@ function isAssignableTo(expected, actual, env) {
   }
   if (target.kind === "ArrayType" && value.kind === "ArrayType") return isAssignableTo(target.element, value.element, env);
   if (target.kind === "ArrayType" && value.kind === "GenericType" && value.name === "Tuple") return value.args.every((element) => isAssignableTo(target.element, element, env));
-  if (target.kind === "ArrayType" && value.kind === "ObjectType") {
+  if (expected.kind === "ArrayType" && value.kind === "ObjectType") {
     const numeric = value.members.filter((member) => member.indexType && isAssignableTo(member.indexType, named("number"), env) || member.name !== "" && Number.isFinite(Number(member.name)) && String(Number(member.name)) === member.name);
-    return numeric.length > 0 && numeric.every((member) => isAssignableTo(target.element, member.type, env));
+    return numeric.length > 0 && numeric.every((member) => isAssignableTo(expected.element, member.type, env));
   }
   if (target.kind === "FunctionType") {
     const callable = callableType(value, env);
@@ -2953,7 +2966,7 @@ function hostType(source) {
       if (type.kind === "GenericType") return { ...type, args: type.args.map(adapt) };
       if (type.kind === "ArrayType") return { ...type, element: adapt(type.element) };
       if (type.kind === "UnionType" || type.kind === "IntersectionType") return { ...type, types: type.types.map(adapt) };
-      if (type.kind === "FunctionType") return { ...type, params: type.params.map(adapt), result: adapt(type.result) };
+      if (type.kind === "FunctionType") return { ...type, params: type.params.map(adapt), rest: type.rest && adapt(type.rest), result: adapt(type.result) };
       if (type.kind === "ObjectType") return { ...type, members: type.members.map((member) => ({
         ...member,
         type: adapt(member.type),
@@ -3136,9 +3149,9 @@ function hostDeclarations(source) {
     }
     localTypes.set(match[1], match[2] ? hostType(match[2]) : inferHostValue(source.slice(start, end)));
   }
-  const functions = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<([^>]+)>)?\s*\(([^)]*)\)\s*(?::\s*([^\n{]+))?/g;
+  const functions = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<([^>]+)>)?\s*\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*(?::\s*([^\n{]+))?/g;
   for (const match of source.matchAll(functions)) {
-    const params = match[3].trim() ? match[3].split(",").map((raw, index) => {
+    const params = match[3].trim() ? splitTopLevel(match[3]).map((raw, index) => {
       const part = raw.trim(), rest = part.startsWith("...");
       const clean = rest ? part.slice(3) : part;
       const separator = clean.indexOf(":");
@@ -3151,9 +3164,9 @@ function hostDeclarations(source) {
     const generics = match[2]?.split(",").map((item) => item.trim().split(/\s+(?:extends|is)\s+|\s*=/)[0]) ?? [];
     result.set(match[1], { kind: "fun", generics, params, returnType: hostType(match[4]) });
   }
-  const arrowFunctions = /export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:<([^>]+)>\s*)?\(([^)]*)\)\s*(?::\s*([^=\n]+?))?\s*=>\s*([^\n;]+)/g;
+  const arrowFunctions = /export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:<([^>]+)>\s*)?\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*(?::\s*([^=\n]+?))?\s*=>\s*([^\n;]+)/g;
   for (const match of source.matchAll(arrowFunctions)) {
-    const params = match[3].trim() ? match[3].split(",").map((raw, index) => {
+    const params = match[3].trim() ? splitTopLevel(match[3]).map((raw, index) => {
       const part = raw.trim(), rest = part.startsWith("...");
       const clean = rest ? part.slice(3) : part;
       const separator = clean.indexOf(":");
@@ -3370,8 +3383,9 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
     });
     else if (declaration.kind === "Variable") {
       const type = declaration.type ? expandLocalAliases(declaration.type) : declaration.initializer ? inferExpression(declaration.initializer, declarationEnv) : named("any");
-      declarationEnv.set(declaration.name, { kind: "var", mutable: declaration.mutable, type });
-      if (exported) result.set(declaration.name, { kind: "var", type });
+      const symbol = !declaration.mutable && !declaration.type ? genericFunctionExpression(declaration.initializer, declarationEnv) : void 0;
+      declarationEnv.set(declaration.name, symbol ?? { kind: "var", mutable: declaration.mutable, type });
+      if (exported) result.set(declaration.name, symbol ?? { kind: "var", type });
     } else if (declaration.kind === "Destructure" && exported) {
       const source = inferExpression(declaration.initializer, declarationEnv);
       for (const binding of declaration.bindings) {
@@ -3392,7 +3406,7 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
       } catch {
       }
       for (const name of importedStatement.namedImports) {
-        const symbol = declarations.get(name) ?? asyncImportedSymbol(name);
+        const symbol = name === "setTimeout" || name === "setInterval" ? asyncImportedSymbol(name) : declarations.get(name) ?? asyncImportedSymbol(name);
         if (symbol && symbol.kind !== "module" && symbol.kind !== "type") result.set(name, symbol);
         else if (symbol?.kind === "type") result.set(name, symbol);
       }
@@ -3719,7 +3733,7 @@ function inferGenericArguments(generics, params, args, env) {
     if (param.rest) {
       const restType = parameterType(param);
       if (restType.kind === "NamedType" && generics.includes(restType.name)) {
-        const elements = args.slice(index).map((arg2) => inferExpression(arg2, env));
+        const elements = args.slice(index).map((arg) => inferExpression(arg, env));
         const element2 = elements.length ? unionOf(elements) : named("any");
         inferred.set(restType.name, {
           kind: "ObjectType",
@@ -3734,16 +3748,35 @@ function inferGenericArguments(generics, params, args, env) {
       }
       const element = restType.kind === "ArrayType" ? restType.element : restType.kind === "GenericType" && restType.name === "Array" ? restType.args[0] : void 0;
       if (element && args.length > index) {
-        const actuals = args.slice(index).map((arg2) => inferGenericExpression(arg2, env));
+        const actuals = args.slice(index).map((arg) => inferGenericExpression(arg, env));
         const actual = actuals.every((type) => type.kind === "ArrayType") ? arrayOf(unionOf(actuals.map((type) => type.element))) : unionOf(actuals);
         collect(element, actual);
       }
       return;
     }
+  });
+  params.forEach((param, index) => {
     const arg = args[index];
-    if (arg) collect(parameterType(param), inferGenericExpression(arg, env));
+    if (param.rest || !arg) return;
+    const pattern = parameterType(param);
+    if (pattern.kind === "FunctionType" && pattern.rest && arg.kind === "Function") {
+      const contextual = instantiate(pattern, generics, generics.map((name) => inferred.get(name) ?? named(name)));
+      if (contextual.kind === "FunctionType") {
+        const callbackParams = arg.params.map((item, i) => ({ ...item, type: item.type ?? contextual.params[i] ?? (contextual.rest?.kind === "ArrayType" ? contextual.rest.element : void 0) }));
+        const result = arg.returnType ?? (arg.expressionBody ? inferExpression(arg.expressionBody, bindInferredParameters(callbackParams, env)) : inferFunctionReturnType2(arg.body, env, callbackParams));
+        collect(pattern.result, expressionFunctionReturnType(arg, result));
+        return;
+      }
+    }
+    collect(pattern, inferGenericExpression(arg, env));
   });
   return generics.map((name) => inferred.get(name) ?? named("any"));
+}
+function genericFunctionExpression(expression, env) {
+  if (expression?.kind !== "Function" || !expression.generics?.length) return void 0;
+  const { generics, genericConstraints, genericDefaults, params } = expression;
+  const result = expression.returnType ?? (expression.expressionBody ? inferExpression(expression.expressionBody, bindInferredParameters(params, env)) : inferFunctionReturnType2(expression.body, env, params));
+  return { kind: "fun", generics, genericConstraints, genericDefaults, params, returnType: expressionFunctionReturnType(expression, result) };
 }
 function functionGenericArguments(symbol, call, env) {
   const generics = symbol.generics ?? [];
@@ -4130,8 +4163,8 @@ function inferExpression(expression, env) {
         const input = promiseValueType(inferExpression(expression.callee.object, env), env);
         if (input) return promiseOf(unionOf([input, callbackResultType(expression.args[0], named("unknown"), env)]));
       }
-      if (expression.callee.kind === "Identifier") {
-        const functionSymbol = env.get(expression.callee.name);
+      {
+        const functionSymbol = expression.callee.kind === "Identifier" ? env.get(expression.callee.name) : genericFunctionExpression(expression.callee, env);
         if (functionSymbol?.kind === "fun" && functionSymbol.generics?.length) {
           const typeArguments = functionGenericArguments(functionSymbol, expression, env);
           return instantiate(functionSymbol.returnType, functionSymbol.generics, typeArguments);
@@ -4657,7 +4690,8 @@ var Analyzer = class {
           this.addDiagnostic(statement.initializer.loc, `Type '${printType(inferExpression(statement.initializer, env))}' is not assignable to type '${printType(statement.type)}'.`);
         }
         const keyConstraint = statement.initializer?.kind === "Member" && (statement.initializer.property === "pick" || statement.initializer.property === "omit") ? resolveType({ kind: "GenericType", name: "KeyOf", args: [inferExpression(statement.initializer.object, env)] }, env) : void 0;
-        const symbol = { kind: "var", mutable: statement.mutable, type: statement.type ?? type, keyConstraint };
+        const generic = !statement.mutable && !statement.type ? genericFunctionExpression(statement.initializer, env) : void 0;
+        const symbol = generic ?? { kind: "var", mutable: statement.mutable, type: statement.type ?? type, keyConstraint };
         this.bind(env, statement.name, symbol);
         const printed = printSymbol(statement.name, symbol);
         let description = symbolTypeDescription(statement.name, symbol, env);
@@ -5232,7 +5266,7 @@ var Analyzer = class {
         }
         const calleeType = resolveType(inferExpression(expression.callee, env), env);
         const directCallable = callableType(calleeType, env);
-        const directFunction = expression.callee.kind === "Identifier" ? env.get(expression.callee.name) : void 0;
+        const directFunction = expression.callee.kind === "Identifier" ? env.get(expression.callee.name) : genericFunctionExpression(expression.callee, env);
         const genericArguments = directFunction?.kind === "fun" && directFunction.generics?.length ? functionGenericArguments(directFunction, expression, env) : void 0;
         if (directFunction?.kind === "fun" && genericArguments) {
           directFunction.generics.forEach((_name, index) => {
@@ -5427,11 +5461,12 @@ var Analyzer = class {
     const local = bindInferredParameters(expression.params, genericEnv);
     const contextual = contextualType ? removeNull(resolveType(contextualType, env)) : void 0;
     if (contextual?.kind === "FunctionType") expression.params.forEach((param, index) => {
-      if (!param.type && contextual.params[index]) local.set(param.name, { kind: "var", mutable: true, type: contextual.params[index] });
+      const type = contextual.params[index] ?? (contextual.rest?.kind === "ArrayType" ? contextual.rest.element : void 0);
+      if (!param.type && type) local.set(param.name, { kind: "var", mutable: true, type });
     });
     for (const [index, param] of expression.params.entries()) {
       const contextualParameter = contextual?.kind === "FunctionType" ? contextual.params[index] : void 0;
-      const type = contextualParameter ?? local.get(param.name).type;
+      const type = param.type ?? contextualParameter ?? local.get(param.name).type;
       if (!param.type && param.defaultValue !== void 0) {
         const index2 = expression.params.indexOf(param);
         expression.params[index2] = { ...param, type };

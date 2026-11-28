@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testMap.jn')
+const recordOutput = outputFor('testMap.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { Map, ValueMap } from 'juno:types'
 
 const map = Map(['one', 1], ['two', 2])

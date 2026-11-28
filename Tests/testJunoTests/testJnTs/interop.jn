@@ -1,6 +1,7 @@
 import { outputFor } from '../output.cjs'
 
-const checkOutput = outputFor('testJnTs/interop.jn')
+const recordOutput = outputFor('testJnTs/interop.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import {
     createProfile,
     formatValue,

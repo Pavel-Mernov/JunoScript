@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testTryExpression.jn')
+const recordOutput = outputFor('testTryExpression.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { Error, Result, ok } from 'juno:types'
 
 const successful : Result<number> = ok(42)

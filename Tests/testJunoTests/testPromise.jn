@@ -1,6 +1,7 @@
 import { outputFor } from './output.cjs'
 
-const checkOutput = outputFor('testPromise.jn')
+const recordOutput = outputFor('testPromise.jn')
+const checkOutput = <TArgs is any[]>(...args: TArgs) => recordOutput(...args)
 import { Promise, setTimeout, clearTimeout } from 'juno:async'
 
 checkOutput('sync: before promise')
