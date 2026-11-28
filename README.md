@@ -1391,6 +1391,64 @@ expect.not.toThrow(() => RegEx('abc'))
 
 Анализатор восстанавливается после нескольких синтаксических ошибок, поэтому hover и inference продолжают работать в остальных частях файла.
 
+## Пакеты npm
+
+- `@junoscript/juno` устанавливает CLI `junode` и рантайм со встроенными модулями `juno`, `juno:node`, `juno:async` и `juno:types`.
+- `@junoscript/juno-node` предоставляет Node.js-хелперы как отдельный пакет. Файловые операции доступны через `@junoscript/juno-node/fs`.
+- `@junoscript/juno-express` предоставляет `ExpressServer` для .jn и устанавливает Express как зависимость.
+
+Требуется Node.js 22.18 или новее. После публикации пакетов их можно установить в проект и запустить `npx junode server.jn`.
+
+```sh
+npm install @junoscript/juno @junoscript/juno-node @junoscript/juno-express
+```
+
+```jn
+import { ExpressServer } from '@junoscript/juno-express'
+import { readEnv } from '@junoscript/juno-node'
+```
+
+В `juno-express` можно подключить проверку тела к конкретному маршруту. При `json: true` Express разбирает JSON, а `validateBody` проверяет результат перед вызовом обработчика. Если проверка вернула `false`, сервер отвечает `400 Bad Request`.
+
+```jn
+import { ExpressServer, HttpRequest } from '@junoscript/juno-express'
+import { Promise } from 'juno:async'
+
+type Payload = { field: number }
+
+const app = ExpressServer({
+    json: true
+    handlers: {
+        '/items': {
+            POST: {
+                validateBody: (body) => isType<Payload>(body)
+                handle: (request: HttpRequest<Payload>) => Promise.resolve({ body: request.body!.field })
+            }
+        }
+    }
+})
+
+app.listen(3000)
+```
+
+Имена npm-пакетов разрешаются относительно импортирующего .jn-файла с учётом `exports` и `main`. Сборка и запуск используют те же пути, что и анализатор VS Code.
+
+В репозитории `npm run test:packages` собирает все три пакета, упаковывает их и проверяет установку архивов в чистом проекте. Для подготовки архивов вручную:
+
+```sh
+npm ci
+npm run build
+npm pack --workspaces
+```
+
+Владелец скоупа `@junoscript` может опубликовать пакеты из корня репозитория после проверки архивов:
+
+```sh
+npm publish --workspace @junoscript/juno --access public
+npm publish --workspace @junoscript/juno-node --access public
+npm publish --workspace @junoscript/juno-express --access public
+```
+
 ## Тестовые программы
 
 Из корня проекта выполните:

@@ -1,0 +1,13 @@
+{
+  "name": "@junoscript/juno-express",
+  "version": "0.1.1",
+  "description": "Express 5 server API for JunoScript",
+  "main": "./dist/expressServer.jn",
+  "exports": "./dist/expressServer.jn",
+  "files": ["dist"],
+  "engines": { "node": ">=22.18.0" },
+  "publishConfig": { "access": "public" },
+  "scripts": { "prepack": "node ../../scripts/stage-npm.cjs juno-express" },
+  "dependencies": { "express": "^5.3.0" },
+  "peerDependencies": { "@junoscript/juno": "^0.1.0" }
+}

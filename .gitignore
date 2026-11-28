@@ -2,3 +2,5 @@
 node_modules/
 dist/
 .build-tools/
+/packages/juno/Modules/
+/packages/juno/types/

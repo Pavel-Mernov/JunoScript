@@ -1,0 +1,113 @@
+import { createApp, createRouter, configureBody, registerRoute, sendResponse, entries, routeEntries, listen } from './express-native.cjs'
+import { Promise } from 'juno:async'
+
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS' | 'ALL'
+
+type Headers = Record<string, string | string[]>
+
+type Params = Record<string, string | string[]>
+
+# Типы полей соответствуют Express Request. body и query задаёт вызывающий код.
+export type HttpRequest<TBody = any, TQuery = Record<string, any>> = {
+    method ?: HttpMethod
+    path: string
+    originalUrl: string
+    headers: Headers
+    params?: Params
+    query?: TQuery
+    body?: TBody
+}
+
+# Возвращаемое описание ответа. Объекты отправляются как JSON, строки как текст.
+export type Response<TBody> = {
+    status?: number
+    headers?: Headers
+    body?: TBody
+}
+
+export type RequestHandler = fun<TBody, TQuery, TResponse>(request: HttpRequest<TBody, TQuery>) => Promise<Response<TResponse>>
+
+# В цепочке null передаёт запрос следующему обработчику.
+export type Middleware = fun<TBody, TQuery, TResponse>(request: HttpRequest<TBody, TQuery>) => Promise<Response<TResponse>?>
+export type RequestHandlers = RequestHandler | Middleware[]
+
+# Проверка выполняется после разбора тела и до вызова обработчиков.
+export type BodyCheckedHandler = {
+    validateBody: fun(body: any) => boolean
+    handle: RequestHandlers
+}
+
+export type Endpoint = RequestHandlers | BodyCheckedHandler
+export type EndPoints = Partial<Record<HttpMethod, Endpoint>>
+
+export type Router = Record<string, EndPoints | Endpoint>
+
+export type BodyParserOptions = {
+    limit?: string | number
+    inflate?: boolean
+    type?: string | string[]
+}
+
+export type JsonParserOptions = BodyParserOptions & { strict?: boolean }
+export type TextParserOptions = BodyParserOptions & { defaultCharset?: string }
+
+export type ServerConfiguration = {
+    json?: boolean | JsonParserOptions
+    plainText?: boolean | TextParserOptions
+    # Ключ роутера — префикс Express, например '/api'.
+    routers?: Record<string, Router>
+    # Например, { '/users/:id': { GET: handler } }. Ключ 'GET /users/:id' тоже поддерживается.
+    handlers?: Router
+    port ?: number
+    host: string = '127.0.0.1'
+}
+
+export type ListeningServer = {
+    address(): { port: number, address: string, family: string }?
+    close(): any
+}
+
+fun registerRoutes(target: any, routes: Router) =
+    const routesToRegister: Tuple<string, Endpoint>[] = routeEntries(routes)
+    for const entry of routesToRegister
+        const endpoint = entry[1]
+        const callback = (request: HttpRequest, reply: any, next: any) =>
+            let handlers: RequestHandlers
+            if isType<BodyCheckedHandler>(endpoint)
+                if !endpoint.validateBody(request.body)
+                    sendResponse({ status: 400, body: 'Bad Request' }, reply)
+                    return
+                handlers = endpoint.handle
+            else
+                handlers = endpoint
+            if isType<Middleware[]>(handlers)
+                for const handler of handlers
+                    const response = await handler(request)
+                    if response != null
+                        sendResponse(response, reply)
+                        return
+                next()
+            else
+                const handler = handlers.as<RequestHandler>()
+                sendResponse(await handler(request), reply)
+
+        registerRoute(target, entry[0], callback)
+
+# listen() берёт адрес из конфигурации. Без port ОС выбирает свободный порт.
+export constructor ExpressServer {
+    fun (config: ServerConfiguration) =
+        const app = createApp()
+
+        configureBody(app, config.json, config.plainText)
+
+        registerRoutes(app, config.handlers ?? {})
+        const routers: Tuple<string, Router>[] = entries(config.routers ?? {})
+        for const entry of routers
+            const router = createRouter(app, entry[0])
+            registerRoutes(router, entry[1])
+
+        return {
+            listen(port: number = config.port ?? 0, host: string = config.host ?? '127.0.0.1'): ListeningServer =
+                return listen(app, port, host)
+        }
+}

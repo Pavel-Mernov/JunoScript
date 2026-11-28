@@ -1,0 +1,21 @@
+{
+  "name": "@junoscript/juno",
+  "version": "0.1.0",
+  "description": "JunoScript runtime, standard library and junode CLI",
+  "main": "./dist/Runtime/interpreter.js",
+  "types": "./dist/Runtime/interpreter.d.ts",
+  "exports": {
+    ".": "./dist/Runtime/interpreter.js",
+    "./modules": "./dist/Modules/index.js"
+  },
+  "bin": { "junode": "./dist/CLI/junode.js" },
+  "files": ["dist", "types", "Modules"],
+  "engines": { "node": ">=22.18.0" },
+  "publishConfig": { "access": "public" },
+  "scripts": { "prepack": "node ../../scripts/stage-npm.cjs juno" },
+  "dependencies": {
+    "@jest/fake-timers": "^30.5.2",
+    "expect": "^30.5.2",
+    "jest-mock": "^30.5.2"
+  }
+}

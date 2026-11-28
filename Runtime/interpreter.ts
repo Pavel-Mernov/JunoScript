@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs'
-import { isAbsolute, resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { Expression, Loc, MatchPattern, Parameter, Statement, TypeMember, TypeNode, parse } from '../Lexer/parser'
 import { resolveModule } from '../Modules'
 import { analyze, hostDeclarations } from '../vscode-junoscript/src/language.js'
+import { resolveImport, siblingDeclaration } from './resolve-import'
 
 type Binding = { value: unknown; mutable: boolean; declaredType?: TypeNode }
 type TypeAlias = { value: TypeNode; generics: string[]; genericDefaults?: (TypeNode | undefined)[] }
@@ -297,55 +298,30 @@ export class Interpreter {
 
     private loadLocalModule(specifier: string, env: Environment): Record<string, unknown> {
         const junoTypeModule = specifier === 'juno:types' ? 'index' : /^juno:types\/(.+)$/.exec(specifier)?.[1]
-        if (!junoTypeModule && !specifier.startsWith('.') && !isAbsolute(specifier)) throw new Error(`Unsupported module '${specifier}'`)
-        const base = junoTypeModule
-            ? resolve(__dirname, '../../types', junoTypeModule)
-            : resolve(this.currentDirectory, specifier)
-        const candidates = /\.(?:jn|[cm]?[jt]s)$/i.test(base) ? [base] : [
-            `${base}.jn`, `${base}.js`, `${base}.ts`,
-            resolve(base, 'index.jn'), resolve(base, 'index.js'), resolve(base, 'index.ts')
-        ]
-        let source: string | undefined
-        let file = candidates[0]
-        for (const candidate of candidates) {
-            try { source = readFileSync(candidate, 'utf8'); file = candidate; break } catch { /* try next candidate */ }
-        }
-        if (source === undefined) throw new Error(`Cannot find module '${specifier}'`)
+        const target = junoTypeModule ? resolve(__dirname, '../../types', junoTypeModule) : specifier
+        const file = resolveImport(target, this.currentFile ?? resolve(this.currentDirectory, 'index.jn'))
+        if (!file) throw new Error(`Cannot find module '${specifier}'`)
+        const source = readFileSync(file, 'utf8')
         if (!/\.jn$/i.test(file)) {
             const loaded = require(file) as Record<string, unknown>
             const nativeModule = loaded && (typeof loaded === 'object' || typeof loaded === 'function') ? loaded : { default: loaded }
             const module: Record<string, unknown> = { ...nativeModule }
-            const declarations = hostDeclarations(source)
+            const declarationFile = siblingDeclaration(file)
+            const declarations = hostDeclarations(declarationFile ? readFileSync(declarationFile, 'utf8') : source)
             const runtimeTypes: Record<string, TypeAlias> = {}
             for (const [name, symbol] of declarations) if (symbol.kind === 'type') {
                 runtimeTypes[name] = { value: symbol.value, generics: symbol.generics, genericDefaults: symbol.genericDefaults }
             }
-            if (Object.keys(runtimeTypes).length) {
-                const existing = (module as Record<string, unknown>).__junoTypes
-                if (existing && typeof existing === 'object') Object.assign(existing, runtimeTypes)
-                else Object.defineProperty(module, '__junoTypes', { value: runtimeTypes, configurable: true })
-            }
+            const aliases = { ...nativeModule.__junoTypes as Record<string, TypeAlias> | undefined, ...runtimeTypes }
+            if (Object.keys(aliases).length) Object.defineProperty(module, '__junoTypes', { value: aliases, configurable: true })
             return module
         }
         const previousDirectory = this.currentDirectory
         const previousFile = this.currentFile
-        this.currentDirectory = resolve(base, '..')
+        this.currentDirectory = dirname(file)
         this.currentFile = file
         const moduleEnv: Environment = { bindings: new Map(), types: new Map(), parent: env }
         this.sourceFiles.set(moduleEnv, file)
-        const importedModule = (specifier: string, importer: Environment): Record<string, unknown> => {
-            if (specifier === 'juno:types' || specifier.startsWith('juno:types/')) return this.loadLocalModule(specifier, importer)
-            const moduleBase = resolve(this.currentDirectory, specifier)
-            const options = /\.(?:jn|[cm]?[jt]s)$/i.test(moduleBase) ? [moduleBase] : [
-                `${moduleBase}.jn`, `${moduleBase}.js`, `${moduleBase}.ts`,
-                resolve(moduleBase, 'index.jn'), resolve(moduleBase, 'index.js'), resolve(moduleBase, 'index.ts')
-            ]
-            const target = options.find(candidate => { try { return readFileSync(candidate).length >= 0 } catch { return false } })
-            if (!target) throw new Error(`Cannot find module '${specifier}'`)
-            const saved = this.currentDirectory
-            this.currentDirectory = resolve(target, '..')
-            try { return this.loadLocalModule(target, importer) } finally { this.currentDirectory = saved }
-        }
         const exported: Record<string, unknown> = {}
         const statements = parse(source)
         for (const statement of statements) {
@@ -378,19 +354,6 @@ export class Interpreter {
                 if (declaration.kind === 'TypeDeclaration') {
                     const alias = moduleEnv.types.get(declaration.name)
                     if (alias) (exported as any).__types ??= {}, (exported as any).__types[declaration.name] = alias
-                }
-            } else if (statement.kind === 'Import') {
-                const dependency = ['juno', 'juno:node', 'juno:types', 'juno:async', 'juno:node:fs', 'juno:test', 'types'].includes(statement.module)
-                    ? resolveModule(statement.module) as Record<string, unknown>
-                    : importedModule(statement.module, moduleEnv)
-                if (statement.defaultImport) this.declare(moduleEnv, statement.defaultImport, this.adaptModule(dependency, moduleEnv), false)
-                for (const name of statement.namedImports) {
-                    if (dependency[name] !== undefined) this.declare(moduleEnv, name, this.adaptNativeValue(dependency[name]), false)
-                    else if ((dependency as any).__junoTypes?.[name]) {
-                        const alias = (dependency as any).__junoTypes[name] as TypeAlias
-                        moduleEnv.types.set(name, alias)
-                        this.declare(moduleEnv, name, { __junoTypeConstructor: true, typeName: name, typeNode: alias.value, generics: alias.generics }, false)
-                    } else throw new Error(`Module '${statement.module}' has no export '${name}'`)
                 }
             } else this.execute(statement, moduleEnv)
         }

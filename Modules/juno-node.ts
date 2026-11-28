@@ -1,4 +1,18 @@
-import { readSync } from 'node:fs'
+import { readFileSync, readSync } from 'node:fs'
+import { parseEnv } from 'node:util'
+import type { TypeNode } from '../Lexer/parser'
+
+export type Path = { path: string }
+
+const pathType: TypeNode = {
+    kind: 'ObjectType',
+    members: [{ name: 'path', type: { kind: 'NamedType', name: 'string' }, optional: false, readonly: false, constant: false }]
+}
+
+/** Read a UTF-8 .env file without modifying process.env. */
+export function readEnv(source: string | Path): Record<string, any> {
+    return parseEnv(readFileSync(typeof source === 'string' ? source : source.path, 'utf8'))
+}
 
 /** Node.js console module with synchronous stdin helpers. */
 export const console = {
@@ -46,5 +60,6 @@ function readLine(encoding: string): string {
     return Buffer.from(bytes).toString(encoding as BufferEncoding)
 }
 
-const junoNode = { console }
+const junoNode = { console, readEnv }
+Object.defineProperty(junoNode, '__junoTypes', { value: { Path: { value: pathType, generics: [] } } })
 export default junoNode

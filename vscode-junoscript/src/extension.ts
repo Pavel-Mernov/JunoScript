@@ -27,7 +27,7 @@ async function importCandidates(document: vscode.TextDocument, name: string): Pr
 
     const standardModules: Record<string, string[]> = {
         juno: ['console', 'Math', 'types', 'Error', 'Range', 'Iterable', 'Boolean', 'Number', 'String'],
-        'juno:node': ['console'],
+        'juno:node': ['console', 'Path', 'readEnv'],
         'juno:node:fs': ['FileStat', ...['readFile', 'writeFile', 'appendFile', 'exists', 'mkdir', 'readdir', 'remove', 'rename', 'copyFile', 'stat'].flatMap(name => [name, `${name}Sync`])],
         'juno:async': ['Promise', 'RejectedResult', 'TimerHandle', 'ImmediateHandle', 'AsyncCallback', 'FetchInput', 'FetchOptions', 'FetchResponse', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'setImmediate', 'clearImmediate', 'queueMicrotask', 'fetch'],
         'juno:types': ['Iterable', 'Range', 'Array', 'Set', 'ValueSet', 'Map', 'ValueMap', 'Queue', 'Object', 'Boolean', 'Tuple', 'Random', 'Error', 'Result', 'ok', 'Partial', 'Required', 'Readonly', 'Pick', 'Omit', 'KeyOf', 'Exclude', 'Items']

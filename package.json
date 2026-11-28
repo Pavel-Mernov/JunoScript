@@ -2,18 +2,21 @@
   "name": "junoscript",
   "version": "0.1.0",
   "private": true,
+  "workspaces": ["packages/*"],
   "bin": {
     "junode": "./dist/CLI/junode.js"
   },
   "scripts": {
-    "build": "tsc --target ES2022 --module commonjs --moduleResolution node --strict --skipLibCheck --types node --outDir .build-tools Lexer/lexer.ts Lexer/parser.ts CLI/generate-juno-types.ts && node .build-tools/CLI/generate-juno-types.js && tsc",
+    "build": "tsc --target ES2022 --module commonjs --moduleResolution node --strict --skipLibCheck --types node --outDir .build-tools Lexer/lexer.ts Lexer/parser.ts CLI/generate-juno-types.ts && node .build-tools/CLI/generate-juno-types.js && tsc && node scripts/stage-npm.cjs",
     "start": "node ./dist/CLI/junode.js",
     "test:build": "node Tests/testBuild/run.cjs",
     "test:fs": "node Tests/testFs/run.cjs",
-    "test:juno": "npm run build && node Tests/testJunoTests/run.cjs"
+    "test:juno": "npm run build && node Tests/testJunoTests/run.cjs",
+    "test:packages": "npm run build && node scripts/test-npm.cjs"
   },
   "devDependencies": {
-    "@types/node": "^26.6.5"
+    "@types/node": "^26.6.5",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
     "@jest/fake-timers": "^30.5.2",

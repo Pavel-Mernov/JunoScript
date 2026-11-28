@@ -1,5 +1,6 @@
 // @ts-nocheck -- this analyzer is bundled by esbuild for the VS Code extension.
 import { Expression, Loc, MatchPattern, Parameter, Statement, TypeMember, TypeNode, parse } from '../../Lexer/parser'
+import { resolveImport, siblingDeclaration } from '../../Runtime/resolve-import'
 
 export type HoverInfo = {
     line: number
@@ -159,9 +160,14 @@ function asyncModuleType(): TypeNode {
     ] }
 }
 
+const nodePathType: TypeNode = { kind: 'ObjectType', members: [field('path', named('string'))] }
+const readEnvParams: Parameter[] = [{ name: 'source', type: { kind: 'UnionType', types: [named('string'), nodePathType] } }]
+const readEnvResult: TypeNode = { kind: 'GenericType', name: 'Record', args: [named('string'), named('any')] }
+
 function moduleType(module: 'juno' | 'juno:node' | 'juno:types' | 'juno:async' | 'types'): TypeNode {
     if (module === 'juno:async') return asyncModuleType()
     if (module === 'juno:types' || module === 'types') return typeUtilitiesType()
+    if (module === 'juno:node') return { kind: 'ObjectType', members: [field('console', consoleType(), true), method('readEnv', readEnvParams, readEnvResult)] }
     return { kind: 'ObjectType', members: [field('console', consoleType(), true), ...(module === 'juno' ? [field('Math', mathType(), true), field('types', typeUtilitiesType(), true)] : [])] }
 }
 
@@ -254,7 +260,16 @@ export function printType(type: TypeNode): string {
             })
             return members.length ? `{ ${members.join(', ')} }` : '{}'
         }
-        case 'FunctionType': return `(${[...type.params.map(printType), ...(type.rest ? [`...args: ${printType(type.rest)}`] : [])].join(', ')}) -> ${printType(type.result)}`
+        case 'FunctionType': {
+            const params = type.params.map((param, index) => {
+                const name = type.paramNames?.[index]
+                return name ? `${name}: ${printType(param)}` : printType(param)
+            })
+            if (type.rest) params.push(`...${type.restName ?? 'args'}: ${printType(type.rest)}`)
+            const generics = type.genericParameters?.map(({ name, constraint, defaultType }) =>
+                `${name}${constraint ? ` is ${printType(constraint)}` : ''}${defaultType ? ` = ${printType(defaultType)}` : ''}`)
+            return `${generics ? `fun<${generics.join(', ')}>` : ''}(${params.join(', ')}) ${generics ? '=>' : '->'} ${printType(type.result)}`
+        }
     }
 }
 
@@ -503,6 +518,11 @@ function indexedAccessType(objectType: TypeNode, keyType: TypeNode, env: Env): T
     const collect = (owner: TypeNode): boolean => {
         if (owner.kind === 'UnionType') return owner.types.every(collect)
         if (owner.kind === 'IntersectionType') return owner.types.some(collect)
+        if (owner.kind === 'GenericType' && owner.name === 'Record' && owner.args.length === 2) {
+            if (!keys.every(key => isAssignableTo(owner.args[0], key, env))) return false
+            result.push(owner.args[1])
+            return true
+        }
         const arrayLike = owner.kind === 'ArrayType' || owner.kind === 'GenericType' && (owner.name === 'Array' || owner.name === 'ReadonlyArray')
         const element = owner.kind === 'ArrayType' ? owner.element : owner.kind === 'GenericType' ? owner.args[0] ?? named('any') : undefined
         if (arrayLike) return keys.every(key => {
@@ -1155,7 +1175,7 @@ export function hostDeclarations(source: string): Map<string, ImportedSymbol> {
         }
         localTypes.set(match[1], match[2] ? hostType(match[2]) : inferHostValue(source.slice(start, end)))
     }
-    const functions = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<([^>]+)>)?\s*\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*(?::\s*([^\n{]+))?/g
+    const functions = /export\s+(?:declare\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<([^>]+)>)?\s*\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*(?::\s*([^\n{;]+))?/g
     for (const match of source.matchAll(functions)) {
         const params = match[3].trim() ? splitTopLevel(match[3]).map((raw, index): Parameter => {
             const part = raw.trim(), rest = part.startsWith('...')
@@ -1398,7 +1418,7 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
     if (!filePath) return result
     for (const statement of statements) {
         const importedStatement = statement.kind === 'Import' ? statement : statement.kind === 'Export' && statement.declaration.kind === 'Import' ? statement.declaration : undefined
-        if (!importedStatement || (!importedStatement.module.startsWith('.') && importedStatement.module !== 'juno:async' && importedStatement.module !== 'juno:node:fs' && importedStatement.module !== 'juno:test' && importedStatement.module !== 'juno:types' && !importedStatement.module.startsWith('juno:types/'))) continue
+        if (!importedStatement) continue
         if (importedStatement.module === 'juno:async') {
             const asyncFile = asyncTypeScriptFile()
             let declarations = new Map<string, ImportedSymbol>()
@@ -1462,7 +1482,7 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
             }
             continue
         }
-        let base: string
+        let specifier = importedStatement.module
         if (importedStatement.module === 'juno:types' || importedStatement.module.startsWith('juno:types/')) {
             const relativeModule = importedStatement.module === 'juno:types' ? 'index' : importedStatement.module.slice('juno:types/'.length)
             let directory = path.dirname(path.resolve(filePath))
@@ -1474,18 +1494,18 @@ function importedDeclarations(statements: Statement[], filePath?: string, seen =
                 if (parent === directory) break
                 directory = parent
             }
-            base = found ?? path.resolve(__dirname, '../../types', relativeModule)
-        } else base = path.resolve(path.dirname(filePath), importedStatement.module)
-        const candidates = /\.(?:jn|[cm]?[jt]s)$/i.test(base) ? [base] : [
-            `${base}.jn`, `${base}.js`, `${base}.ts`,
-            path.resolve(base, 'index.jn'), path.resolve(base, 'index.js'), path.resolve(base, 'index.ts')
-        ]
-        const importedFile = candidates.find(candidate => fs.existsSync(candidate))
+            specifier = found ?? path.resolve(__dirname, '../../types', relativeModule)
+        } else if (specifier === 'juno' || specifier.startsWith('juno:') || specifier === 'types') continue
+        const importedFile = resolveImport(specifier, filePath)
         if (!importedFile || seen.has(importedFile)) continue
         seen.add(importedFile)
         try {
             if (!/\.jn$/i.test(importedFile)) {
                 const declarations = hostDeclarations(fs.readFileSync(importedFile, 'utf8'))
+                const tsDeclaration = siblingDeclaration(importedFile)
+                if (tsDeclaration) {
+                    for (const [name, symbol] of hostDeclarations(fs.readFileSync(tsDeclaration, 'utf8'))) declarations.set(name, symbol)
+                }
                 const signatureFile = `${importedFile}.d.jn`
                 if (fs.existsSync(signatureFile)) {
                     const signatures = parse(fs.readFileSync(signatureFile, 'utf8'), { validate: false, filePath: signatureFile })
@@ -2674,7 +2694,7 @@ class Analyzer {
                     this.addHover(statement.defaultImport, statement.defaultImportLoc, printed.code, printed.docs)
                 }
                 statement.namedImports.forEach((name, index) => {
-                    const importedAlias = statement.importedTypes?.[name]
+                    const importedAlias = statement.module === 'juno:node' && name === 'Path' ? nodePathType : statement.importedTypes?.[name]
                     const importedSymbol = statement.importedSymbols?.[name]
                     const asyncSymbol = statement.module === 'juno:async'
                         ? name === 'Promise' ? promiseConstructor() : asyncTypeScriptSymbol(name) ?? asyncImportedSymbol(name)
@@ -2685,7 +2705,10 @@ class Analyzer {
                         : name === 'types' && statement.module === 'juno' ? typeUtilitiesType()
                         : (statement.module === 'juno:types' || statement.module === 'types') && ['Partial', 'Required', 'Readonly', 'Pick', 'Omit', 'KeyOf', 'Exclude'].includes(name) ? typeUtilitiesType().kind === 'ObjectType' ? typeUtilitiesType().members.find(member => member.name === name)?.type ?? named('any') : named('any')
                         : named('any')
-                    const symbol: SymbolInfo = asyncSymbol ?? (itemsImport
+                    const readEnvSymbol: SymbolInfo | undefined = statement.module === 'juno:node' && name === 'readEnv'
+                        ? { kind: 'fun', generics: [], params: readEnvParams, returnType: readEnvResult, docs: 'Reads a UTF-8 .env file without modifying process.env.' }
+                        : undefined
+                    const symbol: SymbolInfo = readEnvSymbol ?? asyncSymbol ?? (itemsImport
                         ? { kind: 'fun', generics: ['T'], genericConstraints: [{ kind: 'UnionType', types: [named('string'), named('number')] }], params: [], returnType: arrayOf(named('T')), docs: 'Creates an array from a union of string or number literal types.' }
                         : importedSymbol?.kind === 'fun'
                         ? { kind: 'fun', generics: importedSymbol.generics, genericConstraints: importedSymbol.genericConstraints, genericDefaults: importedSymbol.genericDefaults, params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named('any'), docs: imported }
@@ -3033,10 +3056,19 @@ class Analyzer {
                 this.walkType(type.consequent, env)
                 this.walkType(type.alternate, env)
                 return
-            case 'FunctionType':
-                type.params.forEach(param => this.walkType(param, env))
-                this.walkType(type.result, env)
+            case 'FunctionType': {
+                const local = new Map(env)
+                for (const { name, loc, constraint, defaultType } of type.genericParameters ?? []) {
+                    this.addHover(name, loc, `(type parameter) ${name}`)
+                    if (constraint) this.walkType(constraint, local)
+                    if (defaultType) this.walkType(defaultType, local)
+                    local.set(name, { kind: 'type', generics: [], value: constraint ?? defaultType ?? named('any'), typeParameter: true })
+                }
+                type.params.forEach(param => this.walkType(param, local))
+                if (type.rest) this.walkType(type.rest, local)
+                this.walkType(type.result, local)
                 return
+            }
             case 'ObjectType':
                 for (const member of type.members) {
                     if (!member.method || !member.body) continue

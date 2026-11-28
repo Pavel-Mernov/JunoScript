@@ -1,0 +1,15 @@
+{
+  "name": "@junoscript/juno-node",
+  "version": "0.1.0",
+  "description": "Node.js console, environment and filesystem helpers for JunoScript",
+  "main": "./dist/juno-node.js",
+  "types": "./dist/juno-node.d.ts",
+  "exports": {
+    ".": "./dist/juno-node.js",
+    "./fs": "./dist/juno-node-fs.js"
+  },
+  "files": ["dist"],
+  "engines": { "node": ">=22.18.0" },
+  "publishConfig": { "access": "public" },
+  "scripts": { "prepack": "node ../../scripts/stage-npm.cjs juno-node" }
+}

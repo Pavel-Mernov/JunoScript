@@ -25,7 +25,13 @@ function printType(type: TypeNode, generics: Set<string>): string {
         case 'ConditionalType': return `${printType(type.check, generics)} extends ${printType(type.target, generics)} ? ${printType(type.consequent, generics)} : ${printType(type.alternate, generics)}`
         case 'UnionType': return `(${type.types.map(part => printType(part, generics)).join(' | ')})`
         case 'IntersectionType': return `(${type.types.map(part => printType(part, generics)).join(' & ')})`
-        case 'FunctionType': return `(${type.params.map((param, index) => `arg${index}: ${printType(param, generics)}`).join(', ')}) => ${printType(type.result, generics)}`
+        case 'FunctionType': {
+            const parameters = type.params.map((param, index) => `${type.paramNames?.[index] ?? `arg${index}`}: ${printType(param, generics)}`)
+            if (type.rest) parameters.push(`...${type.restName ?? 'args'}: ${printType(type.rest, generics)}`)
+            const genericParameters = type.genericParameters?.map(({ name, constraint, defaultType }) =>
+                `${name}${constraint ? ` extends ${printType(constraint, generics)}` : ''}${defaultType ? ` = ${printType(defaultType, generics)}` : ''}`)
+            return `${genericParameters ? `<${genericParameters.join(', ')}>` : ''}(${parameters.join(', ')}) => ${printType(type.result, generics)}`
+        }
         case 'ObjectType': return `{ ${type.members.map(member => {
             const prefix = `${member.readonly ? 'readonly ' : ''}${member.name}${member.optional ? '?' : ''}`
             if (member.accessor === 'get') return `get ${member.name}(): ${printType(member.type, generics)}`

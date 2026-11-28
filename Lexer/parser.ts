@@ -1,7 +1,8 @@
 import { Lexer, Token, TokenType } from './lexer'
 
 export type Loc = { line: number; column: number }
-export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'LiteralType'; value: string | number | boolean; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'IndexedAccessType'; object: TypeNode; index: TypeNode; loc?: Loc } | { kind: 'TypeOfType'; expression: Expression; loc?: Loc } | { kind: 'ConditionalType'; check: TypeNode; target: TypeNode; consequent: TypeNode; alternate: TypeNode; loc?: Loc } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; rest?: TypeNode; result: TypeNode }
+export type TypeNode = { kind: 'NamedType'; name: string; loc?: Loc } | { kind: 'LiteralType'; value: string | number | boolean; loc?: Loc } | { kind: 'GenericType'; name: string; args: TypeNode[]; loc?: Loc } | { kind: 'UnionType' | 'IntersectionType'; types: TypeNode[] } | { kind: 'ArrayType'; element: TypeNode } | { kind: 'IndexedAccessType'; object: TypeNode; index: TypeNode; loc?: Loc } | { kind: 'TypeOfType'; expression: Expression; loc?: Loc } | { kind: 'ConditionalType'; check: TypeNode; target: TypeNode; consequent: TypeNode; alternate: TypeNode; loc?: Loc } | { kind: 'ObjectType'; members: TypeMember[] } | { kind: 'FunctionType'; params: TypeNode[]; paramNames?: (string | undefined)[]; rest?: TypeNode; restName?: string; genericParameters?: GenericParameter[]; result: TypeNode }
+type GenericParameter = { name: string; loc: Loc; constraint?: TypeNode; defaultType?: TypeNode }
 export type TypeMember = { name: string; loc?: Loc; type: TypeNode; optional: boolean; readonly: boolean; sealed?: boolean; constant: boolean; defaultValue?: Expression; method?: boolean; accessor?: 'get' | 'set'; indexType?: TypeNode; generics?: string[]; genericLocs?: Loc[]; genericConstraints?: (TypeNode | undefined)[]; genericDefaults?: (TypeNode | undefined)[]; params?: Parameter[]; body?: Statement[] }
 export type Parameter = { name: string; loc?: Loc; type?: TypeNode; defaultValue?: Expression; rest?: boolean }
 export type MatchPattern =
@@ -351,8 +352,8 @@ export class Parser {
         }
         this.take('RightParen'); return params
     }
-    private genericParameters(): { name: string; loc: Loc; constraint?: TypeNode; defaultType?: TypeNode }[] {
-        const parameters: { name: string; loc: Loc; constraint?: TypeNode; defaultType?: TypeNode }[] = []
+    private genericParameters(): GenericParameter[] {
+        const parameters: GenericParameter[] = []
         let defaultSeen = false
         do {
             const parameter = this.identifier()
@@ -490,18 +491,36 @@ export class Parser {
                 members.push({ name, loc, optional, readonly, sealed, constant, type: accessorType, defaultValue, method, accessor, generics: genericParameters.map(item => item.name), genericLocs: genericParameters.map(item => item.loc), genericConstraints: genericParameters.map(item => item.constraint), genericDefaults: genericParameters.map(item => item.defaultType), params, body }); this.objectSeparators()
             }
             this.take('RightBrace'); result = { kind: 'ObjectType', members }
-        } else if (this.match('LeftParen')) {
+        } else if (this.is('Keyword', 'fun') || this.is('LeftParen')) {
+            const explicitFunction = this.match('Keyword', 'fun')
+            const genericParameters = explicitFunction && this.match('Less') ? this.genericParameters() : undefined
+            this.take('LeftParen', "Expected '(' in function type")
             const args: TypeNode[] = []
+            const paramNames: (string | undefined)[] = []
             let rest: TypeNode | undefined
+            let restName: string | undefined
             if (!this.is('RightParen')) do {
                 if (rest) this.fail('A rest parameter must be the last parameter')
                 const variadic = this.match('Ellipsis')
-                if (this.is('Identifier') && this.tokens[this.pos + 1]?.type === 'Colon') this.pos += 2
+                let name: string | undefined
+                if (this.is('Identifier') && this.tokens[this.pos + 1]?.type === 'Colon') {
+                    name = this.identifier().name
+                    this.take('Colon')
+                }
                 const argument = this.type()
-                if (variadic) rest = argument
-                else args.push(argument)
+                if (variadic) {
+                    rest = argument
+                    restName = name
+                } else {
+                    args.push(argument)
+                    paramNames.push(name)
+                }
             } while (this.match('Comma'))
-            this.take('RightParen'); if (this.match('Arrow') || this.match('FatArrow')) result = { kind: 'FunctionType', params: args, ...(rest ? { rest } : {}), result: this.type() }; else if (!rest && args.length === 1) result = args[0]; else this.fail('Expected function return type after -> or =>')
+            this.take('RightParen')
+            if (this.match('Arrow') || this.match('FatArrow')) {
+                result = { kind: 'FunctionType', params: args, paramNames, rest, restName, genericParameters, result: this.type() }
+            } else if (!explicitFunction && !rest && args.length === 1) result = args[0]
+            else this.fail('Expected function return type after -> or =>')
         } else if (this.match('LeftBracket')) {
             const elements: TypeNode[] = []
             if (!this.is('RightBracket')) do { elements.push(this.type()) } while (this.match('Comma') && !this.is('RightBracket'))

@@ -838,20 +838,35 @@ var Parser = class _Parser {
       }
       this.take("RightBrace");
       result = { kind: "ObjectType", members };
-    } else if (this.match("LeftParen")) {
+    } else if (this.is("Keyword", "fun") || this.is("LeftParen")) {
+      const explicitFunction = this.match("Keyword", "fun");
+      const genericParameters = explicitFunction && this.match("Less") ? this.genericParameters() : void 0;
+      this.take("LeftParen", "Expected '(' in function type");
       const args = [];
+      const paramNames = [];
       let rest;
+      let restName;
       if (!this.is("RightParen")) do {
         if (rest) this.fail("A rest parameter must be the last parameter");
         const variadic = this.match("Ellipsis");
-        if (this.is("Identifier") && this.tokens[this.pos + 1]?.type === "Colon") this.pos += 2;
+        let name;
+        if (this.is("Identifier") && this.tokens[this.pos + 1]?.type === "Colon") {
+          name = this.identifier().name;
+          this.take("Colon");
+        }
         const argument = this.type();
-        if (variadic) rest = argument;
-        else args.push(argument);
+        if (variadic) {
+          rest = argument;
+          restName = name;
+        } else {
+          args.push(argument);
+          paramNames.push(name);
+        }
       } while (this.match("Comma"));
       this.take("RightParen");
-      if (this.match("Arrow") || this.match("FatArrow")) result = { kind: "FunctionType", params: args, ...rest ? { rest } : {}, result: this.type() };
-      else if (!rest && args.length === 1) result = args[0];
+      if (this.match("Arrow") || this.match("FatArrow")) {
+        result = { kind: "FunctionType", params: args, paramNames, rest, restName, genericParameters, result: this.type() };
+      } else if (!explicitFunction && !rest && args.length === 1) result = args[0];
       else this.fail("Expected function return type after -> or =>");
     } else if (this.match("LeftBracket")) {
       const elements = [];
@@ -1766,9 +1781,9 @@ function validateArithmeticTypes(statements, variables = /* @__PURE__ */ new Map
   for (const statement of statements) if (statement.kind === "Import" && !statement.importedTypes) {
     try {
       const { readFileSync } = require("node:fs");
-      const { resolve: resolve2, dirname: dirname2 } = require("node:path");
+      const { resolve: resolve3, dirname: dirname3 } = require("node:path");
       if (statement.module.startsWith(".")) {
-        const base = resolve2(process.cwd(), statement.module);
+        const base = resolve3(process.cwd(), statement.module);
         const file = /\.jn$/i.test(base) ? base : `${base}.jn`;
         const imported = new Parser(Lexer(readFileSync(file, "utf8")).tokenize()).parse();
         for (const item of imported) if (item.kind === "Export" && item.declaration.kind === "TypeDeclaration") aliases.set(item.declaration.name, item.declaration.value);
@@ -1979,6 +1994,33 @@ function validateDeclarations(statements, initialNames = /* @__PURE__ */ new Set
   }
 }
 
+// ../Runtime/resolve-import.ts
+var import_node_fs = require("node:fs");
+var import_node_module = require("node:module");
+var import_node_path = require("node:path");
+function resolveImport(specifier, importer) {
+  const absoluteImporter = (0, import_node_path.resolve)(importer);
+  if (!specifier.startsWith(".") && !(0, import_node_path.isAbsolute)(specifier)) {
+    try {
+      const entry = (0, import_node_module.createRequire)(absoluteImporter).resolve(specifier);
+      return (0, import_node_path.isAbsolute)(entry) ? entry : void 0;
+    } catch {
+      return void 0;
+    }
+  }
+  const base = (0, import_node_path.resolve)((0, import_node_path.dirname)(absoluteImporter), specifier);
+  const extensions = [".jn", ".js", ".ts", ".cjs", ".mjs"];
+  const candidates = /\.(?:jn|[cm]?[jt]s)$/i.test(base) ? [base] : [
+    ...extensions.map((extension) => base + extension),
+    ...extensions.map((extension) => (0, import_node_path.resolve)(base, "index" + extension))
+  ];
+  return candidates.find((candidate) => (0, import_node_fs.statSync)(candidate, { throwIfNoEntry: false })?.isFile());
+}
+function siblingDeclaration(file) {
+  const declaration = file.replace(/\.(?:js|cjs|mjs)$/i, (extension) => extension === ".cjs" ? ".d.cts" : extension === ".mjs" ? ".d.mts" : ".d.ts");
+  return declaration !== file && (0, import_node_fs.statSync)(declaration, { throwIfNoEntry: false })?.isFile() ? declaration : void 0;
+}
+
 // src/language.ts
 var named = (name) => ({ kind: "NamedType", name });
 var arrayOf = (element) => ({ kind: "ArrayType", element });
@@ -2093,9 +2135,13 @@ function asyncModuleType() {
     field("fetch", { kind: "FunctionType", params: [named("FetchInput"), named("FetchOptions")], result: promiseOf(named("FetchResponse")) })
   ] };
 }
+var nodePathType = { kind: "ObjectType", members: [field("path", named("string"))] };
+var readEnvParams = [{ name: "source", type: { kind: "UnionType", types: [named("string"), nodePathType] } }];
+var readEnvResult = { kind: "GenericType", name: "Record", args: [named("string"), named("any")] };
 function moduleType(module2) {
   if (module2 === "juno:async") return asyncModuleType();
   if (module2 === "juno:types" || module2 === "types") return typeUtilitiesType();
+  if (module2 === "juno:node") return { kind: "ObjectType", members: [field("console", consoleType(), true), method("readEnv", readEnvParams, readEnvResult)] };
   return { kind: "ObjectType", members: [field("console", consoleType(), true), ...module2 === "juno" ? [field("Math", mathType(), true), field("types", typeUtilitiesType(), true)] : []] };
 }
 function asyncImportedSymbol(name) {
@@ -2195,8 +2241,15 @@ function printType(type) {
       });
       return members.length ? `{ ${members.join(", ")} }` : "{}";
     }
-    case "FunctionType":
-      return `(${[...type.params.map(printType), ...type.rest ? [`...args: ${printType(type.rest)}`] : []].join(", ")}) -> ${printType(type.result)}`;
+    case "FunctionType": {
+      const params = type.params.map((param, index) => {
+        const name = type.paramNames?.[index];
+        return name ? `${name}: ${printType(param)}` : printType(param);
+      });
+      if (type.rest) params.push(`...${type.restName ?? "args"}: ${printType(type.rest)}`);
+      const generics = type.genericParameters?.map(({ name, constraint, defaultType }) => `${name}${constraint ? ` is ${printType(constraint)}` : ""}${defaultType ? ` = ${printType(defaultType)}` : ""}`);
+      return `${generics ? `fun<${generics.join(", ")}>` : ""}(${params.join(", ")}) ${generics ? "=>" : "->"} ${printType(type.result)}`;
+    }
   }
 }
 function printParam(param) {
@@ -2424,6 +2477,11 @@ function indexedAccessType(objectType, keyType, env) {
   const collect = (owner) => {
     if (owner.kind === "UnionType") return owner.types.every(collect);
     if (owner.kind === "IntersectionType") return owner.types.some(collect);
+    if (owner.kind === "GenericType" && owner.name === "Record" && owner.args.length === 2) {
+      if (!keys.every((key) => isAssignableTo(owner.args[0], key, env))) return false;
+      result.push(owner.args[1]);
+      return true;
+    }
     const arrayLike = owner.kind === "ArrayType" || owner.kind === "GenericType" && (owner.name === "Array" || owner.name === "ReadonlyArray");
     const element = owner.kind === "ArrayType" ? owner.element : owner.kind === "GenericType" ? owner.args[0] ?? named("any") : void 0;
     if (arrayLike) return keys.every((key) => {
@@ -3149,7 +3207,7 @@ function hostDeclarations(source) {
     }
     localTypes.set(match[1], match[2] ? hostType(match[2]) : inferHostValue(source.slice(start, end)));
   }
-  const functions = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<([^>]+)>)?\s*\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*(?::\s*([^\n{]+))?/g;
+  const functions = /export\s+(?:declare\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<([^>]+)>)?\s*\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*(?::\s*([^\n{;]+))?/g;
   for (const match of source.matchAll(functions)) {
     const params = match[3].trim() ? splitTopLevel(match[3]).map((raw, index) => {
       const part = raw.trim(), rest = part.startsWith("...");
@@ -3397,7 +3455,7 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
   if (!filePath) return result;
   for (const statement of statements) {
     const importedStatement = statement.kind === "Import" ? statement : statement.kind === "Export" && statement.declaration.kind === "Import" ? statement.declaration : void 0;
-    if (!importedStatement || !importedStatement.module.startsWith(".") && importedStatement.module !== "juno:async" && importedStatement.module !== "juno:node:fs" && importedStatement.module !== "juno:test" && importedStatement.module !== "juno:types" && !importedStatement.module.startsWith("juno:types/")) continue;
+    if (!importedStatement) continue;
     if (importedStatement.module === "juno:async") {
       const asyncFile = asyncTypeScriptFile();
       let declarations = /* @__PURE__ */ new Map();
@@ -3425,12 +3483,12 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
         if (parent === directory) break;
         directory = parent;
       }
-      const candidates2 = [
+      const candidates = [
         path2.resolve(__dirname, "../../Modules/juno-node-fs.ts"),
         path2.resolve(__dirname, "../../../Modules/juno-node-fs.ts"),
         path2.resolve(process.cwd(), "Modules/juno-node-fs.ts")
       ];
-      const file = workspaceSource ?? candidates2.find((candidate) => fs2.existsSync(candidate));
+      const file = workspaceSource ?? candidates.find((candidate) => fs2.existsSync(candidate));
       if (file) {
         const declarations = hostDeclarations(fs2.readFileSync(file, "utf8"));
         for (const [name, symbol] of declarations) {
@@ -3452,12 +3510,12 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
         if (parent === directory) break;
         directory = parent;
       }
-      const candidates2 = [
+      const candidates = [
         path2.resolve(__dirname, "../../Modules/juno-test.jn"),
         path2.resolve(__dirname, "../../../Modules/juno-test.jn"),
         path2.resolve(process.cwd(), "Modules/juno-test.jn")
       ];
-      const file = workspaceSource ?? candidates2.find((candidate) => fs2.existsSync(candidate));
+      const file = workspaceSource ?? candidates.find((candidate) => fs2.existsSync(candidate));
       if (file) {
         const declarations = importedDeclarations(parse(fs2.readFileSync(file, "utf8"), { validate: false, filePath: file }));
         for (const name of importedStatement.namedImports) {
@@ -3467,7 +3525,7 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
       }
       continue;
     }
-    let base;
+    let specifier = importedStatement.module;
     if (importedStatement.module === "juno:types" || importedStatement.module.startsWith("juno:types/")) {
       const relativeModule = importedStatement.module === "juno:types" ? "index" : importedStatement.module.slice("juno:types/".length);
       let directory = path2.dirname(path2.resolve(filePath));
@@ -3482,22 +3540,18 @@ function importedDeclarations(statements, filePath, seen = /* @__PURE__ */ new S
         if (parent === directory) break;
         directory = parent;
       }
-      base = found ?? path2.resolve(__dirname, "../../types", relativeModule);
-    } else base = path2.resolve(path2.dirname(filePath), importedStatement.module);
-    const candidates = /\.(?:jn|[cm]?[jt]s)$/i.test(base) ? [base] : [
-      `${base}.jn`,
-      `${base}.js`,
-      `${base}.ts`,
-      path2.resolve(base, "index.jn"),
-      path2.resolve(base, "index.js"),
-      path2.resolve(base, "index.ts")
-    ];
-    const importedFile = candidates.find((candidate) => fs2.existsSync(candidate));
+      specifier = found ?? path2.resolve(__dirname, "../../types", relativeModule);
+    } else if (specifier === "juno" || specifier.startsWith("juno:") || specifier === "types") continue;
+    const importedFile = resolveImport(specifier, filePath);
     if (!importedFile || seen.has(importedFile)) continue;
     seen.add(importedFile);
     try {
       if (!/\.jn$/i.test(importedFile)) {
         const declarations2 = hostDeclarations(fs2.readFileSync(importedFile, "utf8"));
+        const tsDeclaration = siblingDeclaration(importedFile);
+        if (tsDeclaration) {
+          for (const [name, symbol] of hostDeclarations(fs2.readFileSync(tsDeclaration, "utf8"))) declarations2.set(name, symbol);
+        }
         const signatureFile = `${importedFile}.d.jn`;
         if (fs2.existsSync(signatureFile)) {
           const signatures = parse(fs2.readFileSync(signatureFile, "utf8"), { validate: false, filePath: signatureFile });
@@ -4601,12 +4655,13 @@ var Analyzer = class {
           this.addHover(statement.defaultImport, statement.defaultImportLoc, printed.code, printed.docs);
         }
         statement.namedImports.forEach((name, index) => {
-          const importedAlias = statement.importedTypes?.[name];
+          const importedAlias = statement.module === "juno:node" && name === "Path" ? nodePathType : statement.importedTypes?.[name];
           const importedSymbol = statement.importedSymbols?.[name];
           const asyncSymbol = statement.module === "juno:async" ? name === "Promise" ? promiseConstructor() : asyncTypeScriptSymbol(name) ?? asyncImportedSymbol(name) : void 0;
           const itemsImport = name === "Items" && (statement.module === "juno:types" || statement.module === "types");
           const type = importedAlias ? resolveType(importedAlias, env) : importedSymbol?.kind === "var" ? importedSymbol.type ?? named("any") : name === "console" ? consoleType() : name === "Math" && statement.module === "juno" ? mathType() : name === "types" && statement.module === "juno" ? typeUtilitiesType() : (statement.module === "juno:types" || statement.module === "types") && ["Partial", "Required", "Readonly", "Pick", "Omit", "KeyOf", "Exclude"].includes(name) ? typeUtilitiesType().kind === "ObjectType" ? typeUtilitiesType().members.find((member) => member.name === name)?.type ?? named("any") : named("any") : named("any");
-          const symbol = asyncSymbol ?? (itemsImport ? { kind: "fun", generics: ["T"], genericConstraints: [{ kind: "UnionType", types: [named("string"), named("number")] }], params: [], returnType: arrayOf(named("T")), docs: "Creates an array from a union of string or number literal types." } : importedSymbol?.kind === "fun" ? { kind: "fun", generics: importedSymbol.generics, genericConstraints: importedSymbol.genericConstraints, genericDefaults: importedSymbol.genericDefaults, params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named("any"), docs: imported } : importedSymbol?.kind === "constructor" && importedSymbol.inheritedType && importedSymbol.overloads ? { kind: "constructor", generics: importedSymbol.generics ?? [], genericConstraints: importedSymbol.genericConstraints, genericDefaults: importedSymbol.genericDefaults, inheritedType: importedSymbol.inheritedType, overloads: importedSymbol.overloads, methods: (importedSymbol.methods ?? []).map((method2) => ({ ...method2, generics: method2.generics ?? [] })), docs: imported } : {
+          const readEnvSymbol = statement.module === "juno:node" && name === "readEnv" ? { kind: "fun", generics: [], params: readEnvParams, returnType: readEnvResult, docs: "Reads a UTF-8 .env file without modifying process.env." } : void 0;
+          const symbol = readEnvSymbol ?? asyncSymbol ?? (itemsImport ? { kind: "fun", generics: ["T"], genericConstraints: [{ kind: "UnionType", types: [named("string"), named("number")] }], params: [], returnType: arrayOf(named("T")), docs: "Creates an array from a union of string or number literal types." } : importedSymbol?.kind === "fun" ? { kind: "fun", generics: importedSymbol.generics, genericConstraints: importedSymbol.genericConstraints, genericDefaults: importedSymbol.genericDefaults, params: importedSymbol.params ?? [], returnType: importedSymbol.returnType ?? named("any"), docs: imported } : importedSymbol?.kind === "constructor" && importedSymbol.inheritedType && importedSymbol.overloads ? { kind: "constructor", generics: importedSymbol.generics ?? [], genericConstraints: importedSymbol.genericConstraints, genericDefaults: importedSymbol.genericDefaults, inheritedType: importedSymbol.inheritedType, overloads: importedSymbol.overloads, methods: (importedSymbol.methods ?? []).map((method2) => ({ ...method2, generics: method2.generics ?? [] })), docs: imported } : {
             kind: importedAlias || importedSymbol?.kind === "type" ? "type" : "var",
             mutable: false,
             ...importedAlias || importedSymbol?.kind === "type" ? { generics: importedSymbol?.generics ?? [], genericConstraints: importedSymbol?.genericConstraints, genericDefaults: importedSymbol?.genericDefaults, value: importedAlias ?? importedSymbol?.value ?? named("any") } : { type },
@@ -4962,10 +5017,19 @@ var Analyzer = class {
         this.walkType(type.consequent, env);
         this.walkType(type.alternate, env);
         return;
-      case "FunctionType":
-        type.params.forEach((param) => this.walkType(param, env));
-        this.walkType(type.result, env);
+      case "FunctionType": {
+        const local = new Map(env);
+        for (const { name, loc, constraint, defaultType } of type.genericParameters ?? []) {
+          this.addHover(name, loc, `(type parameter) ${name}`);
+          if (constraint) this.walkType(constraint, local);
+          if (defaultType) this.walkType(defaultType, local);
+          local.set(name, { kind: "type", generics: [], value: constraint ?? defaultType ?? named("any"), typeParameter: true });
+        }
+        type.params.forEach((param) => this.walkType(param, local));
+        if (type.rest) this.walkType(type.rest, local);
+        this.walkType(type.result, local);
         return;
+      }
       case "ObjectType":
         for (const member of type.members) {
           if (!member.method || !member.body) continue;
@@ -5648,7 +5712,7 @@ async function importCandidates(document, name) {
   };
   const standardModules = {
     juno: ["console", "Math", "types", "Error", "Range", "Iterable", "Boolean", "Number", "String"],
-    "juno:node": ["console"],
+    "juno:node": ["console", "Path", "readEnv"],
     "juno:node:fs": ["FileStat", ...["readFile", "writeFile", "appendFile", "exists", "mkdir", "readdir", "remove", "rename", "copyFile", "stat"].flatMap((name2) => [name2, `${name2}Sync`])],
     "juno:async": ["Promise", "RejectedResult", "TimerHandle", "ImmediateHandle", "AsyncCallback", "FetchInput", "FetchOptions", "FetchResponse", "setTimeout", "setInterval", "clearTimeout", "clearInterval", "setImmediate", "clearImmediate", "queueMicrotask", "fetch"],
     "juno:types": ["Iterable", "Range", "Array", "Set", "ValueSet", "Map", "ValueMap", "Queue", "Object", "Boolean", "Tuple", "Random", "Error", "Result", "ok", "Partial", "Required", "Readonly", "Pick", "Omit", "KeyOf", "Exclude", "Items"]
